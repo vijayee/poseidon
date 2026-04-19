@@ -68,6 +68,7 @@ set(POSEIDON_SOURCES
     ${BLOOM_SRC_DIR}/bitset.c
     ${BLOOM_SRC_DIR}/bloom_filter.c
     ${BLOOM_SRC_DIR}/elastic_bloom_filter.c
+    ${BLOOM_SRC_DIR}/attenuated_bloom_filter.c
 )
 
 add_library(poseidon STATIC ${POSEIDON_SOURCES})
@@ -123,3 +124,4 @@ add_meridian_test(meridian_integration_test tests/meridian_integration_test.cpp)
 add_meridian_test(bloom_bitset_test tests/bloom_bitset_test.cpp)
 add_meridian_test(bloom_filter_test tests/bloom_filter_test.cpp)
 add_meridian_test(elastic_bloom_filter_test tests/elastic_bloom_filter_test.cpp)
+add_meridian_test(attenuated_bloom_filter_test tests/attenuated_bloom_filter_test.cpp)
