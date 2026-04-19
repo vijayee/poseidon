@@ -35,6 +35,7 @@ set(WORKERS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Workers)
 set(TIME_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Time)
 set(BUFFER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Buffer)
 set(BLOOM_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Bloom)
+set(QUASAR_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Network/Quasar)
 
 # Poseidon Library
 set(POSEIDON_SOURCES
@@ -47,6 +48,7 @@ set(POSEIDON_SOURCES
     ${MERIDIAN_SRC_DIR}/meridian_rendv.c
     ${MERIDIAN_SRC_DIR}/meridian_protocol.c
     ${UTIL_SRC_DIR}/allocator.c
+    ${UTIL_SRC_DIR}/memory_pool.c
     ${UTIL_SRC_DIR}/log.c
     ${UTIL_SRC_DIR}/vec.c
     ${UTIL_SRC_DIR}/mkdir_p.c
@@ -69,6 +71,7 @@ set(POSEIDON_SOURCES
     ${BLOOM_SRC_DIR}/bloom_filter.c
     ${BLOOM_SRC_DIR}/elastic_bloom_filter.c
     ${BLOOM_SRC_DIR}/attenuated_bloom_filter.c
+    ${QUASAR_SRC_DIR}/quasar.c
 )
 
 add_library(poseidon STATIC ${POSEIDON_SOURCES})
@@ -125,3 +128,4 @@ add_meridian_test(bloom_bitset_test tests/bloom_bitset_test.cpp)
 add_meridian_test(bloom_filter_test tests/bloom_filter_test.cpp)
 add_meridian_test(elastic_bloom_filter_test tests/elastic_bloom_filter_test.cpp)
 add_meridian_test(attenuated_bloom_filter_test tests/attenuated_bloom_filter_test.cpp)
+add_meridian_test(quasar_test tests/quasar_test.cpp)
