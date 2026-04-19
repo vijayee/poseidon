@@ -1,0 +1,33 @@
+# Build directories
+build/
+build-*/
+build_*
+references
+# IDE
+.idea/
+cmake-build-debug/
+
+# Reference materials
+reference/old_session.md
+reference/
+Testing/
+tests/test_database_fixed.cpp
+reference/
+
+# Benchmark results
+.benchmarks/*_current.json
+.benchmarks/performance_report.json
+benchmark_*.txt
+
+# Benchmark results
+.benchmarks/
+*.json
+!.github/
+!CMakeLists.txt
+!bindings/nodejs/*.json
+
+
+# Dart bindings
+bindings/dart/.dart_tool/
+bindings/dart/libwavedb.so
+bindings/dart/pubspec.lock

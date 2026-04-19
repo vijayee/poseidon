@@ -1,0 +1,426 @@
+//
+// Memory Pool Allocator Implementation
+//
+
+#include "memory_pool.h"
+#include "allocator.h"
+#include "log.h"
+#include <string.h>
+
+// Global memory pool
+static memory_pool_t g_pool = {0};
+
+// Static memory pools (allocated once at init)
+static uint8_t g_small_pool[MEMORY_POOL_SMALL_SIZE * MEMORY_POOL_SMALL_COUNT];
+static uint8_t g_medium_pool[MEMORY_POOL_MEDIUM_SIZE * MEMORY_POOL_MEDIUM_COUNT];
+static uint8_t g_large_pool[MEMORY_POOL_LARGE_SIZE * MEMORY_POOL_LARGE_COUNT];
+
+// Thread-local caches for each size class
+static __thread tls_cache_t tls_small = {0};
+static __thread tls_cache_t tls_medium = {0};
+static __thread tls_cache_t tls_large = {0};
+
+// Track if TLS caches are initialized for this thread
+static __thread int tls_initialized = 0;
+
+// Initialize a size class pool
+static void memory_pool_class_init(memory_pool_class_t* cls, uint8_t* pool,
+                                   size_t block_size, size_t total_blocks) {
+    platform_lock_init(&cls->lock);
+    cls->pool_start = pool;
+    cls->block_size = block_size;
+    cls->total_blocks = total_blocks;
+    cls->free_blocks = total_blocks;
+
+    // Initialize free list - all blocks are free
+    cls->free_list = (memory_pool_block_t*)pool;
+    memory_pool_block_t* current = cls->free_list;
+
+    for (size_t i = 0; i < total_blocks - 1; i++) {
+        current->next = (memory_pool_block_t*)(pool + (i + 1) * block_size);
+        current = current->next;
+    }
+    current->next = NULL;
+}
+
+// Destroy a size class pool
+static void memory_pool_class_destroy(memory_pool_class_t* cls) {
+    platform_lock_destroy(&cls->lock);
+}
+
+// Initialize thread-local caches
+static void tls_cache_init(void) {
+    if (tls_initialized) return;
+
+    tls_small.count = 0;
+    tls_small.block_size = MEMORY_POOL_SMALL_SIZE;
+
+    tls_medium.count = 0;
+    tls_medium.block_size = MEMORY_POOL_MEDIUM_SIZE;
+
+    tls_large.count = 0;
+    tls_large.block_size = MEMORY_POOL_LARGE_SIZE;
+
+    tls_initialized = 1;
+}
+
+// Determine size class for allocation
+static memory_pool_size_class_e memory_pool_get_class(size_t size) {
+    if (size <= MEMORY_POOL_SMALL_SIZE) {
+        return MEMORY_POOL_SMALL;
+    } else if (size <= MEMORY_POOL_MEDIUM_SIZE) {
+        return MEMORY_POOL_MEDIUM;
+    } else if (size <= MEMORY_POOL_LARGE_SIZE) {
+        return MEMORY_POOL_LARGE;
+    } else {
+        return MEMORY_POOL_FALLBACK;
+    }
+}
+
+// Allocate from a specific class
+static void* memory_pool_class_alloc(memory_pool_class_t* cls) {
+    platform_lock(&cls->lock);
+
+    if (cls->free_list == NULL) {
+        // Pool exhausted
+        platform_unlock(&cls->lock);
+        return NULL;
+    }
+
+    // Pop from free list
+    memory_pool_block_t* block = cls->free_list;
+    cls->free_list = block->next;
+    cls->free_blocks--;
+
+    platform_unlock(&cls->lock);
+
+    return block;
+}
+
+// Free to a specific class
+static int memory_pool_class_free(memory_pool_class_t* cls, void* ptr) {
+    // Check if pointer is in this pool's range
+    uint8_t* start = cls->pool_start;
+    uint8_t* end = start + cls->block_size * cls->total_blocks;
+
+    if ((uint8_t*)ptr < start || (uint8_t*)ptr >= end) {
+        return 0;  // Not in this pool
+    }
+
+    platform_lock(&cls->lock);
+
+    // Push to free list
+    memory_pool_block_t* block = (memory_pool_block_t*)ptr;
+    block->next = cls->free_list;
+    cls->free_list = block;
+    cls->free_blocks++;
+
+    platform_unlock(&cls->lock);
+
+    return 1;  // Successfully freed
+}
+
+// Initialize global memory pool
+void memory_pool_init(void) {
+    if (g_pool.initialized) {
+        return;  // Already initialized
+    }
+
+    // Initialize each size class
+    memory_pool_class_init(&g_pool.classes[MEMORY_POOL_SMALL],
+                           g_small_pool, MEMORY_POOL_SMALL_SIZE,
+                           MEMORY_POOL_SMALL_COUNT);
+
+    memory_pool_class_init(&g_pool.classes[MEMORY_POOL_MEDIUM],
+                           g_medium_pool, MEMORY_POOL_MEDIUM_SIZE,
+                           MEMORY_POOL_MEDIUM_COUNT);
+
+    memory_pool_class_init(&g_pool.classes[MEMORY_POOL_LARGE],
+                           g_large_pool, MEMORY_POOL_LARGE_SIZE,
+                           MEMORY_POOL_LARGE_COUNT);
+
+    // Reset statistics
+    memset(&g_pool.stats, 0, sizeof(memory_pool_stats_t));
+
+    g_pool.initialized = 1;
+
+    log_info("Memory pool initialized:");
+    log_info("  Small:  %d blocks × %d bytes = %d KB",
+             MEMORY_POOL_SMALL_COUNT, MEMORY_POOL_SMALL_SIZE,
+             (MEMORY_POOL_SMALL_COUNT * MEMORY_POOL_SMALL_SIZE) / 1024);
+    log_info("  Medium: %d blocks × %d bytes = %d KB",
+             MEMORY_POOL_MEDIUM_COUNT, MEMORY_POOL_MEDIUM_SIZE,
+             (MEMORY_POOL_MEDIUM_COUNT * MEMORY_POOL_MEDIUM_SIZE) / 1024);
+    log_info("  Large:  %d blocks × %d bytes = %d KB",
+             MEMORY_POOL_LARGE_COUNT, MEMORY_POOL_LARGE_SIZE,
+             (MEMORY_POOL_LARGE_COUNT * MEMORY_POOL_LARGE_SIZE) / 1024);
+    log_info("  Total:  %.2f MB",
+             (double)MEMORY_POOL_TOTAL_SIZE / (1024 * 1024));
+}
+
+// Drain the calling thread's TLS caches back to the global pool
+void memory_pool_tls_drain(void) {
+    if (!g_pool.initialized) {
+        return;
+    }
+
+    // Return all cached blocks in each TLS cache to their global pool
+    while (tls_small.count > 0) {
+        void* ptr = tls_small.cache[--tls_small.count];
+        memory_pool_class_free(&g_pool.classes[MEMORY_POOL_SMALL], ptr);
+    }
+
+    while (tls_medium.count > 0) {
+        void* ptr = tls_medium.cache[--tls_medium.count];
+        memory_pool_class_free(&g_pool.classes[MEMORY_POOL_MEDIUM], ptr);
+    }
+
+    while (tls_large.count > 0) {
+        void* ptr = tls_large.cache[--tls_large.count];
+        memory_pool_class_free(&g_pool.classes[MEMORY_POOL_LARGE], ptr);
+    }
+}
+
+// Destroy global memory pool
+// Must drain TLS caches on ALL threads that used the pool before calling this
+void memory_pool_destroy(void) {
+    if (!g_pool.initialized) {
+        return;
+    }
+
+    // Drain the calling thread's TLS cache first
+    memory_pool_tls_drain();
+
+    // Destroy each size class
+    for (int i = 0; i < 3; i++) {
+        memory_pool_class_destroy(&g_pool.classes[i]);
+    }
+
+    g_pool.initialized = 0;
+}
+
+// Allocate memory from pool
+void* memory_pool_alloc(size_t size) {
+    if (!g_pool.initialized) {
+        // Pool not initialized, fallback to malloc
+        return malloc(size);
+    }
+
+    // Initialize TLS cache if needed
+    if (!tls_initialized) {
+        tls_cache_init();
+    }
+
+    memory_pool_size_class_e class = memory_pool_get_class(size);
+    void* ptr = NULL;
+
+    switch (class) {
+        case MEMORY_POOL_SMALL:
+            // Try TLS cache first (lock-free)
+            if (tls_small.count > 0) {
+                ptr = tls_small.cache[--tls_small.count];
+                g_pool.stats.small_allocs++;
+                g_pool.stats.small_pool_hits++;
+                return ptr;
+            }
+            // Fall back to global pool
+            ptr = memory_pool_class_alloc(&g_pool.classes[MEMORY_POOL_SMALL]);
+            if (ptr) {
+                g_pool.stats.small_allocs++;
+                g_pool.stats.small_pool_hits++;
+            } else {
+                g_pool.stats.fallback_allocs++;
+                ptr = malloc(size);
+            }
+            break;
+
+        case MEMORY_POOL_MEDIUM:
+            // Try TLS cache first (lock-free)
+            if (tls_medium.count > 0) {
+                ptr = tls_medium.cache[--tls_medium.count];
+                g_pool.stats.medium_allocs++;
+                g_pool.stats.medium_pool_hits++;
+                return ptr;
+            }
+            // Fall back to global pool
+            ptr = memory_pool_class_alloc(&g_pool.classes[MEMORY_POOL_MEDIUM]);
+            if (ptr) {
+                g_pool.stats.medium_allocs++;
+                g_pool.stats.medium_pool_hits++;
+            } else {
+                g_pool.stats.fallback_allocs++;
+                ptr = malloc(size);
+            }
+            break;
+
+        case MEMORY_POOL_LARGE:
+            // Try TLS cache first (lock-free)
+            if (tls_large.count > 0) {
+                ptr = tls_large.cache[--tls_large.count];
+                g_pool.stats.large_allocs++;
+                g_pool.stats.large_pool_hits++;
+                return ptr;
+            }
+            // Fall back to global pool
+            ptr = memory_pool_class_alloc(&g_pool.classes[MEMORY_POOL_LARGE]);
+            if (ptr) {
+                g_pool.stats.large_allocs++;
+                g_pool.stats.large_pool_hits++;
+            } else {
+                g_pool.stats.fallback_allocs++;
+                ptr = malloc(size);
+            }
+            break;
+
+        case MEMORY_POOL_FALLBACK:
+        default:
+            // Too large for pool, use malloc
+            g_pool.stats.fallback_allocs++;
+            ptr = malloc(size);
+            break;
+    }
+
+    return ptr;
+}
+
+// Check if a pointer falls within a pool's static array range
+static int memory_pool_ptr_in_class(memory_pool_class_t* cls, void* ptr) {
+    uint8_t* start = cls->pool_start;
+    uint8_t* end = start + cls->block_size * cls->total_blocks;
+    return ((uint8_t*)ptr >= start && (uint8_t*)ptr < end);
+}
+
+// Check if a pointer belongs to any pool's static array
+static int memory_pool_ptr_in_any_pool(void* ptr) {
+    for (int i = 0; i < 3; i++) {
+        if (memory_pool_ptr_in_class(&g_pool.classes[i], ptr)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Free memory to pool
+void memory_pool_free(void* ptr, size_t size) {
+    if (!ptr) {
+        return;
+    }
+
+    if (!g_pool.initialized) {
+        // Pool not initialized, use free
+        free(ptr);
+        return;
+    }
+
+    // Initialize TLS cache if needed
+    if (!tls_initialized) {
+        tls_cache_init();
+    }
+
+    memory_pool_size_class_e class = memory_pool_get_class(size);
+
+    // Only cache pointers that belong to a pool's static array.
+    // Malloc'd fallback pointers must be freed directly to avoid leaks.
+    int in_pool = memory_pool_ptr_in_any_pool(ptr);
+
+    // Try TLS cache first (lock-free) — only for pool-allocated pointers
+    if (in_pool) {
+        switch (class) {
+            case MEMORY_POOL_SMALL:
+                if (tls_small.count < TLS_CACHE_SIZE) {
+                    tls_small.cache[tls_small.count++] = ptr;
+                    g_pool.stats.small_frees++;
+                    return;
+                }
+                break;
+            case MEMORY_POOL_MEDIUM:
+                if (tls_medium.count < TLS_CACHE_SIZE) {
+                    tls_medium.cache[tls_medium.count++] = ptr;
+                    g_pool.stats.medium_frees++;
+                    return;
+                }
+                break;
+            case MEMORY_POOL_LARGE:
+                if (tls_large.count < TLS_CACHE_SIZE) {
+                    tls_large.cache[tls_large.count++] = ptr;
+                    g_pool.stats.large_frees++;
+                    return;
+                }
+                break;
+            case MEMORY_POOL_FALLBACK:
+            default:
+                break;
+        }
+    }
+
+    // Try to return to global pool (only pool-allocated pointers can go here)
+    if (in_pool) {
+        for (int i = 0; i < 3; i++) {
+            if (memory_pool_class_free(&g_pool.classes[i], ptr)) {
+                switch (i) {
+                    case MEMORY_POOL_SMALL:
+                        g_pool.stats.small_frees++;
+                        break;
+                    case MEMORY_POOL_MEDIUM:
+                        g_pool.stats.medium_frees++;
+                        break;
+                    case MEMORY_POOL_LARGE:
+                        g_pool.stats.large_frees++;
+                        break;
+                }
+                return;
+            }
+        }
+    }
+
+    // Not in any pool (malloc'd fallback) or pool return failed — use free
+    g_pool.stats.fallback_frees++;
+    free(ptr);
+}
+
+// Get memory pool statistics
+memory_pool_stats_t memory_pool_get_stats(void) {
+    return g_pool.stats;
+}
+
+// Reset statistics
+void memory_pool_reset_stats(void) {
+    memset(&g_pool.stats, 0, sizeof(memory_pool_stats_t));
+}
+
+// Print memory pool statistics (for debugging)
+void memory_pool_print_stats(void) {
+    log_info("Memory Pool Statistics:");
+    log_info("  Small allocations: %lu (pool hits: %lu, fallback: %lu)",
+             g_pool.stats.small_allocs,
+             g_pool.stats.small_pool_hits,
+             g_pool.stats.fallback_allocs);
+    log_info("  Medium allocations: %lu (pool hits: %lu, fallback: %lu)",
+             g_pool.stats.medium_allocs,
+             g_pool.stats.medium_pool_hits,
+             g_pool.stats.fallback_allocs);
+    log_info("  Large allocations: %lu (pool hits: %lu, fallback: %lu)",
+             g_pool.stats.large_allocs,
+             g_pool.stats.large_pool_hits,
+             g_pool.stats.fallback_allocs);
+    log_info("  Small frees: %lu", g_pool.stats.small_frees);
+    log_info("  Medium frees: %lu", g_pool.stats.medium_frees);
+    log_info("  Large frees: %lu", g_pool.stats.large_frees);
+    log_info("  Fallback frees: %lu", g_pool.stats.fallback_frees);
+
+    // Calculate pool utilization
+    size_t small_used = MEMORY_POOL_SMALL_COUNT - g_pool.classes[MEMORY_POOL_SMALL].free_blocks;
+    size_t medium_used = MEMORY_POOL_MEDIUM_COUNT - g_pool.classes[MEMORY_POOL_MEDIUM].free_blocks;
+    size_t large_used = MEMORY_POOL_LARGE_COUNT - g_pool.classes[MEMORY_POOL_LARGE].free_blocks;
+
+    log_info("  Pool utilization:");
+    log_info("    Small:  %zu / %zu blocks (%.1f%%)",
+             small_used, MEMORY_POOL_SMALL_COUNT,
+             100.0 * small_used / MEMORY_POOL_SMALL_COUNT);
+    log_info("    Medium: %zu / %zu blocks (%.1f%%)",
+             medium_used, MEMORY_POOL_MEDIUM_COUNT,
+             100.0 * medium_used / MEMORY_POOL_MEDIUM_COUNT);
+    log_info("    Large:  %zu / %zu blocks (%.1f%%)",
+             large_used, MEMORY_POOL_LARGE_COUNT,
+             100.0 * large_used / MEMORY_POOL_LARGE_COUNT);
+}
