@@ -22,6 +22,11 @@ add_subdirectory(deps/libcbor)
 # Build hashmap
 add_subdirectory(deps/hashmap)
 
+# Build msquic (requires OpenSSL on Linux, disable -Werror for clang)
+find_package(OpenSSL REQUIRED)
+set(QUIC_DISABLE_WERROR ON CACHE BOOL "" FORCE)
+add_subdirectory(deps/msquic)
+
 # Source directories
 set(MERIDIAN_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Network/Meridian)
 set(UTIL_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Util)
@@ -29,6 +34,7 @@ set(REFCOUNTER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/RefCounter)
 set(WORKERS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Workers)
 set(TIME_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Time)
 set(BUFFER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Buffer)
+set(BLOOM_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Bloom)
 
 # Poseidon Library
 set(POSEIDON_SOURCES
@@ -59,18 +65,24 @@ set(POSEIDON_SOURCES
     ${TIME_SRC_DIR}/ticker.c
     ${TIME_SRC_DIR}/debouncer.c
     ${BUFFER_SRC_DIR}/buffer.c
+    ${BLOOM_SRC_DIR}/bitset.c
 )
 
 add_library(poseidon STATIC ${POSEIDON_SOURCES})
 
 target_include_directories(poseidon PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/src/inc
 )
 
 target_link_libraries(poseidon PRIVATE
     cbor
     hashmap
     pthread
+    msquic::msquic
+    msquic::platform
+    OpenSSL::SSL
+    OpenSSL::Crypto
 )
 
 # Test include paths for transitive dependencies
@@ -87,7 +99,10 @@ function(add_meridian_test TEST_NAME)
         poseidon
         cbor
         hashmap
+        msquic::msquic
+        msquic::platform
         gtest
+        gtest_main
         pthread
     )
     add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
@@ -102,3 +117,4 @@ add_meridian_test(meridian_packet_test tests/meridian_packet_test.cpp)
 add_meridian_test(meridian_measure_test tests/meridian_measure_test.cpp)
 add_meridian_test(meridian_query_test tests/meridian_query_test.cpp)
 add_meridian_test(meridian_integration_test tests/meridian_integration_test.cpp)
+add_meridian_test(bloom_bitset_test tests/bloom_bitset_test.cpp)
