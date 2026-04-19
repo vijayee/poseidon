@@ -66,6 +66,7 @@ set(POSEIDON_SOURCES
     ${TIME_SRC_DIR}/debouncer.c
     ${BUFFER_SRC_DIR}/buffer.c
     ${BLOOM_SRC_DIR}/bitset.c
+    ${BLOOM_SRC_DIR}/bloom_filter.c
 )
 
 add_library(poseidon STATIC ${POSEIDON_SOURCES})
@@ -73,6 +74,7 @@ add_library(poseidon STATIC ${POSEIDON_SOURCES})
 target_include_directories(poseidon PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/src/inc
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/xxhash
 )
 
 target_link_libraries(poseidon PRIVATE
@@ -118,3 +120,4 @@ add_meridian_test(meridian_measure_test tests/meridian_measure_test.cpp)
 add_meridian_test(meridian_query_test tests/meridian_query_test.cpp)
 add_meridian_test(meridian_integration_test tests/meridian_integration_test.cpp)
 add_meridian_test(bloom_bitset_test tests/bloom_bitset_test.cpp)
+add_meridian_test(bloom_filter_test tests/bloom_filter_test.cpp)
