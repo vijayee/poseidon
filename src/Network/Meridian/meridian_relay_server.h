@@ -9,6 +9,7 @@ extern "C" {
 #include <stdbool.h>
 #include <stddef.h>
 #include <sys/socket.h>
+#include <time.h>
 
 #include "../../RefCounter/refcounter.h"
 #include "../../Util/threadding.h"
