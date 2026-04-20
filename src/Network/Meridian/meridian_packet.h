@@ -73,6 +73,27 @@ extern "C" {
 #define MERIDIAN_PACKET_TYPE_REQ_CONSTRAINT_PING 21
 
 // ============================================================================
+// RELAY / NAT TRAVERSAL PACKET TYPES
+// ============================================================================
+
+/** Address request: Ask relay for observed public address */
+#define MERIDIAN_PACKET_TYPE_ADDR_REQUEST    30
+/** Address response: Relay reports observed address and assigned endpoint ID */
+#define MERIDIAN_PACKET_TYPE_ADDR_RESPONSE   31
+/** Relay datagram: Forward data between peers via relay */
+#define MERIDIAN_PACKET_TYPE_RELAY_DATAGRAM  32
+/** Punch request: Coordinate hole-punching through relay */
+#define MERIDIAN_PACKET_TYPE_PUNCH_REQUEST   33
+/** Punch sync: Synchronize hole-punching between peers */
+#define MERIDIAN_PACKET_TYPE_PUNCH_SYNC      34
+/** Relay ping: Keepalive probe */
+#define MERIDIAN_PACKET_TYPE_RELAY_PING      35
+/** Relay pong: Keepalive response */
+#define MERIDIAN_PACKET_TYPE_RELAY_PONG      36
+/** Endpoint gone: Notification that a peer disconnected */
+#define MERIDIAN_PACKET_TYPE_ENDPOINT_GONE   37
+
+// ============================================================================
 // PROTOCOL CONSTANTS
 // ============================================================================
 
@@ -159,6 +180,56 @@ typedef struct meridian_ret_response_t {
     uint16_t closest_port;          /**< Port of closest node */
     vec_t(meridian_node_latency_t) targets; /**< List of nodes with latencies */
 } meridian_ret_response_t;
+
+// ============================================================================
+// RELAY / NAT TRAVERSAL STRUCTURES
+// ============================================================================
+
+/**
+ * Address response from relay server.
+ * Contains the relay's observation of the peer's public address
+ * and the assigned endpoint ID for relay routing.
+ *
+ * Wire format (CBOR array):
+ * [type, query_id_hi, query_id_lo, reflexive_addr, reflexive_port, endpoint_id]
+ */
+typedef struct meridian_addr_response_t {
+    uint8_t type;               /**< Packet type (MERIDIAN_PACKET_TYPE_ADDR_RESPONSE) */
+    uint64_t query_id;         /**< Query ID from the ADDR_REQUEST */
+    uint32_t reflexive_addr;   /**< Observed public IPv4 address */
+    uint16_t reflexive_port;   /**< Observed public port */
+    uint32_t endpoint_id;      /**< Assigned relay endpoint ID */
+} meridian_addr_response_t;
+
+/**
+ * Punch request for coordinating hole-punching through a relay.
+ * Sent by peer A to the relay, which forwards it to peer B.
+ *
+ * Wire format (CBOR array):
+ * [type, query_id_hi, query_id_lo, from_endpoint_id, target_addr, target_port]
+ */
+typedef struct meridian_punch_request_t {
+    uint8_t type;               /**< Packet type (MERIDIAN_PACKET_TYPE_PUNCH_REQUEST) */
+    uint64_t query_id;         /**< Query ID */
+    uint32_t from_endpoint_id; /**< Sender's relay endpoint ID */
+    uint32_t target_addr;      /**< Target peer's address */
+    uint16_t target_port;      /**< Target peer's port */
+} meridian_punch_request_t;
+
+/**
+ * Punch sync for hole-punching coordination.
+ * Sent directly between peers to open NAT mappings.
+ *
+ * Wire format (CBOR array):
+ * [type, query_id_hi, query_id_lo, from_endpoint_id, from_addr, from_port]
+ */
+typedef struct meridian_punch_sync_t {
+    uint8_t type;               /**< Packet type (MERIDIAN_PACKET_TYPE_PUNCH_SYNC) */
+    uint64_t query_id;         /**< Query ID */
+    uint32_t from_endpoint_id; /**< Sender's relay endpoint ID */
+    uint32_t from_addr;        /**< Sender's public address */
+    uint16_t from_port;        /**< Sender's public port */
+} meridian_punch_sync_t;
 
 // ============================================================================
 // GOSSIP PACKET OPERATIONS
@@ -324,6 +395,121 @@ cbor_item_t* meridian_ret_response_encode(const meridian_ret_response_t* pkt);
  * @return      New response packet, or NULL on failure
  */
 meridian_ret_response_t* meridian_ret_response_decode(cbor_item_t* item);
+
+// ============================================================================
+// RELAY PACKET OPERATIONS
+// ============================================================================
+
+/**
+ * Creates an address response packet.
+ *
+ * @param query_id       Query ID from the ADDR_REQUEST
+ * @param reflexive_addr Observed public IPv4 address
+ * @param reflexive_port Observed public port
+ * @param endpoint_id    Assigned relay endpoint ID
+ * @return               New address response, or NULL on failure
+ */
+meridian_addr_response_t* meridian_addr_response_create(uint64_t query_id,
+                                                         uint32_t reflexive_addr,
+                                                         uint16_t reflexive_port,
+                                                         uint32_t endpoint_id);
+
+/**
+ * Destroys an address response packet.
+ *
+ * @param pkt  Packet to destroy
+ */
+void meridian_addr_response_destroy(meridian_addr_response_t* pkt);
+
+/**
+ * Encodes an address response into CBOR.
+ *
+ * @param pkt  Packet to encode
+ * @return     CBOR array item, or NULL on failure
+ */
+cbor_item_t* meridian_addr_response_encode(const meridian_addr_response_t* pkt);
+
+/**
+ * Decodes a CBOR address response.
+ *
+ * @param item  CBOR array to decode
+ * @return      New address response, or NULL on failure
+ */
+meridian_addr_response_t* meridian_addr_response_decode(cbor_item_t* item);
+
+/**
+ * Creates a punch request packet.
+ *
+ * @param query_id        Query ID
+ * @param from_endpoint_id Sender's relay endpoint ID
+ * @param target_addr     Target peer's address
+ * @param target_port     Target peer's port
+ * @return                New punch request, or NULL on failure
+ */
+meridian_punch_request_t* meridian_punch_request_create(uint64_t query_id,
+                                                         uint32_t from_endpoint_id,
+                                                         uint32_t target_addr,
+                                                         uint16_t target_port);
+
+/**
+ * Destroys a punch request packet.
+ *
+ * @param pkt  Packet to destroy
+ */
+void meridian_punch_request_destroy(meridian_punch_request_t* pkt);
+
+/**
+ * Encodes a punch request into CBOR.
+ *
+ * @param pkt  Packet to encode
+ * @return     CBOR array item, or NULL on failure
+ */
+cbor_item_t* meridian_punch_request_encode(const meridian_punch_request_t* pkt);
+
+/**
+ * Decodes a CBOR punch request.
+ *
+ * @param item  CBOR array to decode
+ * @return      New punch request, or NULL on failure
+ */
+meridian_punch_request_t* meridian_punch_request_decode(cbor_item_t* item);
+
+/**
+ * Creates a punch sync packet.
+ *
+ * @param query_id        Query ID
+ * @param from_endpoint_id Sender's relay endpoint ID
+ * @param from_addr       Sender's public address
+ * @param from_port       Sender's public port
+ * @return                New punch sync, or NULL on failure
+ */
+meridian_punch_sync_t* meridian_punch_sync_create(uint64_t query_id,
+                                                    uint32_t from_endpoint_id,
+                                                    uint32_t from_addr,
+                                                    uint16_t from_port);
+
+/**
+ * Destroys a punch sync packet.
+ *
+ * @param pkt  Packet to destroy
+ */
+void meridian_punch_sync_destroy(meridian_punch_sync_t* pkt);
+
+/**
+ * Encodes a punch sync into CBOR.
+ *
+ * @param pkt  Packet to encode
+ * @return     CBOR array item, or NULL on failure
+ */
+cbor_item_t* meridian_punch_sync_encode(const meridian_punch_sync_t* pkt);
+
+/**
+ * Decodes a CBOR punch sync.
+ *
+ * @param item  CBOR array to decode
+ * @return      New punch sync, or NULL on failure
+ */
+meridian_punch_sync_t* meridian_punch_sync_decode(cbor_item_t* item);
 
 // ============================================================================
 // UTILITY FUNCTIONS

@@ -583,3 +583,222 @@ meridian_node_t* meridian_node_from_latency(const meridian_node_latency_t* nl) {
     if (nl == NULL) return NULL;
     return meridian_node_create(nl->addr, nl->port);
 }
+
+// ============================================================================
+// ADDR RESPONSE PACKET
+// ============================================================================
+
+meridian_addr_response_t* meridian_addr_response_create(uint64_t query_id,
+                                                         uint32_t reflexive_addr,
+                                                         uint16_t reflexive_port,
+                                                         uint32_t endpoint_id) {
+    meridian_addr_response_t* pkt = (meridian_addr_response_t*)
+        get_clear_memory(sizeof(meridian_addr_response_t));
+    if (pkt == NULL) return NULL;
+    pkt->type = MERIDIAN_PACKET_TYPE_ADDR_RESPONSE;
+    pkt->query_id = query_id;
+    pkt->reflexive_addr = reflexive_addr;
+    pkt->reflexive_port = reflexive_port;
+    pkt->endpoint_id = endpoint_id;
+    return pkt;
+}
+
+void meridian_addr_response_destroy(meridian_addr_response_t* pkt) {
+    if (pkt == NULL) return;
+    free(pkt);
+}
+
+cbor_item_t* meridian_addr_response_encode(const meridian_addr_response_t* pkt) {
+    if (pkt == NULL) return NULL;
+
+    cbor_item_t* array = cbor_new_definite_array(6);
+    if (array == NULL) return NULL;
+
+    uint64_t qid_1 = pkt->query_id >> 32;
+    uint64_t qid_2 = pkt->query_id & 0xFFFFFFFF;
+
+    if (!cbor_array_push(array, cbor_build_uint8(pkt->type)) ||
+        !cbor_array_push(array, cbor_build_uint64(qid_1)) ||
+        !cbor_array_push(array, cbor_build_uint64(qid_2)) ||
+        !cbor_array_push(array, cbor_build_uint32(pkt->reflexive_addr)) ||
+        !cbor_array_push(array, cbor_build_uint16(pkt->reflexive_port)) ||
+        !cbor_array_push(array, cbor_build_uint32(pkt->endpoint_id))) {
+        cbor_decref(&array);
+        return NULL;
+    }
+
+    return array;
+}
+
+meridian_addr_response_t* meridian_addr_response_decode(cbor_item_t* item) {
+    if (item == NULL || !cbor_array_is_definite(item)) return NULL;
+    if (cbor_array_size(item) < 6) return NULL;
+
+    cbor_item_t** items = cbor_array_handle(item);
+    size_t idx = 0;
+
+    meridian_addr_response_t* pkt = (meridian_addr_response_t*)
+        get_clear_memory(sizeof(meridian_addr_response_t));
+    if (pkt == NULL) return NULL;
+
+    pkt->type = cbor_get_uint8(items[idx++]);
+    uint64_t qid_1 = cbor_get_uint64(items[idx++]);
+    uint64_t qid_2 = cbor_get_uint64(items[idx++]);
+    pkt->query_id = (qid_1 << 32) | qid_2;
+    pkt->reflexive_addr = cbor_get_uint32(items[idx++]);
+    pkt->reflexive_port = cbor_get_uint16(items[idx++]);
+    pkt->endpoint_id = cbor_get_uint32(items[idx++]);
+
+    if (pkt->type != MERIDIAN_PACKET_TYPE_ADDR_RESPONSE) {
+        free(pkt);
+        return NULL;
+    }
+
+    return pkt;
+}
+
+// ============================================================================
+// PUNCH REQUEST PACKET
+// ============================================================================
+
+meridian_punch_request_t* meridian_punch_request_create(uint64_t query_id,
+                                                         uint32_t from_endpoint_id,
+                                                         uint32_t target_addr,
+                                                         uint16_t target_port) {
+    meridian_punch_request_t* pkt = (meridian_punch_request_t*)
+        get_clear_memory(sizeof(meridian_punch_request_t));
+    if (pkt == NULL) return NULL;
+    pkt->type = MERIDIAN_PACKET_TYPE_PUNCH_REQUEST;
+    pkt->query_id = query_id;
+    pkt->from_endpoint_id = from_endpoint_id;
+    pkt->target_addr = target_addr;
+    pkt->target_port = target_port;
+    return pkt;
+}
+
+void meridian_punch_request_destroy(meridian_punch_request_t* pkt) {
+    if (pkt == NULL) return;
+    free(pkt);
+}
+
+cbor_item_t* meridian_punch_request_encode(const meridian_punch_request_t* pkt) {
+    if (pkt == NULL) return NULL;
+
+    cbor_item_t* array = cbor_new_definite_array(5);
+    if (array == NULL) return NULL;
+
+    uint64_t qid_1 = pkt->query_id >> 32;
+    uint64_t qid_2 = pkt->query_id & 0xFFFFFFFF;
+
+    if (!cbor_array_push(array, cbor_build_uint8(pkt->type)) ||
+        !cbor_array_push(array, cbor_build_uint64(qid_1)) ||
+        !cbor_array_push(array, cbor_build_uint64(qid_2)) ||
+        !cbor_array_push(array, cbor_build_uint32(pkt->from_endpoint_id)) ||
+        !cbor_array_push(array, cbor_build_uint32(pkt->target_addr)) ||
+        !cbor_array_push(array, cbor_build_uint16(pkt->target_port))) {
+        cbor_decref(&array);
+        return NULL;
+    }
+
+    return array;
+}
+
+meridian_punch_request_t* meridian_punch_request_decode(cbor_item_t* item) {
+    if (item == NULL || !cbor_array_is_definite(item)) return NULL;
+    if (cbor_array_size(item) < 6) return NULL;
+
+    cbor_item_t** items = cbor_array_handle(item);
+    size_t idx = 0;
+
+    meridian_punch_request_t* pkt = (meridian_punch_request_t*)
+        get_clear_memory(sizeof(meridian_punch_request_t));
+    if (pkt == NULL) return NULL;
+
+    pkt->type = cbor_get_uint8(items[idx++]);
+    uint64_t qid_1 = cbor_get_uint64(items[idx++]);
+    uint64_t qid_2 = cbor_get_uint64(items[idx++]);
+    pkt->query_id = (qid_1 << 32) | qid_2;
+    pkt->from_endpoint_id = cbor_get_uint32(items[idx++]);
+    pkt->target_addr = cbor_get_uint32(items[idx++]);
+    pkt->target_port = cbor_get_uint16(items[idx++]);
+
+    if (pkt->type != MERIDIAN_PACKET_TYPE_PUNCH_REQUEST) {
+        free(pkt);
+        return NULL;
+    }
+
+    return pkt;
+}
+
+// ============================================================================
+// PUNCH SYNC PACKET
+// ============================================================================
+
+meridian_punch_sync_t* meridian_punch_sync_create(uint64_t query_id,
+                                                    uint32_t from_endpoint_id,
+                                                    uint32_t from_addr,
+                                                    uint16_t from_port) {
+    meridian_punch_sync_t* pkt = (meridian_punch_sync_t*)
+        get_clear_memory(sizeof(meridian_punch_sync_t));
+    if (pkt == NULL) return NULL;
+    pkt->type = MERIDIAN_PACKET_TYPE_PUNCH_SYNC;
+    pkt->query_id = query_id;
+    pkt->from_endpoint_id = from_endpoint_id;
+    pkt->from_addr = from_addr;
+    pkt->from_port = from_port;
+    return pkt;
+}
+
+void meridian_punch_sync_destroy(meridian_punch_sync_t* pkt) {
+    if (pkt == NULL) return;
+    free(pkt);
+}
+
+cbor_item_t* meridian_punch_sync_encode(const meridian_punch_sync_t* pkt) {
+    if (pkt == NULL) return NULL;
+
+    cbor_item_t* array = cbor_new_definite_array(6);
+    if (array == NULL) return NULL;
+
+    uint64_t qid_1 = pkt->query_id >> 32;
+    uint64_t qid_2 = pkt->query_id & 0xFFFFFFFF;
+
+    if (!cbor_array_push(array, cbor_build_uint8(pkt->type)) ||
+        !cbor_array_push(array, cbor_build_uint64(qid_1)) ||
+        !cbor_array_push(array, cbor_build_uint64(qid_2)) ||
+        !cbor_array_push(array, cbor_build_uint32(pkt->from_endpoint_id)) ||
+        !cbor_array_push(array, cbor_build_uint32(pkt->from_addr)) ||
+        !cbor_array_push(array, cbor_build_uint16(pkt->from_port))) {
+        cbor_decref(&array);
+        return NULL;
+    }
+
+    return array;
+}
+
+meridian_punch_sync_t* meridian_punch_sync_decode(cbor_item_t* item) {
+    if (item == NULL || !cbor_array_is_definite(item)) return NULL;
+    if (cbor_array_size(item) < 6) return NULL;
+
+    cbor_item_t** items = cbor_array_handle(item);
+    size_t idx = 0;
+
+    meridian_punch_sync_t* pkt = (meridian_punch_sync_t*)
+        get_clear_memory(sizeof(meridian_punch_sync_t));
+    if (pkt == NULL) return NULL;
+
+    pkt->type = cbor_get_uint8(items[idx++]);
+    uint64_t qid_1 = cbor_get_uint64(items[idx++]);
+    uint64_t qid_2 = cbor_get_uint64(items[idx++]);
+    pkt->query_id = (qid_1 << 32) | qid_2;
+    pkt->from_endpoint_id = cbor_get_uint32(items[idx++]);
+    pkt->from_addr = cbor_get_uint32(items[idx++]);
+    pkt->from_port = cbor_get_uint16(items[idx++]);
+
+    if (pkt->type != MERIDIAN_PACKET_TYPE_PUNCH_SYNC) {
+        free(pkt);
+        return NULL;
+    }
+
+    return pkt;
+}
