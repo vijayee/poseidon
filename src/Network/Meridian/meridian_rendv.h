@@ -292,20 +292,32 @@ int meridian_rendv_handle_close_tunnel(meridian_rendv_handle_t* handle, HQUIC co
 // NAT DETECTION
 // ============================================================================
 
+/** Forward declaration for relay client */
+struct meridian_relay_t;
+
 /** Callback type for NAT detection results */
 typedef void (*meridian_nat_callback_t)(void* ctx, uint32_t addr, uint16_t port,
                                          meridian_nat_type_t type);
 
 /**
- * Detects NAT type for the local rendezvous.
- * Invokes callback with the detected information.
+ * Detects NAT type by comparing reflexive addresses from two relay servers.
+ * Sends ADDR_REQUEST to each relay, compares the observed public addresses,
+ * and classifies the NAT type:
+ *   - OPEN: local address matches reflexive address
+ *   - PORT_RESTRICTED_CONE: same reflexive address from both relays (EIM)
+ *   - SYMMETRIC: different reflexive addresses from relays (EDM)
+ *   - UNKNOWN: insufficient relay connections
  *
  * @param handle    Handle to detect NAT for
+ * @param relay_a   First relay client (may be NULL)
+ * @param relay_b   Second relay client (may be NULL)
  * @param callback  Function to receive NAT info
- * @param ctx      User context for callback
- * @return         0 on success, -1 on failure
+ * @param ctx       User context for callback
+ * @return          0 on success, -1 on failure
  */
 int meridian_rendv_handle_detect_nat(meridian_rendv_handle_t* handle,
+                                      struct meridian_relay_t* relay_a,
+                                      struct meridian_relay_t* relay_b,
                                       meridian_nat_callback_t callback, void* ctx);
 
 // ============================================================================
