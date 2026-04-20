@@ -34,6 +34,12 @@
 /** Default number of hash functions for the negative bloom filter */
 #define QUASAR_DEFAULT_NEGATIVE_HASHES 3
 
+/** Default size in bits for the dedup (seen) bloom filter */
+#define QUASAR_DEFAULT_SEEN_SIZE 4096
+
+/** Default number of hash functions for the dedup bloom filter */
+#define QUASAR_DEFAULT_SEEN_HASHES 3
+
 // ============================================================================
 // ROUTE MESSAGE LIFECYCLE
 // ============================================================================
@@ -43,7 +49,9 @@ quasar_route_message_t* quasar_route_message_create(const uint8_t* topic, size_t
                                                       uint32_t max_hops,
                                                       size_t neg_size, uint32_t neg_hashes) {
     if (topic == NULL || data == NULL) return NULL;
+    quasar_message_id_init();
     quasar_route_message_t* msg = get_clear_memory(sizeof(quasar_route_message_t));
+    msg->id = quasar_message_id_get_next();
     msg->topic = buffer_create_from_pointer_copy((uint8_t*)topic, topic_len);
     msg->data = buffer_create_from_pointer_copy((uint8_t*)data, data_len);
     msg->visited = bloom_filter_create(neg_size, neg_hashes);
@@ -93,7 +101,8 @@ bool quasar_route_message_has_visited(quasar_route_message_t* msg, const meridia
 // QUASAR LIFECYCLE
 // ============================================================================
 
-quasar_t* quasar_create(struct meridian_protocol_t* protocol, uint32_t max_hops, uint32_t alpha) {
+quasar_t* quasar_create(struct meridian_protocol_t* protocol, uint32_t max_hops, uint32_t alpha,
+                          uint32_t seen_size, uint32_t seen_hashes) {
     quasar_t* quasar = get_clear_memory(sizeof(quasar_t));
     quasar->protocol = protocol;
 
@@ -109,6 +118,9 @@ quasar_t* quasar_create(struct meridian_protocol_t* protocol, uint32_t max_hops,
     vec_init(&quasar->local_subs);
     quasar->max_hops = max_hops;
     quasar->alpha = alpha;
+    quasar->seen = bloom_filter_create(seen_size, seen_hashes);
+    quasar->seen_size = seen_size;
+    quasar->seen_hashes = seen_hashes;
     quasar->on_delivery = NULL;
     quasar->delivery_ctx = NULL;
     platform_lock_init(&quasar->lock);
@@ -121,6 +133,7 @@ void quasar_destroy(quasar_t* quasar) {
     refcounter_dereference((refcounter_t*)quasar);
     if (refcounter_count((refcounter_t*)quasar) == 0) {
         attenuated_bloom_filter_destroy(quasar->routing);
+        bloom_filter_destroy(quasar->seen);
 
         // Free all local subscription topic buffers
         for (int i = 0; i < quasar->local_subs.length; i++) {
@@ -201,6 +214,8 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len, con
 
     if (found && hops == 0) {
         // Local delivery: this node is subscribed to the topic
+        quasar_message_id_t msg_id = quasar_message_id_get_next();
+        bloom_filter_add(quasar->seen, (const uint8_t*)&msg_id, sizeof(msg_id));
         if (quasar->on_delivery != NULL) {
             quasar_delivery_cb_t cb = quasar->on_delivery;
             void* ctx = quasar->delivery_ctx;
@@ -279,6 +294,15 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len, con
 
 int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const struct meridian_node_t* from) {
     if (quasar == NULL || msg == NULL) return -1;
+
+    // Dedup check: discard if we've already seen this message
+    platform_lock(&quasar->lock);
+    if (bloom_filter_contains(quasar->seen, (const uint8_t*)&msg->id, sizeof(msg->id))) {
+        platform_unlock(&quasar->lock);
+        return 0;
+    }
+    bloom_filter_add(quasar->seen, (const uint8_t*)&msg->id, sizeof(msg->id));
+    platform_unlock(&quasar->lock);
 
     // Add this node to the negative filter
     if (quasar->protocol != NULL) {
