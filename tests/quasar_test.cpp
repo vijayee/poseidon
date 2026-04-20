@@ -11,25 +11,27 @@
 
 class QuasarTest : public ::testing::Test {
 protected:
-    void SetUp() override {}
+    void SetUp() override {
+        quasar_message_id_init();
+    }
     void TearDown() override {}
 };
 
 TEST_F(QuasarTest, CreateDestroy) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     ASSERT_NE(nullptr, q);
     quasar_destroy(q);
 }
 
 TEST_F(QuasarTest, Subscribe) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* topic = (const uint8_t*)"sports";
     EXPECT_EQ(0, quasar_subscribe(q, topic, 6, 100));
     quasar_destroy(q);
 }
 
 TEST_F(QuasarTest, Unsubscribe) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* topic = (const uint8_t*)"sports";
     quasar_subscribe(q, topic, 6, 100);
     EXPECT_EQ(0, quasar_unsubscribe(q, topic, 6));
@@ -37,7 +39,7 @@ TEST_F(QuasarTest, Unsubscribe) {
 }
 
 TEST_F(QuasarTest, Publish) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* msg = (const uint8_t*)"goal!";
     quasar_subscribe(q, topic, 6, 100);
@@ -46,7 +48,7 @@ TEST_F(QuasarTest, Publish) {
 }
 
 TEST_F(QuasarTest, TickExpiresSubscriptions) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* topic = (const uint8_t*)"sports";
     quasar_subscribe(q, topic, 6, 2);
     quasar_tick(q);
@@ -57,7 +59,7 @@ TEST_F(QuasarTest, TickExpiresSubscriptions) {
 }
 
 TEST_F(QuasarTest, MultipleSubscriptions) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* t1 = (const uint8_t*)"sports";
     const uint8_t* t2 = (const uint8_t*)"news";
     const uint8_t* t3 = (const uint8_t*)"tech";
@@ -72,7 +74,7 @@ TEST_F(QuasarTest, MultipleSubscriptions) {
 }
 
 TEST_F(QuasarTest, SetDeliveryCallback) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     quasar_set_delivery_callback(q, NULL, NULL);
     quasar_destroy(q);
 }
@@ -195,7 +197,7 @@ protected:
 };
 
 TEST_F(DeliveryCallbackTest, LocalDeliveryCallback) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* msg = (const uint8_t*)"goal!";
 
@@ -209,7 +211,7 @@ TEST_F(DeliveryCallbackTest, LocalDeliveryCallback) {
 }
 
 TEST_F(DeliveryCallbackTest, NoCallbackWhenNotSubscribed) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* msg = (const uint8_t*)"goal!";
 
@@ -223,7 +225,7 @@ TEST_F(DeliveryCallbackTest, NoCallbackWhenNotSubscribed) {
 }
 
 TEST_F(DeliveryCallbackTest, NullCallbackDoesNotCrash) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* msg = (const uint8_t*)"goal!";
 
@@ -246,7 +248,7 @@ protected:
 };
 
 TEST_F(GossipTest, InvalidMagicRejected) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     uint8_t bad_data[28] = {0};
     // Magic should be 0x51534152, but set it to 0
     EXPECT_EQ(-1, quasar_on_gossip(q, bad_data, sizeof(bad_data), NULL));
@@ -254,13 +256,13 @@ TEST_F(GossipTest, InvalidMagicRejected) {
 }
 
 TEST_F(GossipTest, NullDataRejected) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     EXPECT_EQ(-1, quasar_on_gossip(q, NULL, 100, NULL));
     quasar_destroy(q);
 }
 
 TEST_F(GossipTest, TooShortDataRejected) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     uint8_t short_data[10] = {0};
     EXPECT_EQ(-1, quasar_on_gossip(q, short_data, sizeof(short_data), NULL));
     quasar_destroy(q);
@@ -277,7 +279,7 @@ protected:
 };
 
 TEST_F(OnRouteMessageTest, NullMessageRejected) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     meridian_node_t* from = meridian_node_create(htonl(0x0A000001), htons(8080));
     EXPECT_EQ(-1, quasar_on_route_message(q, NULL, from));
     quasar_destroy(q);
@@ -297,7 +299,7 @@ TEST_F(OnRouteMessageTest, NullQuasarRejected) {
 }
 
 TEST_F(OnRouteMessageTest, LocalDeliveryViaRouteMessage) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* data = (const uint8_t*)"goal!";
 
@@ -324,7 +326,7 @@ TEST_F(OnRouteMessageTest, LocalDeliveryViaRouteMessage) {
 }
 
 TEST_F(OnRouteMessageTest, ZeroHopsRemainingStopsForwarding) {
-    quasar_t* q = quasar_create(NULL, 5, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* data = (const uint8_t*)"goal!";
 
@@ -396,4 +398,89 @@ TEST_F(MessageIdTest, SerializedFieldsAreNetworkByteOrder) {
     EXPECT_EQ(id.time, id2.time);
     EXPECT_EQ(id.nanos, id2.nanos);
     EXPECT_EQ(id.count, id2.count);
+}
+
+// ============================================================================
+// DEDUP FILTER TESTS
+// ============================================================================
+
+class DedupFilterTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        quasar_message_id_init();
+    }
+    void TearDown() override {}
+};
+
+TEST_F(DedupFilterTest, DuplicateRouteMessageDiscarded) {
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    const uint8_t* topic = (const uint8_t*)"sports";
+    const uint8_t* data = (const uint8_t*)"goal!";
+
+    int call_count = 0;
+    quasar_set_delivery_callback(q, [](void* ctx, const uint8_t*, size_t,
+                                        const uint8_t*, size_t) {
+        int* count = (int*)ctx;
+        (*count)++;
+    }, &call_count);
+
+    quasar_subscribe(q, topic, 6, 100);
+
+    // Create a route message and deliver it — should trigger callback
+    quasar_route_message_t* msg = quasar_route_message_create(topic, 6, data, 5, 10, 256, 3);
+    meridian_node_t* from = meridian_node_create(htonl(0x0A000001), htons(8080));
+    EXPECT_EQ(0, quasar_on_route_message(q, msg, from));
+    EXPECT_EQ(1, call_count);
+
+    // Deliver the SAME message again — dedup filter should discard it
+    EXPECT_EQ(0, quasar_on_route_message(q, msg, from));
+    EXPECT_EQ(1, call_count);
+
+    quasar_route_message_destroy(msg);
+    meridian_node_destroy(from);
+    quasar_destroy(q);
+}
+
+TEST_F(DedupFilterTest, DifferentMessagesNotDiscarded) {
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    const uint8_t* topic = (const uint8_t*)"sports";
+    const uint8_t* data = (const uint8_t*)"goal!";
+
+    int call_count = 0;
+    quasar_set_delivery_callback(q, [](void* ctx, const uint8_t*, size_t,
+                                        const uint8_t*, size_t) {
+        int* count = (int*)ctx;
+        (*count)++;
+    }, &call_count);
+
+    quasar_subscribe(q, topic, 6, 100);
+
+    // Two different route messages — different IDs — should both be delivered
+    quasar_route_message_t* msg1 = quasar_route_message_create(topic, 6, data, 5, 10, 256, 3);
+    quasar_route_message_t* msg2 = quasar_route_message_create(topic, 6, data, 5, 10, 256, 3);
+    meridian_node_t* from = meridian_node_create(htonl(0x0A000001), htons(8080));
+
+    EXPECT_EQ(0, quasar_on_route_message(q, msg1, from));
+    EXPECT_EQ(1, call_count);
+
+    EXPECT_EQ(0, quasar_on_route_message(q, msg2, from));
+    EXPECT_EQ(2, call_count);
+
+    quasar_route_message_destroy(msg1);
+    quasar_route_message_destroy(msg2);
+    meridian_node_destroy(from);
+    quasar_destroy(q);
+}
+
+TEST_F(DedupFilterTest, RouteMessageCarriesID) {
+    const uint8_t* topic = (const uint8_t*)"sports";
+    const uint8_t* data = (const uint8_t*)"goal!";
+    quasar_route_message_t* msg = quasar_route_message_create(topic, 6, data, 5, 10, 256, 3);
+    ASSERT_NE(nullptr, msg);
+
+    // ID should have been auto-generated (time > 0)
+    EXPECT_GT(msg->id.time, 0u);
+    EXPECT_GT(msg->id.count + 1, 0u);
+
+    quasar_route_message_destroy(msg);
 }
