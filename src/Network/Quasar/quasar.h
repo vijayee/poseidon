@@ -157,7 +157,7 @@ typedef struct quasar_t {
     uint32_t alpha;                                /**< Fan-out degree for random walk when no route known */
     bloom_filter_t* seen;                    /**< Per-node dedup: message IDs already processed */
     uint32_t seen_size;                      /**< Dedup filter size in bits */
-    uint32_t seen_hashes;                   /**< Dedup filter hash count */
+    uint32_t seen_hashes;                    /**< Dedup filter hash count */
     quasar_delivery_cb_t on_delivery;              /**< Called when a message is delivered to a local subscriber */
     void* delivery_ctx;                            /**< User context for delivery callback */
     PLATFORMLOCKTYPE(lock);                        /**< Thread-safe access to subscriptions and filter */
