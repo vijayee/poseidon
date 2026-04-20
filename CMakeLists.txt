@@ -75,6 +75,7 @@ set(POSEIDON_SOURCES
     ${BLOOM_SRC_DIR}/elastic_bloom_filter.c
     ${BLOOM_SRC_DIR}/attenuated_bloom_filter.c
     ${QUASAR_SRC_DIR}/quasar.c
+    ${QUASAR_SRC_DIR}/quasar_message_id.c
 )
 
 add_library(poseidon STATIC ${POSEIDON_SOURCES})
