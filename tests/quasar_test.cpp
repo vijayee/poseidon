@@ -6,6 +6,7 @@
 #include <string.h>
 #include <arpa/inet.h>
 #include "Network/Quasar/quasar.h"
+#include "Network/Quasar/quasar_message_id.h"
 #include "Bloom/attenuated_bloom_filter.h"
 
 class QuasarTest : public ::testing::Test {
@@ -339,4 +340,60 @@ TEST_F(OnRouteMessageTest, ZeroHopsRemainingStopsForwarding) {
     quasar_route_message_destroy(msg);
     meridian_node_destroy(from);
     quasar_destroy(q);
+}
+
+// ============================================================================
+// MESSAGE ID TESTS
+// ============================================================================
+
+class MessageIdTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        quasar_message_id_init();
+    }
+    void TearDown() override {}
+};
+
+TEST_F(MessageIdTest, GetNextReturnsNonZero) {
+    quasar_message_id_t id = quasar_message_id_get_next();
+    EXPECT_GT(id.time, 0u);
+}
+
+TEST_F(MessageIdTest, GetNextProducesUniqueIDs) {
+    quasar_message_id_t id1 = quasar_message_id_get_next();
+    quasar_message_id_t id2 = quasar_message_id_get_next();
+    EXPECT_NE(0, quasar_message_id_compare(&id1, &id2));
+}
+
+TEST_F(MessageIdTest, CompareSameID) {
+    quasar_message_id_t id = quasar_message_id_get_next();
+    EXPECT_EQ(0, quasar_message_id_compare(&id, &id));
+}
+
+TEST_F(MessageIdTest, CompareOrdering) {
+    quasar_message_id_t id1 = quasar_message_id_get_next();
+    quasar_message_id_t id2 = quasar_message_id_get_next();
+    EXPECT_EQ(-1, quasar_message_id_compare(&id1, &id2));
+    EXPECT_EQ(1, quasar_message_id_compare(&id2, &id1));
+}
+
+TEST_F(MessageIdTest, SerializeDeserializeRoundTrip) {
+    quasar_message_id_t id = quasar_message_id_get_next();
+    uint8_t buf[QUASAR_MESSAGE_ID_SIZE];
+    quasar_message_id_serialize(&id, buf);
+    quasar_message_id_t id2;
+    quasar_message_id_deserialize(&id2, buf);
+    EXPECT_EQ(0, quasar_message_id_compare(&id, &id2));
+}
+
+TEST_F(MessageIdTest, SerializedFieldsAreNetworkByteOrder) {
+    quasar_message_id_t id = {0x0102030405060708ull, 0x0A0B0C0D0E0F0102ull, 42};
+    uint8_t buf[QUASAR_MESSAGE_ID_SIZE];
+    quasar_message_id_serialize(&id, buf);
+    EXPECT_EQ(0x01, buf[0]);
+    quasar_message_id_t id2;
+    quasar_message_id_deserialize(&id2, buf);
+    EXPECT_EQ(id.time, id2.time);
+    EXPECT_EQ(id.nanos, id2.nanos);
+    EXPECT_EQ(id.count, id2.count);
 }
