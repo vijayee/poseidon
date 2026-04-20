@@ -8,6 +8,7 @@
 #include "../Meridian/meridian.h"
 #include "../../Bloom/attenuated_bloom_filter.h"
 #include "../../Bloom/bloom_filter.h"
+#include "quasar_message_id.h"
 #include "../../Buffer/buffer.h"
 #include "../../Util/vec.h"
 #include "../../RefCounter/refcounter.h"
@@ -54,6 +55,7 @@ typedef struct quasar_subscription_t {
  */
 typedef struct quasar_route_message_t {
     refcounter_t refcounter;           /**< Reference counting for lifetime */
+    quasar_message_id_t id;           /**< Unique message identifier */
     buffer_t* topic;                   /**< Topic identifier */
     buffer_t* data;                    /**< Message payload */
     bloom_filter_t* visited;           /**< Negative filter: nodes already visited in this walk */
@@ -153,6 +155,9 @@ typedef struct quasar_t {
     vec_t(quasar_subscription_t) local_subs;       /**< Locally active subscriptions with TTL */
     uint32_t max_hops;                             /**< Maximum routing hops (determines filter depth) */
     uint32_t alpha;                                /**< Fan-out degree for random walk when no route known */
+    bloom_filter_t* seen;                    /**< Per-node dedup: message IDs already processed */
+    uint32_t seen_size;                      /**< Dedup filter size in bits */
+    uint32_t seen_hashes;                   /**< Dedup filter hash count */
     quasar_delivery_cb_t on_delivery;              /**< Called when a message is delivered to a local subscriber */
     void* delivery_ctx;                            /**< User context for delivery callback */
     PLATFORMLOCKTYPE(lock);                        /**< Thread-safe access to subscriptions and filter */
@@ -169,9 +174,12 @@ typedef struct quasar_t {
  * @param protocol   Running Meridian protocol instance
  * @param max_hops   Maximum routing distance (number of filter levels)
  * @param alpha      Fan-out for random walk routing (number of random neighbors)
+ * @param seen_size   Size in bits for the dedup bloom filter
+ * @param seen_hashes Number of hash functions for the dedup bloom filter
  * @return           New Quasar instance with refcount=1, or NULL on failure
  */
-quasar_t* quasar_create(struct meridian_protocol_t* protocol, uint32_t max_hops, uint32_t alpha);
+quasar_t* quasar_create(struct meridian_protocol_t* protocol, uint32_t max_hops, uint32_t alpha,
+                          uint32_t seen_size, uint32_t seen_hashes);
 
 /**
  * Destroys a Quasar instance and frees all subscriptions and the routing filter.
