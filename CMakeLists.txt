@@ -92,6 +92,29 @@ target_link_libraries(poseidon PRIVATE
     OpenSSL::Crypto
 )
 
+# Meridian Relay Server
+add_executable(meridian_relay
+    src/relay_main.c
+    src/Network/Meridian/meridian_relay_server.c
+)
+
+target_include_directories(meridian_relay PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/src/inc
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/xxhash
+)
+
+target_link_libraries(meridian_relay PRIVATE
+    poseidon
+    cbor
+    hashmap
+    msquic::msquic
+    msquic::platform
+    pthread
+    OpenSSL::SSL
+    OpenSSL::Crypto
+)
+
 # Test include paths for transitive dependencies
 set(TEST_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/src
