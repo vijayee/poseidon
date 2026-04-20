@@ -1,9 +1,10 @@
 //
 // Created by victor on 4/29/25.
 //
-#include <xxh3.h>
 #include "hash.h"
 #include "allocator.h"
+#include "../Crypto/node_id.h"
+#include <xxh3.h>
 
 
 size_t hash_pointer(const void* ptr) {
@@ -95,7 +96,7 @@ uint64_t* duplicate_uint64(const uint64_t* key) {
 }
 
 size_t* duplicate_size_t(const size_t* key) {
-  uint64_t* copy = get_clear_memory(sizeof(size_t));
+  size_t* copy = get_clear_memory(sizeof(size_t));
   memcpy(copy, key,sizeof(size_t));
   return copy;
 }
@@ -106,4 +107,25 @@ size_t hash_buffer(const buffer_t* data) {
   } else {
     return XXH32(data->data, data->size, 0);
   }
+}
+
+size_t hash_poseidon_node_id(const void* data) {
+  const poseidon_node_id_t* id = (const poseidon_node_id_t*)data;
+  if (sizeof(size_t) == 8) {
+    return XXH3_64bits(id->hash, 8);
+  } else {
+    return XXH32(id->hash, 8, 0);
+  }
+}
+
+int compare_poseidon_node_id(const void* data1, const void* data2) {
+  const poseidon_node_id_t* a = (const poseidon_node_id_t*)data1;
+  const poseidon_node_id_t* b = (const poseidon_node_id_t*)data2;
+  return poseidon_node_id_compare(a, b);
+}
+
+poseidon_node_id_t* duplicate_poseidon_node_id(const poseidon_node_id_t* id) {
+  poseidon_node_id_t* copy = get_clear_memory(sizeof(poseidon_node_id_t));
+  memcpy(copy, id, sizeof(poseidon_node_id_t));
+  return copy;
 }

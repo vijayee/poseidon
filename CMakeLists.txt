@@ -22,6 +22,11 @@ add_subdirectory(deps/libcbor)
 # Build hashmap
 add_subdirectory(deps/hashmap)
 
+# Build BLAKE3
+set(BLAKE3_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(BLAKE3_BUILD_BENCHMARKS OFF CACHE BOOL "" FORCE)
+add_subdirectory(deps/blake3/c)
+
 # Build msquic (requires OpenSSL on Linux, disable -Werror for clang)
 find_package(OpenSSL REQUIRED)
 set(QUIC_DISABLE_WERROR ON CACHE BOOL "" FORCE)
@@ -36,6 +41,7 @@ set(TIME_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Time)
 set(BUFFER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Buffer)
 set(BLOOM_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Bloom)
 set(QUASAR_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Network/Quasar)
+set(CRYPTO_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Crypto)
 
 # Poseidon Library
 set(POSEIDON_SOURCES
@@ -75,6 +81,11 @@ set(POSEIDON_SOURCES
     ${BLOOM_SRC_DIR}/elastic_bloom_filter.c
     ${BLOOM_SRC_DIR}/attenuated_bloom_filter.c
     ${QUASAR_SRC_DIR}/quasar.c
+    ${UTIL_SRC_DIR}/base58.c
+    ${UTIL_SRC_DIR}/hash.c
+    ${CRYPTO_SRC_DIR}/blake3_wrapper.c
+    ${CRYPTO_SRC_DIR}/node_id.c
+    ${CRYPTO_SRC_DIR}/key_pair.c
 )
 
 add_library(poseidon STATIC ${POSEIDON_SOURCES})
@@ -83,12 +94,14 @@ target_include_directories(poseidon PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/src/inc
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/xxhash
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/blake3/c
 )
 
 target_link_libraries(poseidon PRIVATE
     cbor
     hashmap
     pthread
+    blake3
     msquic::msquic
     msquic::platform
     OpenSSL::SSL
@@ -105,12 +118,14 @@ target_include_directories(meridian_relay PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/src/inc
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/xxhash
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/blake3/c
 )
 
 target_link_libraries(meridian_relay PRIVATE
     poseidon
     cbor
     hashmap
+    blake3
     msquic::msquic
     msquic::platform
     pthread
@@ -123,6 +138,7 @@ set(TEST_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/hashmap/include
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/libcbor/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/blake3/c
 )
 
 function(add_meridian_test TEST_NAME)
@@ -132,8 +148,11 @@ function(add_meridian_test TEST_NAME)
         poseidon
         cbor
         hashmap
+        blake3
         msquic::msquic
         msquic::platform
+        OpenSSL::SSL
+        OpenSSL::Crypto
         gtest
         gtest_main
         pthread
@@ -158,3 +177,6 @@ add_meridian_test(bloom_filter_test tests/bloom_filter_test.cpp)
 add_meridian_test(elastic_bloom_filter_test tests/elastic_bloom_filter_test.cpp)
 add_meridian_test(attenuated_bloom_filter_test tests/attenuated_bloom_filter_test.cpp)
 add_meridian_test(quasar_test tests/quasar_test.cpp)
+
+# PKI Tests
+add_meridian_test(pki_test tests/pki_test.cpp)
