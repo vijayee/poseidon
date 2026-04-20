@@ -98,7 +98,7 @@ typedef struct meridian_conn_t {
  * @param local_nat_type Our NAT type for this connection
  * @return               New connection with refcount=1, or NULL on failure
  */
-meridian_conn_t* meridian_conn_create(meridian_node_t* peer, void* relay,
+meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_relay_t* relay,
                                        meridian_nat_type_t local_nat_type);
 
 /**
