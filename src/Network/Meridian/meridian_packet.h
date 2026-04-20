@@ -146,13 +146,15 @@ typedef struct meridian_node_latency_t {
  * Used to respond to closest-node and measure requests.
  *
  * Wire format (CBOR array):
- * [type, query_id_hi, query_id_lo, closest_addr, closest_port, num_targets, ...targets]
+ * [type, query_id_hi, query_id_lo, magic, rendv_addr, rendv_port, closest_addr, closest_port, num_targets, ...targets]
  * Where each target is: [addr, port, latency_us]
  */
 typedef struct meridian_ret_response_t {
     uint8_t type;                   /**< Packet type (MERIDIAN_PACKET_TYPE_RET_RESPONSE) */
     uint64_t query_id;              /**< Query ID this is responding to */
     uint32_t magic;                 /**< Magic number */
+    uint32_t rendv_addr;            /**< Rendezvous point address for NAT traversal */
+    uint16_t rendv_port;            /**< Rendezvous point port for NAT traversal */
     uint32_t closest_addr;          /**< Address of closest node found */
     uint16_t closest_port;          /**< Port of closest node */
     vec_t(meridian_node_latency_t) targets; /**< List of nodes with latencies */

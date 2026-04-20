@@ -454,13 +454,16 @@ int meridian_ret_response_add_target(meridian_ret_response_t* pkt,
 /**
  * Encodes a response packet into CBOR.
  *
+ * CBOR structure:
+ * [type, query_id_hi, query_id_lo, magic, rendv_addr, rendv_port, closest_addr, closest_port, num_targets, ...targets]
+ *
  * @param pkt  Packet to encode
  * @return     CBOR array item, or NULL on failure
  */
 cbor_item_t* meridian_ret_response_encode(const meridian_ret_response_t* pkt) {
     if (pkt == NULL) return NULL;
 
-    cbor_item_t* array = cbor_new_definite_array(6 + pkt->targets.length);
+    cbor_item_t* array = cbor_new_definite_array(9 + pkt->targets.length);
     if (array == NULL) return NULL;
 
     if (!cbor_array_push(array, cbor_build_uint8(pkt->type))) {
@@ -472,7 +475,14 @@ cbor_item_t* meridian_ret_response_encode(const meridian_ret_response_t* pkt) {
     uint64_t qid_2 = pkt->query_id & 0xFFFFFFFF;
     if (!cbor_array_push(array, cbor_build_uint64(qid_1)) ||
         !cbor_array_push(array, cbor_build_uint64(qid_2)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->closest_addr)) ||
+        !cbor_array_push(array, cbor_build_uint32(pkt->magic)) ||
+        !cbor_array_push(array, cbor_build_uint32(pkt->rendv_addr)) ||
+        !cbor_array_push(array, cbor_build_uint16(pkt->rendv_port))) {
+        cbor_decref(&array);
+        return NULL;
+    }
+
+    if (!cbor_array_push(array, cbor_build_uint32(pkt->closest_addr)) ||
         !cbor_array_push(array, cbor_build_uint16(pkt->closest_port))) {
         cbor_decref(&array);
         return NULL;
@@ -509,7 +519,7 @@ meridian_ret_response_t* meridian_ret_response_decode(cbor_item_t* item) {
     if (item == NULL || !cbor_array_is_definite(item)) return NULL;
 
     size_t arr_size = cbor_array_size(item);
-    if (arr_size < 6) return NULL;
+    if (arr_size < 9) return NULL;
 
     cbor_item_t** items = cbor_array_handle(item);
     size_t idx = 0;
@@ -521,6 +531,9 @@ meridian_ret_response_t* meridian_ret_response_decode(cbor_item_t* item) {
     uint64_t qid_1 = cbor_get_uint64(items[idx++]);
     uint64_t qid_2 = cbor_get_uint64(items[idx++]);
     pkt->query_id = (qid_1 << 32) | qid_2;
+    pkt->magic = cbor_get_uint32(items[idx++]);
+    pkt->rendv_addr = cbor_get_uint32(items[idx++]);
+    pkt->rendv_port = cbor_get_uint16(items[idx++]);
     pkt->closest_addr = cbor_get_uint32(items[idx++]);
     pkt->closest_port = cbor_get_uint16(items[idx++]);
 
