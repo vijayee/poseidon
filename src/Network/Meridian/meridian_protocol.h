@@ -19,10 +19,14 @@
 #include "meridian_packet.h"
 #include "../../Workers/pool.h"
 #include "../../Time/wheel.h"
+#include "msquic.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+// Forward declaration
+typedef struct meridian_protocol_t meridian_protocol_t;
 
 // ============================================================================
 // PROTOCOL STATES
@@ -38,6 +42,26 @@ typedef enum {
     MERIDIAN_PROTOCOL_STATE_RUNNING,      /**< Normal operation */
     MERIDIAN_PROTOCOL_STATE_SHUTTING_DOWN /**< Cleaning up */
 } meridian_protocol_state_t;
+
+// ============================================================================
+// PROTOCOL CALLBACKS (must be before meridian_protocol_t)
+// ============================================================================
+
+/** Callback type for protocol events */
+typedef void (*meridian_protocol_event_cb_t)(void* ctx,
+                                             meridian_protocol_t* protocol,
+                                             const uint8_t* data, size_t len);
+
+/**
+ * Callbacks structure for protocol events.
+ * Allows embedding application logic into the protocol.
+ */
+typedef struct meridian_protocol_callbacks_t {
+    void* user_ctx;                    /**< User context passed to callbacks */
+    meridian_protocol_event_cb_t on_packet;    /**< Called for each received packet */
+    meridian_protocol_event_cb_t on_node_joined; /**< Called when a node joins */
+    meridian_protocol_event_cb_t on_node_left;   /**< Called when a node leaves */
+} meridian_protocol_callbacks_t;
 
 // ============================================================================
 // PROTOCOL CONFIGURATION
@@ -69,7 +93,7 @@ typedef struct meridian_protocol_config_t {
 
 /**
  * Main Meridian protocol instance.
- * Orchestrates all Meridian subsystems and manages the UDP socket.
+ * Orchestrates all Meridian subsystems and manages QUIC connectivity.
  *
  * Lifecycle:
  * 1. Create via meridian_protocol_create()
@@ -84,7 +108,11 @@ typedef struct meridian_protocol_t {
     meridian_protocol_state_t state;            /**< Current protocol state */
     meridian_protocol_config_t config;         /**< Configuration parameters */
 
-    int socket_fd;                              /**< UDP socket for network I/O */
+    // QUIC handles (replace UDP socket)
+    const struct QUIC_API_TABLE* msquic;     /**< msquic function table */
+    HQUIC registration;                       /**< msquic registration handle */
+    HQUIC listener;                           /**< QUIC listener for incoming */
+    HQUIC configuration;                      /**< QUIC configuration (ALPN, TLS) */
     struct sockaddr_in local_addr;              /**< Local binding address */
 
     meridian_ring_set_t* ring_set;             /**< Latency ring management */
@@ -97,11 +125,16 @@ typedef struct meridian_protocol_t {
 
     meridian_node_t* seed_nodes[16];           /**< Bootstrap nodes */
     size_t num_seed_nodes;                      /**< Number of seed nodes configured */
-    meridian_node_t* connected_peers[64];      /**< Active peer connections */
+
+    // Connected peers via QUIC connections
+    HQUIC connected_peers[64];                 /**< Active QUIC connections */
+    meridian_node_t* peer_nodes[64];           /**< Peer address info corresponding to connections */
     size_t num_connected_peers;                 /**< Number of connected peers */
 
+    meridian_protocol_callbacks_t callbacks;   /**< Protocol event callbacks */
+
     PLATFORMLOCKTYPE(lock);                    /**< Thread-safe state access */
-    bool running;                               /**< True when protocol is active */
+    bool running;                              /**< True when protocol is active */
 } meridian_protocol_t;
 
 // ============================================================================
@@ -119,14 +152,14 @@ meridian_protocol_t* meridian_protocol_create(const meridian_protocol_config_t* 
 
 /**
  * Destroys a protocol instance and all its subsystems.
- * Closes the UDP socket and releases all allocated resources.
+ * Closes the QUIC connections and releases all allocated resources.
  *
  * @param protocol  Protocol to destroy
  */
 void meridian_protocol_destroy(meridian_protocol_t* protocol);
 
 /**
- * Starts the protocol, opening the UDP socket and initializing gossip.
+ * Starts the protocol, initializing QUIC listener and gossip.
  *
  * @param protocol  Protocol to start
  * @return          0 on success, -1 on failure
@@ -134,7 +167,7 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol);
 int meridian_protocol_start(meridian_protocol_t* protocol);
 
 /**
- * Stops the protocol, closing sockets and stopping gossip.
+ * Stops the protocol, closing connections and stopping gossip.
  *
  * @param protocol  Protocol to stop
  * @return          0 on success, -1 on failure
@@ -287,22 +320,6 @@ int meridian_protocol_on_measure_result(meridian_protocol_t* protocol,
 // ============================================================================
 // CALLBACKS
 // ============================================================================
-
-/** Callback type for protocol events */
-typedef void (*meridian_protocol_event_cb_t)(void* ctx,
-                                             meridian_protocol_t* protocol,
-                                             const uint8_t* data, size_t len);
-
-/**
- * Callbacks structure for protocol events.
- * Allows embedding application logic into the protocol.
- */
-typedef struct meridian_protocol_callbacks_t {
-    void* user_ctx;                    /**< User context passed to callbacks */
-    meridian_protocol_event_cb_t on_packet;    /**< Called for each received packet */
-    meridian_protocol_event_cb_t on_node_joined; /**< Called when a node joins */
-    meridian_protocol_event_cb_t on_node_left;   /**< Called when a node leaves */
-} meridian_protocol_callbacks_t;
 
 /**
  * Sets the callbacks for protocol events.

@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include "../../Util/threadding.h"
 #include "meridian.h"
+#include "msquic.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -65,10 +66,25 @@ typedef struct meridian_rendv_t {
  */
 typedef struct meridian_rendv_connection_t {
     meridian_rendv_t* rendv;      /**< Rendezvous point for this connection */
-    int socket_fd;              /**< Socket file descriptor */
+    HQUIC connection;            /**< QUIC connection handle */
     bool connected;             /**< Connection state */
     struct sockaddr_storage remote_addr; /**< Remote peer address */
 } meridian_rendv_connection_t;
+
+// ============================================================================
+// RENDEZVOUS CONFIGURATION
+// ============================================================================
+
+/**
+ * Configuration for rendezvous QUIC connections.
+ * Contains TLS credentials and connection settings.
+ */
+typedef struct meridian_rendv_config_t {
+    const char* alpn;                        /**< ALPN protocol identifier */
+    QUIC_CREDENTIAL_CONFIG* cred_config;   /**< TLS credential configuration */
+    uint32_t idle_timeout_ms;               /**< Connection idle timeout */
+    bool datagram_recv_enabled;              /**< Enable receiving datagrams */
+} meridian_rendv_config_t;
 
 // ============================================================================
 // RENDEZVOUS HANDLE
@@ -83,6 +99,9 @@ typedef struct meridian_rendv_handle_t {
     meridian_rendv_t* local_rendv;               /**< Local rendezvous point (if any) */
     vec_t(meridian_rendv_t*) peer_rendvs;       /**< Known peer rendezvous points */
     vec_t(meridian_rendv_connection_t*) connections; /**< Active tunneled connections */
+    const struct QUIC_API_TABLE* msquic;     /**< msquic function table */
+    HQUIC registration;                       /**< msquic registration for tunnels */
+    HQUIC configuration;                     /**< msquic configuration for tunnels */
     PLATFORMLOCKTYPE(lock);                    /**< Thread-safe access */
 } meridian_rendv_handle_t;
 
@@ -134,6 +153,21 @@ meridian_nat_type_t meridian_rendv_get_nat_type(const meridian_rendv_t* rendv);
  * @return  New handle with refcount=1, or NULL on failure
  */
 meridian_rendv_handle_t* meridian_rendv_handle_create(void);
+
+/**
+ * Sets the msquic handle and creates QUIC configuration on the rendezvous handle.
+ * Must be called before creating QUIC tunnels.
+ *
+ * @param handle  Handle to update
+ * @param msquic  msquic function table
+ * @param registration  msquic registration handle
+ * @param config  QUIC configuration with TLS credentials (NULL for defaults)
+ * @return        0 on success, -1 on failure
+ */
+int meridian_rendv_handle_set_msquic(meridian_rendv_handle_t* handle,
+                                    const struct QUIC_API_TABLE* msquic,
+                                    HQUIC registration,
+                                    const meridian_rendv_config_t* config);
 
 /**
  * Destroys a rendezvous handle.
@@ -195,26 +229,26 @@ meridian_rendv_t* meridian_rendv_handle_find_peer(meridian_rendv_handle_t* handl
 // ============================================================================
 
 /**
- * Creates a UDP tunnel to a peer rendezvous point.
- * Used for hole-punching and direct peer-to-peer communication.
+ * Creates a QUIC tunnel to a peer rendezvous point.
+ * Used for hole-punching and direct communication.
  *
  * @param handle  Handle to create tunnel from
- * @param peer    Peer rendezvous to connect to
- * @param out_fd  Output: file descriptor for the tunnel
+ * @param peer    Peer to connect to
+ * @param out_conn  Output: QUIC connection handle for the tunnel
  * @return        0 on success, -1 on failure
  */
 int meridian_rendv_handle_create_tunnel(meridian_rendv_handle_t* handle,
                                          meridian_rendv_t* peer,
-                                         int* out_fd);
+                                         HQUIC* out_conn);
 
 /**
- * Closes a tunnel file descriptor.
+ * Closes a QUIC tunnel connection.
  *
- * @param handle  Handle (unused in current impl)
- * @param fd      File descriptor to close
+ * @param handle  Handle
+ * @param conn    QUIC connection to close
  * @return        0 on success, -1 on failure
  */
-int meridian_rendv_handle_close_tunnel(meridian_rendv_handle_t* handle, int fd);
+int meridian_rendv_handle_close_tunnel(meridian_rendv_handle_t* handle, HQUIC conn);
 
 // ============================================================================
 // NAT DETECTION

@@ -206,6 +206,16 @@ void meridian_ring_set_unfreeze(meridian_ring_set_t* set, int ring_num);
  */
 bool meridian_ring_set_eligible_for_replacement(meridian_ring_set_t* set, int ring_num);
 
+/**
+ * Promotes the oldest secondary node to primary ring.
+ * Removes the first node from secondary and adds it to primary.
+ *
+ * @param set      Ring set
+ * @param ring_num Ring to promote from
+ * @return         0 on success, -1 if no secondary nodes
+ */
+int meridian_ring_set_promote_secondary(meridian_ring_set_t* set, int ring_num);
+
 #ifdef __cplusplus
 }
 #endif

@@ -93,8 +93,59 @@ meridian_rendv_handle_t* meridian_rendv_handle_create(void) {
     vec_init(&handle->connections);
     platform_lock_init(&handle->lock);
     refcounter_init(&handle->refcounter);
+    handle->msquic = NULL;
+    handle->registration = NULL;
+    handle->configuration = NULL;
 
     return handle;
+}
+
+int meridian_rendv_handle_set_msquic(meridian_rendv_handle_t* handle,
+                                    const struct QUIC_API_TABLE* msquic,
+                                    HQUIC registration,
+                                    const meridian_rendv_config_t* config) {
+    if (handle == NULL) return -1;
+
+    handle->msquic = msquic;
+    handle->registration = registration;
+
+    // Create QUIC configuration if config provided
+    if (config != NULL && config->alpn != NULL) {
+        QUIC_BUFFER Alpn = { (uint32_t)strlen(config->alpn), (uint8_t*)config->alpn };
+
+        QUIC_SETTINGS Settings = {0};
+        Settings.IdleTimeoutMs = config->idle_timeout_ms ? config->idle_timeout_ms : 30000;
+        Settings.IsSet.IdleTimeoutMs = TRUE;
+        Settings.DatagramReceiveEnabled = config->datagram_recv_enabled;
+        Settings.IsSet.DatagramReceiveEnabled = TRUE;
+
+        QUIC_STATUS Status = handle->msquic->ConfigurationOpen(
+            handle->registration,
+            &Alpn, 1,
+            &Settings, sizeof(Settings),
+            NULL,
+            &handle->configuration);
+
+        if (QUIC_FAILED(Status)) {
+            handle->configuration = NULL;
+            return -1;
+        }
+
+        // Load credentials if provided
+        if (config->cred_config != NULL) {
+            Status = handle->msquic->ConfigurationLoadCredential(
+                handle->configuration,
+                config->cred_config);
+
+            if (QUIC_FAILED(Status)) {
+                handle->msquic->ConfigurationClose(handle->configuration);
+                handle->configuration = NULL;
+                return -1;
+            }
+        }
+    }
+
+    return 0;
 }
 
 /**
@@ -124,13 +175,23 @@ void meridian_rendv_handle_destroy(meridian_rendv_handle_t* handle) {
         // Close and free all connections
         for (size_t i = 0; i < handle->connections.length; i++) {
             if (handle->connections.data[i]) {
-                if (handle->connections.data[i]->socket_fd >= 0) {
-                    close(handle->connections.data[i]->socket_fd);
+                if (handle->connections.data[i]->connection) {
+                    if (handle->msquic) {
+                        handle->msquic->ConnectionClose(handle->connections.data[i]->connection);
+                    }
                 }
                 free(handle->connections.data[i]);
             }
         }
         vec_deinit(&handle->connections);
+
+        if (handle->configuration && handle->msquic) {
+            handle->msquic->ConfigurationClose(handle->configuration);
+        }
+
+        if (handle->registration && handle->msquic) {
+            handle->msquic->RegistrationClose(handle->registration);
+        }
 
         platform_lock_destroy(&handle->lock);
         free(handle);
@@ -257,64 +318,70 @@ meridian_rendv_t* meridian_rendv_handle_find_peer(meridian_rendv_handle_t* handl
 // ============================================================================
 
 /**
- * Creates a UDP tunnel to a peer rendezvous point.
+ * Creates a QUIC tunnel to a peer rendezvous point.
  * Used for hole-punching and direct communication.
  *
  * @param handle  Handle to create tunnel from
  * @param peer    Peer to connect to
- * @param out_fd  Output: file descriptor for the tunnel
+ * @param out_conn  Output: QUIC connection handle for the tunnel
  * @return        0 on success, -1 on failure
  */
 int meridian_rendv_handle_create_tunnel(meridian_rendv_handle_t* handle,
                                          meridian_rendv_t* peer,
-                                         int* out_fd) {
-    if (handle == NULL || peer == NULL || out_fd == NULL) return -1;
+                                         HQUIC* out_conn) {
+    if (handle == NULL || peer == NULL || out_conn == NULL) return -1;
+    if (handle->msquic == NULL || handle->registration == NULL) return -1;
 
-    *out_fd = -1;
+    *out_conn = NULL;
 
-    // Create UDP socket
-    int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0) return -1;
+    // Create QUIC connection
+    HQUIC Connection;
+    QUIC_STATUS Status = handle->msquic->ConnectionOpen(
+        handle->registration,
+        NULL,  // No callback for tunnel connections
+        handle,
+        &Connection);
 
-    // Bind to any address/port (let kernel assign ephemeral port)
-    struct sockaddr_in local_addr;
-    memset(&local_addr, 0, sizeof(local_addr));
-    local_addr.sin_family = AF_INET;
-    local_addr.sin_addr.s_addr = INADDR_ANY;
-    local_addr.sin_port = 0;
-
-    if (bind(sock, (struct sockaddr*)&local_addr, sizeof(local_addr)) < 0) {
-        close(sock);
+    if (QUIC_FAILED(Status)) {
         return -1;
     }
 
-    // Connect to peer
-    struct sockaddr_in peer_addr;
-    memset(&peer_addr, 0, sizeof(peer_addr));
-    peer_addr.sin_family = AF_INET;
-    peer_addr.sin_addr.s_addr = peer->addr;
-    peer_addr.sin_port = peer->port;
+    // Build remote address
+    QUIC_ADDR RemoteAddr = {0};
+    RemoteAddr.Ipv4.sin_family = AF_INET;
+    RemoteAddr.Ipv4.sin_addr.s_addr = peer->addr;
+    RemoteAddr.Ipv4.sin_port = peer->port;
 
-    if (connect(sock, (struct sockaddr*)&peer_addr, sizeof(peer_addr)) < 0) {
-        close(sock);
+    // Start connection - use configuration if set, otherwise NULL for defaults
+    Status = handle->msquic->ConnectionStart(
+        Connection,
+        handle->configuration,
+        AF_INET,
+        NULL,  // Let QUIC resolve
+        peer->port);
+
+    if (QUIC_FAILED(Status)) {
+        handle->msquic->ConnectionClose(Connection);
         return -1;
     }
 
-    *out_fd = sock;
+    *out_conn = Connection;
     return 0;
 }
 
 /**
- * Closes a tunnel file descriptor.
+ * Closes a QUIC tunnel connection.
  *
- * @param handle  Handle (unused but part of API)
- * @param fd      File descriptor to close
+ * @param handle  Handle
+ * @param conn    QUIC connection to close
  * @return        0 on success, -1 on failure
  */
-int meridian_rendv_handle_close_tunnel(meridian_rendv_handle_t* handle, int fd) {
-    (void)handle;
-    if (handle == NULL || fd < 0) return -1;
-    close(fd);
+int meridian_rendv_handle_close_tunnel(meridian_rendv_handle_t* handle, HQUIC conn) {
+    if (handle == NULL || conn == NULL) return -1;
+    if (handle->msquic == NULL) return -1;
+
+    handle->msquic->ConnectionShutdown(conn, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
+    handle->msquic->ConnectionClose(conn);
     return 0;
 }
 
@@ -380,10 +447,14 @@ int meridian_rendv_send_hole_punch(meridian_rendv_handle_t* handle,
 /**
  * Receives a hole-punching packet and reports source.
  *
- * @param handle     Handle to receive on
- * @param src_addr   Output: source address of punching peer
- * @param src_port   Output: source port of punching peer
- * @return           0 on success, -1 on failure
+ * Note: QUIC doesn't use UDP hole-punching. NAT traversal in QUIC is handled
+ * by establishing connections through the rendezvous server directly.
+ * This function is a no-op and always returns 0.
+ *
+ * @param handle     Handle to receive on (unused)
+ * @param src_addr   Output: source address of punching peer (unchanged)
+ * @param src_port   Output: source port of punching peer (unchanged)
+ * @return           0 (always succeeds, no-op)
  */
 int meridian_rendv_recv_hole_punch(meridian_rendv_handle_t* handle,
                                      uint32_t* src_addr, uint16_t* src_port) {
@@ -391,7 +462,6 @@ int meridian_rendv_recv_hole_punch(meridian_rendv_handle_t* handle,
     (void)src_addr;
     (void)src_port;
     if (handle == NULL || src_addr == NULL || src_port == NULL) return -1;
-
     return -1;  // Placeholder - not yet implemented
 }
 

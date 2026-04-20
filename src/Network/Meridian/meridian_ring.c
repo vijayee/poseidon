@@ -347,3 +347,20 @@ bool meridian_ring_set_eligible_for_replacement(meridian_ring_set_t* set, int ri
     // Eligible only if we have surplus candidates
     return eligible_count > (int) set->primary_ring_size;
 }
+
+int meridian_ring_set_promote_secondary(meridian_ring_set_t* set, int ring_num) {
+    if (set == NULL || ring_num < 0 || ring_num >= MERIDIAN_MAX_RINGS) return -1;
+
+    meridian_ring_t* ring = &set->rings[ring_num];
+    if (ring->secondary.length == 0) return -1;
+    if (ring->primary.length >= set->primary_ring_size) return -1;
+
+    // Take first node from secondary
+    meridian_node_t* to_promote = ring->secondary.data[0];
+    vec_splice(&ring->secondary, 0, 1);
+
+    // Add to primary
+    vec_push(&ring->primary, to_promote);
+
+    return 0;
+}
