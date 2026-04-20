@@ -10,9 +10,9 @@ extern "C" {
 #include <stddef.h>
 #include <sys/socket.h>
 
-#include "src/Common/refcounter.h"
-#include "src/Common/PlatformLocks.h"
-#include "quic_datatypes.h"
+#include "../../RefCounter/refcounter.h"
+#include "../../Util/threadding.h"
+#include "msquic.h"
 
 /**
  * @brief Maximum number of concurrent clients supported by relay server
@@ -114,7 +114,7 @@ meridian_relay_server_start(
  *
  * @param[in] server Server to stop
  */
-void
+int
 meridian_relay_server_stop(
     meridian_relay_server_t* server
 );
@@ -124,8 +124,9 @@ meridian_relay_server_stop(
  *
  * @param[in] server Server to query
  * @param[out] stats Output statistics structure
+ * @return 0 on success, -1 on failure
  */
-void
+int
 meridian_relay_server_get_stats(
     meridian_relay_server_t* server,
     meridian_relay_server_stats_t* stats
