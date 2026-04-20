@@ -75,6 +75,36 @@ meridian_nat_type_t meridian_rendv_get_nat_type(const meridian_rendv_t* rendv) {
     return rendv ? rendv->nat_type : MERIDIAN_NAT_TYPE_UNKNOWN;
 }
 
+uint32_t meridian_rendv_get_reflexive_addr(const meridian_rendv_t* rendv) {
+    return rendv ? rendv->reflexive_addr : 0;
+}
+
+uint16_t meridian_rendv_get_reflexive_port(const meridian_rendv_t* rendv) {
+    return rendv ? rendv->reflexive_port : 0;
+}
+
+int meridian_rendv_set_reflexive_addr(meridian_rendv_t* rendv, uint32_t addr, uint16_t port) {
+    if (rendv == NULL) return -1;
+    rendv->reflexive_addr = addr;
+    rendv->reflexive_port = port;
+    return 0;
+}
+
+bool meridian_rendv_can_direct_connect(const meridian_rendv_t* rendv) {
+    if (rendv == NULL) return false;
+    switch (rendv->nat_type) {
+        case MERIDIAN_NAT_TYPE_OPEN:
+        case MERIDIAN_NAT_TYPE_FULL_CONE:
+        case MERIDIAN_NAT_TYPE_RESTRICTED_CONE:
+        case MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE:
+            return true;
+        case MERIDIAN_NAT_TYPE_SYMMETRIC:
+        case MERIDIAN_NAT_TYPE_UNKNOWN:
+        default:
+            return false;
+    }
+}
+
 // ============================================================================
 // RENDEZVOUS HANDLE
 // ============================================================================

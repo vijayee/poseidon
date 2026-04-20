@@ -52,6 +52,8 @@ typedef struct meridian_rendv_t {
     refcounter_t refcounter;   /**< Reference counting for lifetime */
     uint32_t addr;             /**< Rendezvous server IPv4 address */
     uint16_t port;             /**< Rendezvous server port */
+    uint32_t reflexive_addr;   /**< Discovered public address (0 if unknown) */
+    uint16_t reflexive_port;   /**< Discovered public port (0 if unknown) */
     meridian_nat_type_t nat_type; /**< NAT type of this rendezvous */
     bool is_active;            /**< Whether this rendezvous is currently active */
 } meridian_rendv_t;
@@ -141,6 +143,42 @@ int meridian_rendv_set_nat_type(meridian_rendv_t* rendv, meridian_nat_type_t typ
  * @return       NAT type enum value
  */
 meridian_nat_type_t meridian_rendv_get_nat_type(const meridian_rendv_t* rendv);
+
+/**
+ * Gets the reflexive (public) address discovered via NAT detection.
+ *
+ * @param rendv  Rendezvous to query
+ * @return      Reflexive IPv4 address, or 0 if not yet discovered
+ */
+uint32_t meridian_rendv_get_reflexive_addr(const meridian_rendv_t* rendv);
+
+/**
+ * Gets the reflexive (public) port discovered via NAT detection.
+ *
+ * @param rendv  Rendezvous to query
+ * @return      Reflexive port, or 0 if not yet discovered
+ */
+uint16_t meridian_rendv_get_reflexive_port(const meridian_rendv_t* rendv);
+
+/**
+ * Sets the reflexive address and port.
+ *
+ * @param rendv  Rendezvous to update
+ * @param addr   Discovered public IPv4 address
+ * @param port   Discovered public port
+ * @return      0 on success, -1 on failure
+ */
+int meridian_rendv_set_reflexive_addr(meridian_rendv_t* rendv, uint32_t addr, uint16_t port);
+
+/**
+ * Checks whether direct connections are possible given the NAT type.
+ * Returns true for OPEN, FULL_CONE, RESTRICTED_CONE, and PORT_RESTRICTED_CONE.
+ * Returns false for SYMMETRIC and UNKNOWN.
+ *
+ * @param rendv  Rendezvous to check
+ * @return      True if direct connections may succeed
+ */
+bool meridian_rendv_can_direct_connect(const meridian_rendv_t* rendv);
 
 // ============================================================================
 // HANDLE LIFECYCLE
