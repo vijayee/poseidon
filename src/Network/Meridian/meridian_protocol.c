@@ -68,6 +68,11 @@ meridian_protocol_t* meridian_protocol_create(const meridian_protocol_config_t* 
     protocol->num_seed_nodes = 0;
     protocol->num_connected_peers = 0;
 
+    // Initialize NAT traversal fields
+    protocol->connections = NULL;
+    protocol->num_connections = 0;
+    protocol->default_relay = NULL;
+
     platform_lock_init(&protocol->lock);
     refcounter_init(&protocol->refcounter);
 

@@ -17,6 +17,7 @@
 #include "meridian_rendv.h"
 #include "meridian_measure.h"
 #include "meridian_packet.h"
+#include "meridian_conn.h"
 #include "../../Workers/pool.h"
 #include "../../Time/wheel.h"
 #include "msquic.h"
@@ -130,6 +131,11 @@ typedef struct meridian_protocol_t {
     HQUIC connected_peers[64];                 /**< Active QUIC connections */
     meridian_node_t* peer_nodes[64];           /**< Peer address info corresponding to connections */
     size_t num_connected_peers;                 /**< Number of connected peers */
+
+    // NAT traversal and connection management
+    meridian_conn_t** connections;              /**< Managed connections (direct + relay) */
+    size_t num_connections;                     /**< Number of managed connections */
+    struct meridian_relay_t* default_relay;    /**< Default relay server client */
 
     meridian_protocol_callbacks_t callbacks;   /**< Protocol event callbacks */
 
