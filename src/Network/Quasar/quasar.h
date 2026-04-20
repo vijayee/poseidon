@@ -19,28 +19,160 @@
 extern "C" {
 #endif
 
+// ============================================================================
+// SUBSCRIPTION
+// ============================================================================
+
+/**
+ * A single local subscription to a topic.
+ * Tracks the topic identifier and a time-to-live for automatic expiry.
+ *
+ * When TTL reaches 0, quasar_tick() removes the subscription and
+ * updates the routing filter (level 0) accordingly.
+ */
 typedef struct quasar_subscription_t {
-    buffer_t* topic;
-    uint32_t ttl;
+    buffer_t* topic;    /**< Topic name as a byte buffer (arbitrary identifier) */
+    uint32_t ttl;       /**< Time-to-live in ticks; 0 triggers auto-expiry */
 } quasar_subscription_t;
 
+// ============================================================================
+// QUASAR INSTANCE
+// ============================================================================
+
+/**
+ * Main Quasar pub/sub overlay instance.
+ * Layers content-based routing on top of a Meridian P2P network using
+ * attenuated Bloom filters for probabilistic topic-based routing.
+ *
+ * Routing strategy:
+ * - Level 0 of the routing filter holds topics subscribed to locally
+ * - Higher levels hold topics reachable through neighbors at increasing hop distances
+ * - Publishing checks the filter: local delivery (level 0), directed routing (level N),
+ *   or random walk (not found) with alpha fan-out
+ *
+ * Lifecycle:
+ * 1. Create via quasar_create() with a running Meridian protocol
+ * 2. Subscribe to topics via quasar_subscribe()
+ * 3. Publish messages via quasar_publish()
+ * 4. Periodically call quasar_propagate() and quasar_tick()
+ * 5. Destroy via quasar_destroy()
+ */
 typedef struct quasar_t {
-    refcounter_t refcounter;
-    struct meridian_protocol_t* protocol;
-    attenuated_bloom_filter_t* routing;
-    vec_t(quasar_subscription_t) local_subs;
-    uint32_t max_hops;
-    uint32_t alpha;
-    PLATFORMLOCKTYPE(lock);
+    refcounter_t refcounter;                      /**< Reference counting for lifetime */
+    struct meridian_protocol_t* protocol;          /**< Underlying Meridian P2P network */
+    attenuated_bloom_filter_t* routing;            /**< Multi-level routing filter for topic-based routing */
+    vec_t(quasar_subscription_t) local_subs;       /**< Locally active subscriptions with TTL */
+    uint32_t max_hops;                             /**< Maximum routing hops (determines filter depth) */
+    uint32_t alpha;                                /**< Fan-out degree for random walk when no route known */
+    PLATFORMLOCKTYPE(lock);                        /**< Thread-safe access to subscriptions and filter */
 } quasar_t;
 
+// ============================================================================
+// LIFECYCLE
+// ============================================================================
+
+/**
+ * Creates a new Quasar overlay on top of a Meridian protocol.
+ * Initializes the routing filter with max_hops levels, each using an elastic Bloom filter.
+ *
+ * @param protocol   Running Meridian protocol instance
+ * @param max_hops   Maximum routing distance (number of filter levels)
+ * @param alpha      Fan-out for random walk routing (number of random neighbors)
+ * @return           New Quasar instance with refcount=1, or NULL on failure
+ */
 quasar_t* quasar_create(struct meridian_protocol_t* protocol, uint32_t max_hops, uint32_t alpha);
+
+/**
+ * Destroys a Quasar instance and frees all subscriptions and the routing filter.
+ *
+ * @param quasar  Quasar instance to destroy
+ */
 void quasar_destroy(quasar_t* quasar);
+
+// ============================================================================
+// SUBSCRIPTION MANAGEMENT
+// ============================================================================
+
+/**
+ * Subscribes to a topic. Adds the topic to level 0 of the routing filter
+ * and records it in the local subscription list with the given TTL.
+ *
+ * @param quasar     Quasar instance
+ * @param topic      Topic identifier bytes
+ * @param topic_len  Length of topic identifier
+ * @param ttl        Time-to-live in ticks (0 = never expires until unsubscribed)
+ * @return           0 on success, -1 on failure
+ */
 int quasar_subscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len, uint32_t ttl);
+
+/**
+ * Unsubscribes from a topic. Removes it from the routing filter and local list.
+ *
+ * @param quasar     Quasar instance
+ * @param topic      Topic identifier bytes
+ * @param topic_len  Length of topic identifier
+ * @return           0 on success, -1 on failure
+ */
 int quasar_unsubscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len);
+
+// ============================================================================
+// PUBLISHING
+// ============================================================================
+
+/**
+ * Publishes a message to a topic. Routes based on the routing filter:
+ * - hops == 0: local delivery (this node is subscribed)
+ * - hops > 0:  directed routing toward the subscriber via Meridian
+ * - not found: random walk to alpha random neighbors
+ *
+ * @param quasar     Quasar instance
+ * @param topic      Topic identifier bytes
+ * @param topic_len  Length of topic identifier
+ * @param data       Message payload bytes
+ * @param data_len   Length of message payload
+ * @return           0 on success, -1 on failure
+ */
 int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len, const uint8_t* data, size_t data_len);
+
+// ============================================================================
+// GOSSIP AND PROPAGATION
+// ============================================================================
+
+/**
+ * Handles incoming gossip data from a peer.
+ * Called when the Meridian protocol delivers a gossip message that
+ * contains routing filter updates from a neighbor.
+ *
+ * @param quasar  Quasar instance
+ * @param data    Raw gossip data
+ * @param len     Length of data
+ * @param from    Node that sent the gossip
+ * @return        0 on success, -1 on failure
+ */
 int quasar_on_gossip(quasar_t* quasar, const uint8_t* data, size_t len, const struct meridian_node_t* from);
+
+/**
+ * Propagates this node's routing filter to neighbors via Meridian gossip.
+ * Neighbors merge the filter into their own (shifted by one level) to
+ * build their distance-gradient view of topic subscriptions.
+ *
+ * @param quasar  Quasar instance
+ * @return        0 on success, -1 on failure
+ */
 int quasar_propagate(quasar_t* quasar);
+
+// ============================================================================
+// PERIODIC MAINTENANCE
+// ============================================================================
+
+/**
+ * Advances the subscription TTL clock by one tick.
+ * Decrements TTL for all local subscriptions and removes expired ones
+ * from both the subscription list and the routing filter (level 0).
+ *
+ * @param quasar  Quasar instance
+ * @return        0 on success, -1 on failure
+ */
 int quasar_tick(quasar_t* quasar);
 
 #ifdef __cplusplus
