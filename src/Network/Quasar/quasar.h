@@ -7,6 +7,7 @@
 
 #include "../Meridian/meridian.h"
 #include "../../Bloom/attenuated_bloom_filter.h"
+#include "../../Bloom/bloom_filter.h"
 #include "../../Buffer/buffer.h"
 #include "../../Util/vec.h"
 #include "../../RefCounter/refcounter.h"
@@ -34,6 +35,94 @@ typedef struct quasar_subscription_t {
     buffer_t* topic;    /**< Topic name as a byte buffer (arbitrary identifier) */
     uint32_t ttl;       /**< Time-to-live in ticks; 0 triggers auto-expiry */
 } quasar_subscription_t;
+
+// ============================================================================
+// ROUTE MESSAGE (carries negative bloom filter for random walk dedup)
+// ============================================================================
+
+/**
+ * A message being routed through the Quasar overlay.
+ * Carries a negative bloom filter that records which nodes have already
+ * been visited during a random walk, preventing routing loops and
+ * redundant delivery per the Quasar paper.
+ *
+ * Lifecycle:
+ * 1. Created by quasar_publish() or received via quasar_on_route_message()
+ * 2. Each hop adds itself to the visited filter via quasar_route_message_add_visited()
+ * 3. When forwarding via random walk, nodes in the filter are skipped
+ * 4. Destroyed when delivery completes or hops_remaining reaches 0
+ */
+typedef struct quasar_route_message_t {
+    refcounter_t refcounter;           /**< Reference counting for lifetime */
+    buffer_t* topic;                   /**< Topic identifier */
+    buffer_t* data;                    /**< Message payload */
+    bloom_filter_t* visited;           /**< Negative filter: nodes already visited in this walk */
+    uint32_t hops_remaining;           /**< TTL for this random walk (decremented each hop) */
+    PLATFORMLOCKTYPE(lock);            /**< Thread-safe access */
+} quasar_route_message_t;
+
+/**
+ * Creates a new route message for network routing.
+ *
+ * @param topic      Topic identifier bytes
+ * @param topic_len  Length of topic identifier
+ * @param data       Message payload bytes
+ * @param data_len   Length of message payload
+ * @param max_hops   Maximum hops this message may take (random walk TTL)
+ * @param neg_size   Size in bits for the negative (visited) bloom filter
+ * @param neg_hashes Number of hash functions for the negative filter
+ * @return           New route message with refcount=1, or NULL on failure
+ */
+quasar_route_message_t* quasar_route_message_create(const uint8_t* topic, size_t topic_len,
+                                                      const uint8_t* data, size_t data_len,
+                                                      uint32_t max_hops,
+                                                      size_t neg_size, uint32_t neg_hashes);
+
+/**
+ * Destroys a route message and frees the topic, payload, and visited filter.
+ *
+ * @param msg  Route message to destroy
+ */
+void quasar_route_message_destroy(quasar_route_message_t* msg);
+
+/**
+ * Records a node as visited in the negative bloom filter.
+ * Subsequent calls to quasar_route_message_has_visited() for this node
+ * will return true.
+ *
+ * @param msg   Route message
+ * @param node  Node that has been visited (addr+port used as key)
+ * @return      0 on success, -1 on failure
+ */
+int quasar_route_message_add_visited(quasar_route_message_t* msg, const meridian_node_t* node);
+
+/**
+ * Checks whether a node has been visited during this random walk.
+ * Uses the negative bloom filter, so false positives are possible
+ * (a node may appear visited even if it wasn't). This is by design:
+ * it errson the side of skipping nodes rather than revisiting them.
+ *
+ * @param msg   Route message
+ * @param node  Node to check
+ * @return      true if the node is likely visited, false if definitely not visited
+ */
+bool quasar_route_message_has_visited(quasar_route_message_t* msg, const meridian_node_t* node);
+
+// ============================================================================
+// LOCAL DELIVERY CALLBACK
+// ============================================================================
+
+/**
+ * Callback invoked when a published message is delivered to a local subscriber.
+ *
+ * @param ctx       User context
+ * @param topic     Topic identifier bytes
+ * @param topic_len Length of topic
+ * @param data      Message payload bytes
+ * @param data_len  Length of payload
+ */
+typedef void (*quasar_delivery_cb_t)(void* ctx, const uint8_t* topic, size_t topic_len,
+                                      const uint8_t* data, size_t data_len);
 
 // ============================================================================
 // QUASAR INSTANCE
@@ -64,6 +153,8 @@ typedef struct quasar_t {
     vec_t(quasar_subscription_t) local_subs;       /**< Locally active subscriptions with TTL */
     uint32_t max_hops;                             /**< Maximum routing hops (determines filter depth) */
     uint32_t alpha;                                /**< Fan-out degree for random walk when no route known */
+    quasar_delivery_cb_t on_delivery;              /**< Called when a message is delivered to a local subscriber */
+    void* delivery_ctx;                            /**< User context for delivery callback */
     PLATFORMLOCKTYPE(lock);                        /**< Thread-safe access to subscriptions and filter */
 } quasar_t;
 
@@ -88,6 +179,15 @@ quasar_t* quasar_create(struct meridian_protocol_t* protocol, uint32_t max_hops,
  * @param quasar  Quasar instance to destroy
  */
 void quasar_destroy(quasar_t* quasar);
+
+/**
+ * Sets the callback invoked when a message is delivered to a local subscriber.
+ *
+ * @param quasar  Quasar instance
+ * @param cb      Delivery callback (may be NULL to unset)
+ * @param ctx     User context passed to the callback
+ */
+void quasar_set_delivery_callback(quasar_t* quasar, quasar_delivery_cb_t cb, void* ctx);
 
 // ============================================================================
 // SUBSCRIPTION MANAGEMENT
@@ -143,8 +243,11 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len, con
  * Called when the Meridian protocol delivers a gossip message that
  * contains routing filter updates from a neighbor.
  *
+ * Deserializes the incoming attenuated bloom filter and merges it into
+ * the local routing filter (shifted by one level).
+ *
  * @param quasar  Quasar instance
- * @param data    Raw gossip data
+ * @param data    Raw gossip data (serialized attenuated bloom filter)
  * @param len     Length of data
  * @param from    Node that sent the gossip
  * @return        0 on success, -1 on failure
@@ -152,9 +255,23 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len, con
 int quasar_on_gossip(quasar_t* quasar, const uint8_t* data, size_t len, const struct meridian_node_t* from);
 
 /**
+ * Handles an incoming routed message from a peer.
+ * Adds this node to the message's negative filter, checks the routing
+ * table for the topic, and either delivers locally, forwards toward
+ * a subscriber, or continues the random walk.
+ *
+ * @param quasar  Quasar instance
+ * @param msg     Route message received from the network
+ * @param from    Node that forwarded the message
+ * @return        0 on success, -1 on failure
+ */
+int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const struct meridian_node_t* from);
+
+/**
  * Propagates this node's routing filter to neighbors via Meridian gossip.
- * Neighbors merge the filter into their own (shifted by one level) to
- * build their distance-gradient view of topic subscriptions.
+ * Serializes the local attenuated bloom filter and broadcasts it to
+ * all connected peers. Neighbors merge the filter into their own
+ * (shifted by one level) to build their distance-gradient view.
  *
  * @param quasar  Quasar instance
  * @return        0 on success, -1 on failure
