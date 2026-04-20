@@ -3,6 +3,7 @@
 //
 
 #include "meridian_relay.h"
+#include "meridian_packet.h"
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
 #include <stdlib.h>
@@ -223,24 +224,25 @@ int meridian_relay_send_datagram(meridian_relay_t* relay, const uint8_t* data,
     if (!cbor_array_push(array, cbor_build_uint8(MERIDIAN_PACKET_TYPE_RELAY_DATAGRAM)) ||
         !cbor_array_push(array, cbor_build_uint32(relay->local_endpoint_id)) ||
         !cbor_array_push(array, cbor_build_uint32(dest_endpoint_id)) ||
-        !cbor_array_push(array, cbor_build_byte_string(data, len))) {
+        !cbor_array_push(array, cbor_build_bytestring(data, len))) {
         cbor_decref(&array);
         return -1;
     }
 
     // Serialize CBOR
-    uint8_t* encoded = NULL;
-    size_t encoded_len = cbor_encode_bytes(array, &encoded);
+    unsigned char* buffer = NULL;
+    size_t buf_sz = 0;
+    size_t encoded_len = cbor_serialize_alloc(array, &buffer, &buf_sz);
     cbor_decref(&array);
 
-    if (encoded == NULL || encoded_len == 0) {
+    if (encoded_len == 0 || buffer == NULL) {
         return -1;
     }
 
     // Send via QUIC datagram
     QUIC_BUFFER Buffer = {
         .Length = (uint32_t)encoded_len,
-        .Buffer = encoded
+        .Buffer = buffer
     };
 
     QUIC_STATUS Status = relay->msquic->DatagramSend(
@@ -249,7 +251,7 @@ int meridian_relay_send_datagram(meridian_relay_t* relay, const uint8_t* data,
         QUIC_SEND_FLAG_NONE,
         NULL);
 
-    free(encoded);
+    free(buffer);
     return QUIC_SUCCEEDED(Status) ? 0 : -1;
 }
 
@@ -278,18 +280,19 @@ int meridian_relay_send_addr_request(meridian_relay_t* relay) {
     }
 
     // Serialize CBOR
-    uint8_t* encoded = NULL;
-    size_t encoded_len = cbor_encode_bytes(array, &encoded);
+    unsigned char* buffer = NULL;
+    size_t buf_sz = 0;
+    size_t encoded_len = cbor_serialize_alloc(array, &buffer, &buf_sz);
     cbor_decref(&array);
 
-    if (encoded == NULL || encoded_len == 0) {
+    if (encoded_len == 0 || buffer == NULL) {
         return -1;
     }
 
     // Send via QUIC datagram
     QUIC_BUFFER Buffer = {
         .Length = (uint32_t)encoded_len,
-        .Buffer = encoded
+        .Buffer = buffer
     };
 
     QUIC_STATUS Status = relay->msquic->DatagramSend(
@@ -298,7 +301,7 @@ int meridian_relay_send_addr_request(meridian_relay_t* relay) {
         QUIC_SEND_FLAG_NONE,
         NULL);
 
-    free(encoded);
+    free(buffer);
     return QUIC_SUCCEEDED(Status) ? 0 : -1;
 }
 
@@ -436,8 +439,8 @@ RelayConnectionCallback(HQUIC Connection, void* Context,
 
                 // Get payload (byte string)
                 cbor_item_t* payload = items[3];
-                uint8_t* payload_data = (uint8_t*)cbor_build_byte_string_data(payload);
-                size_t payload_len = cbor_byte_string_length(payload);
+                uint8_t* payload_data = (uint8_t*)cbor_bytestring_handle(payload);
+                size_t payload_len = cbor_bytestring_length(payload);
 
                 // Invoke datagram callback
                 if (relay->on_datagram != NULL && payload_data != NULL) {

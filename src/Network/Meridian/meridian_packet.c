@@ -684,7 +684,7 @@ void meridian_punch_request_destroy(meridian_punch_request_t* pkt) {
 cbor_item_t* meridian_punch_request_encode(const meridian_punch_request_t* pkt) {
     if (pkt == NULL) return NULL;
 
-    cbor_item_t* array = cbor_new_definite_array(5);
+    cbor_item_t* array = cbor_new_definite_array(6);
     if (array == NULL) return NULL;
 
     uint64_t qid_1 = pkt->query_id >> 32;
