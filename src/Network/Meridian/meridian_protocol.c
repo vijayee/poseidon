@@ -25,6 +25,12 @@ static QUIC_STATUS QUIC_API
 ConnectionCallback(HQUIC Connection, void* Context,
                    QUIC_CONNECTION_EVENT* Event);
 
+static void gossip_outbound_cb(void* ctx, const uint8_t* data, size_t len,
+                                const meridian_node_t* target) {
+    meridian_protocol_t* protocol = (meridian_protocol_t*)ctx;
+    meridian_protocol_send_packet(protocol, data, len, target);
+}
+
 // ============================================================================
 // PROTOCOL LIFECYCLE
 // ============================================================================
@@ -46,6 +52,9 @@ meridian_protocol_t* meridian_protocol_create(const meridian_protocol_config_t* 
     protocol->config.replace_interval_s = config->replace_interval_s;
     protocol->config.gossip_timeout_ms = config->gossip_timeout_ms;
     protocol->config.measure_timeout_ms = config->measure_timeout_ms;
+    protocol->config.tls_key_path = config->tls_key_path;
+    protocol->config.tls_cert_path = config->tls_cert_path;
+    memcpy(&protocol->config.local_node_id, &config->local_node_id, sizeof(poseidon_node_id_t));
     protocol->config.pool = config->pool;
     protocol->config.wheel = config->wheel;
 
@@ -279,7 +288,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
     // Initialize gossip
     meridian_gossip_config_t gossip_config = {
         .user_ctx = protocol,
-        .outbound_cb = NULL,
+        .outbound_cb = gossip_outbound_cb,
         .completed_cb = NULL,
         .init_interval_s = protocol->config.init_gossip_interval_s,
         .num_init_intervals = protocol->config.num_init_gossip_intervals,
