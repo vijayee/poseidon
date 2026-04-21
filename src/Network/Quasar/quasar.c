@@ -528,10 +528,34 @@ int quasar_on_gossip(quasar_t* quasar, const uint8_t* data, size_t len, const st
         }
     }
 
-    // Merge the incoming filter into our routing filter (shifted by one level)
-    int result = attenuated_bloom_filter_merge(quasar->routing, incoming);
-    attenuated_bloom_filter_destroy(incoming);
-    return result;
+    // Store the incoming filter in the per-neighbor slot for directed routing (Algorithm 2)
+    if (from != NULL) {
+        platform_lock(&quasar->lock);
+        // Remove old filter for this neighbor if it exists
+        for (int i = 0; i < quasar->neighbor_filters.length; i++) {
+            if (quasar->neighbor_filters.data[i].addr == from->addr &&
+                quasar->neighbor_filters.data[i].port == from->port) {
+                attenuated_bloom_filter_destroy(quasar->neighbor_filters.data[i].filter);
+                vec_splice(&quasar->neighbor_filters, i, 1);
+                break;
+            }
+        }
+        // Transfer ownership of incoming to the neighbor filter slot
+        quasar_neighbor_filter_t nf;
+        nf.addr = from->addr;
+        nf.port = from->port;
+        nf.filter = incoming;
+        vec_push(&quasar->neighbor_filters, nf);
+        // Also merge into the aggregated routing filter for local checks
+        attenuated_bloom_filter_merge(quasar->routing, incoming);
+        platform_unlock(&quasar->lock);
+    } else {
+        // No sender info — just merge into routing and destroy
+        int result = attenuated_bloom_filter_merge(quasar->routing, incoming);
+        attenuated_bloom_filter_destroy(incoming);
+        return result;
+    }
+    return 0;
 }
 
 // Iteration callback context for collecting bucket entries during propagate

@@ -297,6 +297,84 @@ TEST_F(GossipTest, TooShortDataRejected) {
     quasar_destroy(q);
 }
 
+TEST_F(GossipTest, GossipStoresInNeighborFilter) {
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    ASSERT_NE(nullptr, q);
+
+    meridian_node_t* neighbor = meridian_node_create(htonl(0x0A000001), htons(8080));
+    ASSERT_NE(nullptr, neighbor);
+
+    // Build a minimal gossip buffer with a topic in level 0
+    // Header: magic, version, level_count, level_size, hash_count, omega, fp_bits
+    uint32_t level_size = 1024;
+    size_t bitset_bytes = level_size / 8;
+
+    // First, add the topic to a local filter to get its bitset data
+    const uint8_t* topic = (const uint8_t*)"sports";
+    attenuated_bloom_filter_t* local_filter = attenuated_bloom_filter_create(
+        5, level_size, 3, 0.75f, 8);
+    ASSERT_NE(nullptr, local_filter);
+    attenuated_bloom_filter_subscribe(local_filter, topic, 6);
+
+    // Now serialize it using the same format as quasar_propagate
+    // We'll manually build the buffer
+    size_t header_size = 7 * sizeof(uint32_t);
+    size_t level_data_size = sizeof(uint32_t) + bitset_bytes + sizeof(uint32_t); // count + bitset + num_buckets (0)
+    size_t total = header_size + 5 * level_data_size; // 5 levels
+    uint8_t* data = (uint8_t*)calloc(total, 1);
+
+    // Header
+    uint32_t* header = (uint32_t*)data;
+    header[0] = htonl(0x51534152u); // magic
+    header[1] = htonl(1u);          // version
+    header[2] = htonl(5u);          // level_count
+    header[3] = htonl(level_size);   // level_size
+    header[4] = htonl(3u);          // hash_count
+    header[5] = htonl(750u);        // omega * 1000
+    header[6] = htonl(8u);          // fp_bits
+
+    size_t offset = header_size;
+    for (uint32_t level = 0; level < 5; level++) {
+        elastic_bloom_filter_t* ebf = attenuated_bloom_filter_get_level(local_filter, level);
+        // count
+        *(uint32_t*)(data + offset) = htonl((uint32_t)elastic_bloom_filter_count(ebf));
+        offset += sizeof(uint32_t);
+        // bitset
+        const uint8_t* bitset_data = NULL;
+        size_t bitset_size = 0;
+        elastic_bloom_filter_get_bitset(ebf, &bitset_data, &bitset_size);
+        size_t copy_bytes = bitset_bytes < bitset_size ? bitset_bytes : bitset_size;
+        if (bitset_data != NULL && copy_bytes > 0) {
+            memcpy(data + offset, bitset_data, copy_bytes);
+        }
+        offset += bitset_bytes;
+        // num_buckets (0 for simplicity — we're just testing bitset propagation)
+        *(uint32_t*)(data + offset) = htonl(0u);
+        offset += sizeof(uint32_t);
+    }
+
+    EXPECT_EQ(0, quasar_on_gossip(q, data, total, neighbor));
+
+    // Verify neighbor filter was created
+    attenuated_bloom_filter_t* nf = quasar_get_neighbor_filter(q, neighbor);
+    ASSERT_NE(nullptr, nf);
+
+    // The topic should be findable in the neighbor filter
+    // (level 0 of incoming becomes level 0 of stored filter)
+    EXPECT_TRUE(attenuated_bloom_filter_check(nf, topic, 6, NULL));
+
+    // Also verify it's in the aggregated routing filter (shifted to level 1)
+    uint32_t hops = 0;
+    bool found = attenuated_bloom_filter_check(q->routing, topic, 6, &hops);
+    EXPECT_TRUE(found);
+    EXPECT_EQ(1u, hops); // shifted by +1
+
+    free(data);
+    attenuated_bloom_filter_destroy(local_filter);
+    meridian_node_destroy(neighbor);
+    quasar_destroy(q);
+}
+
 // ============================================================================
 // ON ROUTE MESSAGE TEST
 // ============================================================================
