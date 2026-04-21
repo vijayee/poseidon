@@ -210,6 +210,47 @@ TEST_F(RouteMessageTest, NullTopicOrDataFails) {
     EXPECT_EQ(nullptr, msg);
 }
 
+TEST_F(RouteMessageTest, PublishersList) {
+    const uint8_t* topic = (const uint8_t*)"sports";
+    const uint8_t* data = (const uint8_t*)"goal!";
+    quasar_route_message_t* msg = quasar_route_message_create(
+        topic, 6, data, 5, 10, 256, 3
+    );
+    ASSERT_NE(nullptr, msg);
+
+    // Initially, publishers list is empty
+    EXPECT_EQ(0, msg->pub_count);
+
+    // Add a publisher
+    meridian_node_t* pub1 = meridian_node_create(htonl(0x0A000001), htons(8080));
+    EXPECT_EQ(0, quasar_route_message_add_publisher(msg, pub1));
+    EXPECT_EQ(1, msg->pub_count);
+
+    // Add another publisher
+    meridian_node_t* pub2 = meridian_node_create(htonl(0x0A000002), htons(8081));
+    EXPECT_EQ(0, quasar_route_message_add_publisher(msg, pub2));
+    EXPECT_EQ(2, msg->pub_count);
+
+    // Check contains
+    EXPECT_TRUE(quasar_route_message_has_publisher(msg, pub1));
+    EXPECT_TRUE(quasar_route_message_has_publisher(msg, pub2));
+
+    // Unknown node should not be in publisher list
+    meridian_node_t* unknown = meridian_node_create(htonl(0x0A000003), htons(8082));
+    EXPECT_FALSE(quasar_route_message_has_publisher(msg, unknown));
+
+    // NULL args should be safe
+    EXPECT_EQ(-1, quasar_route_message_add_publisher(NULL, pub1));
+    EXPECT_EQ(-1, quasar_route_message_add_publisher(msg, NULL));
+    EXPECT_FALSE(quasar_route_message_has_publisher(NULL, pub1));
+    EXPECT_FALSE(quasar_route_message_has_publisher(msg, NULL));
+
+    meridian_node_destroy(pub1);
+    meridian_node_destroy(pub2);
+    meridian_node_destroy(unknown);
+    quasar_route_message_destroy(msg);
+}
+
 // ============================================================================
 // DELIVERY CALLBACK TESTS
 // ============================================================================

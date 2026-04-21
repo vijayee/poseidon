@@ -56,6 +56,10 @@ quasar_route_message_t* quasar_route_message_create(const uint8_t* topic, size_t
     msg->data = buffer_create_from_pointer_copy((uint8_t*)data, data_len);
     msg->visited = bloom_filter_create(neg_size, neg_hashes);
     msg->hops_remaining = max_hops;
+    msg->pub_addrs = NULL;
+    msg->pub_ports = NULL;
+    msg->pub_count = 0;
+    msg->pub_capacity = 0;
     platform_lock_init(&msg->lock);
     refcounter_init((refcounter_t*)msg);
     return msg;
@@ -68,6 +72,8 @@ void quasar_route_message_destroy(quasar_route_message_t* msg) {
         buffer_destroy(msg->topic);
         buffer_destroy(msg->data);
         bloom_filter_destroy(msg->visited);
+        free(msg->pub_addrs);
+        free(msg->pub_ports);
         platform_lock_destroy(&msg->lock);
         free(msg);
     }
@@ -95,6 +101,43 @@ bool quasar_route_message_has_visited(quasar_route_message_t* msg, const meridia
     bool result = bloom_filter_contains(msg->visited, node_key, sizeof(node_key));
     platform_unlock(&msg->lock);
     return result;
+}
+
+int quasar_route_message_add_publisher(quasar_route_message_t* msg, const meridian_node_t* node) {
+    if (msg == NULL || node == NULL) return -1;
+    platform_lock(&msg->lock);
+    if (msg->pub_count >= msg->pub_capacity) {
+        uint32_t new_cap = msg->pub_capacity == 0 ? 4 : msg->pub_capacity * 2;
+        uint32_t* new_addrs = realloc(msg->pub_addrs, sizeof(uint32_t) * new_cap);
+        uint16_t* new_ports = realloc(msg->pub_ports, sizeof(uint16_t) * new_cap);
+        if (new_addrs == NULL || new_ports == NULL) {
+            free(new_addrs);
+            free(new_ports);
+            platform_unlock(&msg->lock);
+            return -1;
+        }
+        msg->pub_addrs = new_addrs;
+        msg->pub_ports = new_ports;
+        msg->pub_capacity = new_cap;
+    }
+    msg->pub_addrs[msg->pub_count] = node->addr;
+    msg->pub_ports[msg->pub_count] = node->port;
+    msg->pub_count++;
+    platform_unlock(&msg->lock);
+    return 0;
+}
+
+bool quasar_route_message_has_publisher(quasar_route_message_t* msg, const meridian_node_t* node) {
+    if (msg == NULL || node == NULL) return false;
+    platform_lock(&msg->lock);
+    for (uint32_t i = 0; i < msg->pub_count; i++) {
+        if (msg->pub_addrs[i] == node->addr && msg->pub_ports[i] == node->port) {
+            platform_unlock(&msg->lock);
+            return true;
+        }
+    }
+    platform_unlock(&msg->lock);
+    return false;
 }
 
 // ============================================================================

@@ -72,6 +72,10 @@ typedef struct quasar_route_message_t {
     buffer_t* data;                    /**< Message payload */
     bloom_filter_t* visited;           /**< Negative filter: nodes already visited in this walk */
     uint32_t hops_remaining;           /**< TTL for this random walk (decremented each hop) */
+    uint32_t* pub_addrs;               /**< Publisher node addresses (network byte order) */
+    uint16_t* pub_ports;               /**< Publisher node ports (network byte order) */
+    uint32_t pub_count;                /**< Number of publishers in the list */
+    uint32_t pub_capacity;             /**< Allocated capacity for publisher list */
     PLATFORMLOCKTYPE(lock);            /**< Thread-safe access */
 } quasar_route_message_t;
 
@@ -121,6 +125,27 @@ int quasar_route_message_add_visited(quasar_route_message_t* msg, const meridian
  * @return      true if the node is likely visited, false if definitely not visited
  */
 bool quasar_route_message_has_visited(quasar_route_message_t* msg, const meridian_node_t* node);
+
+/**
+ * Adds a publisher node ID to the route message's negative information list.
+ * Publisher IDs are checked against neighbor filters at the same level as
+ * the topic match to prevent self-loops (Algorithm 2, lines 15-20).
+ *
+ * @param msg   Route message
+ * @param node  Publisher node to add
+ * @return      0 on success, -1 on failure
+ */
+int quasar_route_message_add_publisher(quasar_route_message_t* msg, const meridian_node_t* node);
+
+/**
+ * Checks whether a node is in the message's publisher list (negative information).
+ * Used during routing to negate gravity wells from publishers.
+ *
+ * @param msg   Route message
+ * @param node  Node to check
+ * @return      true if the node is a publisher, false otherwise
+ */
+bool quasar_route_message_has_publisher(quasar_route_message_t* msg, const meridian_node_t* node);
 
 // ============================================================================
 // LOCAL DELIVERY CALLBACK
