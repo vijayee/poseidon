@@ -89,10 +89,19 @@ meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
             return NULL;
         }
 
-        // Load credentials (insecure mode for testing)
+        // Load credentials
         QUIC_CREDENTIAL_CONFIG CredConfig = {0};
-        CredConfig.Flags = QUIC_CREDENTIAL_FLAG_NONE;
-        CredConfig.Type = QUIC_CREDENTIAL_TYPE_NONE;
+        QUIC_CERTIFICATE_FILE CertFile = {0};
+        if (config->tls_key_path != NULL && config->tls_cert_path != NULL) {
+            CertFile.PrivateKeyFile = config->tls_key_path;
+            CertFile.CertificateFile = config->tls_cert_path;
+            CredConfig.CertificateFile = &CertFile;
+            CredConfig.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
+            CredConfig.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+        } else {
+            CredConfig.Flags = QUIC_CREDENTIAL_FLAG_NONE;
+            CredConfig.Type = QUIC_CREDENTIAL_TYPE_NONE;
+        }
 
         Status = relay->msquic->ConfigurationLoadCredential(
             relay->configuration,

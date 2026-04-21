@@ -27,9 +27,9 @@ TEST_F(MeridianRingTest, CreateRingSet) {
 }
 
 TEST_F(MeridianRingTest, InsertNodes) {
-    meridian_node_t* node1 = meridian_node_create(0xC0A80001, 8080);
-    meridian_node_t* node2 = meridian_node_create(0xC0A80002, 8080);
-    meridian_node_t* node3 = meridian_node_create(0xC0A80003, 8080);
+    meridian_node_t* node1 = meridian_node_create(0xC0A80001, 8080, NULL);
+    meridian_node_t* node2 = meridian_node_create(0xC0A80002, 8080, NULL);
+    meridian_node_t* node3 = meridian_node_create(0xC0A80003, 8080, NULL);
 
     ASSERT_NE(nullptr, node1);
     ASSERT_NE(nullptr, node2);
@@ -46,8 +46,8 @@ TEST_F(MeridianRingTest, InsertNodes) {
 }
 
 TEST_F(MeridianRingTest, FindClosest) {
-    meridian_node_t* node1 = meridian_node_create(0xC0A80001, 8080);
-    meridian_node_t* node2 = meridian_node_create(0xC0A80002, 8080);
+    meridian_node_t* node1 = meridian_node_create(0xC0A80001, 8080, NULL);
+    meridian_node_t* node2 = meridian_node_create(0xC0A80002, 8080, NULL);
 
     ASSERT_NE(nullptr, node1);
     ASSERT_NE(nullptr, node2);
@@ -66,9 +66,9 @@ TEST_F(MeridianRingTest, FindClosest) {
 }
 
 TEST_F(MeridianRingTest, FindClosestReturnsLowestRing) {
-    meridian_node_t* node_fast = meridian_node_create(0xC0A80001, 8080);
-    meridian_node_t* node_mid = meridian_node_create(0xC0A80002, 8080);
-    meridian_node_t* node_slow = meridian_node_create(0xC0A80003, 8080);
+    meridian_node_t* node_fast = meridian_node_create(0xC0A80001, 8080, NULL);
+    meridian_node_t* node_mid = meridian_node_create(0xC0A80002, 8080, NULL);
+    meridian_node_t* node_slow = meridian_node_create(0xC0A80003, 8080, NULL);
 
     ASSERT_NE(nullptr, node_fast);
     ASSERT_NE(nullptr, node_mid);
@@ -89,7 +89,7 @@ TEST_F(MeridianRingTest, FindClosestReturnsLowestRing) {
 }
 
 TEST_F(MeridianRingTest, FindClosestSkipsEmptyRings) {
-    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080, NULL);
 
     ASSERT_NE(nullptr, node);
 
@@ -110,7 +110,7 @@ TEST_F(MeridianRingTest, FindClosestEmptySet) {
 }
 
 TEST_F(MeridianRingTest, EraseNode) {
-    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080, NULL);
     ASSERT_NE(nullptr, node);
 
     EXPECT_EQ(0, meridian_ring_set_insert(ring_set, node, 1000, NULL));
@@ -123,7 +123,7 @@ TEST_F(MeridianRingTest, FreezeRing) {
     meridian_ring_set_freeze(ring_set, 0);
     EXPECT_TRUE(ring_set->rings[0].frozen);
 
-    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080, NULL);
     ASSERT_NE(nullptr, node);
 
     // Latency 1 maps to ring 0, which is frozen - insert should fail

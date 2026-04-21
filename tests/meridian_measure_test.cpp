@@ -27,7 +27,7 @@ TEST_F(MeridianMeasureTest, CreateCache) {
 }
 
 TEST_F(MeridianMeasureTest, InsertAndRetrieve) {
-    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080, NULL);
     ASSERT_NE(nullptr, node);
 
     EXPECT_EQ(0, meridian_latency_cache_insert(cache, node, 1500));
@@ -40,7 +40,7 @@ TEST_F(MeridianMeasureTest, InsertAndRetrieve) {
 }
 
 TEST_F(MeridianMeasureTest, UpdateExisting) {
-    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080, NULL);
     ASSERT_NE(nullptr, node);
 
     EXPECT_EQ(0, meridian_latency_cache_insert(cache, node, 1000));
@@ -54,7 +54,7 @@ TEST_F(MeridianMeasureTest, UpdateExisting) {
 }
 
 TEST_F(MeridianMeasureTest, MissOnEmpty) {
-    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080, NULL);
     ASSERT_NE(nullptr, node);
 
     uint32_t latency = 999;
@@ -65,7 +65,7 @@ TEST_F(MeridianMeasureTest, MissOnEmpty) {
 }
 
 TEST_F(MeridianMeasureTest, CreateMeasureRequest) {
-    meridian_node_t* target = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* target = meridian_node_create(0xC0A80001, 8080, NULL);
     ASSERT_NE(nullptr, target);
 
     meridian_measure_request_t* req = meridian_measure_request_create(
@@ -81,7 +81,7 @@ TEST_F(MeridianMeasureTest, CreateMeasureRequest) {
 }
 
 TEST_F(MeridianMeasureTest, MeasureRequestExpiry) {
-    meridian_node_t* target = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* target = meridian_node_create(0xC0A80001, 8080, NULL);
     ASSERT_NE(nullptr, target);
 
     meridian_measure_request_t* req = meridian_measure_request_create(
@@ -100,7 +100,7 @@ TEST_F(MeridianMeasureTest, MeasureRequestExpiry) {
 }
 
 TEST_F(MeridianMeasureTest, NullCacheInsert) {
-    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080, NULL);
     ASSERT_NE(nullptr, node);
 
     EXPECT_NE(0, meridian_latency_cache_insert(NULL, node, 1000));

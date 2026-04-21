@@ -32,6 +32,29 @@ int attenuated_bloom_filter_merge(attenuated_bloom_filter_t* dest, const attenua
 elastic_bloom_filter_t* attenuated_bloom_filter_get_level(attenuated_bloom_filter_t* abf, uint32_t level);
 uint32_t attenuated_bloom_filter_level_count(attenuated_bloom_filter_t* abf);
 
+#include <cbor.h>
+
+/** Encode an attenuated bloom filter to a CBOR item.
+ *
+ * Produces a definite array: [level_count, [level_0_ebf, level_1_ebf, ...]]
+ * Each level is encoded via elastic_bloom_filter_encode.
+ * Thread-safe: acquires the filter lock for the duration.
+ *
+ * @param abf The attenuated bloom filter to encode
+ * @return CBOR item representing the filter, or NULL on error
+ */
+cbor_item_t* attenuated_bloom_filter_encode(const attenuated_bloom_filter_t* abf);
+
+/** Decode an attenuated bloom filter from a CBOR item.
+ *
+ * Reconstructs the filter from the encoding produced by
+ * attenuated_bloom_filter_encode.
+ *
+ * @param item CBOR item to decode from
+ * @return Decoded attenuated bloom filter, or NULL on error
+ */
+attenuated_bloom_filter_t* attenuated_bloom_filter_decode(cbor_item_t* item);
+
 #ifdef __cplusplus
 }
 #endif

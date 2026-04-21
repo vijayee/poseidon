@@ -4,6 +4,7 @@
 
 #include "meridian.h"
 #include "../../Util/allocator.h"
+#include "../../Crypto/node_id.h"
 #include <string.h>
 
 // ============================================================================
@@ -18,8 +19,14 @@
  * @param port  Port number in network byte order
  * @return      New node with refcount=1, or NULL on allocation failure
  */
-meridian_node_t* meridian_node_create(uint32_t addr, uint16_t port) {
+meridian_node_t* meridian_node_create(uint32_t addr, uint16_t port,
+                                       const poseidon_node_id_t* id) {
     meridian_node_t* node = (meridian_node_t*) get_clear_memory(sizeof(meridian_node_t));
+    if (id != NULL) {
+        memcpy(&node->id, id, sizeof(poseidon_node_id_t));
+    } else {
+        poseidon_node_id_clear(&node->id);
+    }
     node->addr = addr;
     node->port = port;
     node->rendv_addr = 0;
@@ -40,8 +47,14 @@ meridian_node_t* meridian_node_create(uint32_t addr, uint16_t port) {
  * @return             New rendezvous node with refcount=1
  */
 meridian_node_t* meridian_node_create_rendv(uint32_t addr, uint16_t port,
-                                            uint32_t rendv_addr, uint16_t rendv_port) {
+                                            uint32_t rendv_addr, uint16_t rendv_port,
+                                            const poseidon_node_id_t* id) {
     meridian_node_t* node = (meridian_node_t*) get_clear_memory(sizeof(meridian_node_t));
+    if (id != NULL) {
+        memcpy(&node->id, id, sizeof(poseidon_node_id_t));
+    } else {
+        poseidon_node_id_clear(&node->id);
+    }
     node->addr = addr;
     node->port = port;
     node->rendv_addr = rendv_addr;
@@ -80,9 +93,27 @@ void meridian_node_destroy(meridian_node_t* node) {
 int meridian_node_latency_cmp(const void* a, const void* b) {
     const meridian_node_t* node_a = *(const meridian_node_t**) a;
     const meridian_node_t* node_b = *(const meridian_node_t**) b;
+    if (!poseidon_node_id_is_null(&node_a->id) && !poseidon_node_id_is_null(&node_b->id)) {
+        return poseidon_node_id_compare(&node_a->id, &node_b->id);
+    }
     if (node_a->addr < node_b->addr) return -1;
     if (node_a->addr > node_b->addr) return 1;
     if (node_a->port < node_b->port) return -1;
     if (node_a->port > node_b->port) return 1;
     return 0;
+}
+
+meridian_node_t* meridian_node_create_unidentified(uint32_t addr, uint16_t port) {
+    return meridian_node_create(addr, port, NULL);
+}
+
+bool meridian_node_equals_by_id(const meridian_node_t* a, const meridian_node_t* b) {
+    if (a == NULL || b == NULL) return false;
+    if (poseidon_node_id_is_null(&a->id) || poseidon_node_id_is_null(&b->id)) return false;
+    return poseidon_node_id_compare(&a->id, &b->id) == 0;
+}
+
+bool meridian_node_equals_by_addr(const meridian_node_t* a, const meridian_node_t* b) {
+    if (a == NULL || b == NULL) return false;
+    return a->addr == b->addr && a->port == b->port;
 }

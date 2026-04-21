@@ -5,10 +5,13 @@
 #include <gtest/gtest.h>
 #include <string.h>
 #include <arpa/inet.h>
+#include <cbor.h>
 #include "Network/Quasar/quasar.h"
 #include "Network/Quasar/quasar_message_id.h"
 #include "Network/Quasar/quasar_route.h"
+#include "Bloom/elastic_bloom_filter.h"
 #include "Bloom/attenuated_bloom_filter.h"
+#include "Network/Meridian/meridian_packet.h"
 
 class QuasarTest : public ::testing::Test {
 protected:
@@ -84,7 +87,7 @@ TEST_F(QuasarTest, NeighborFilterCreateAndLookup) {
     quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     ASSERT_NE(nullptr, q);
 
-    meridian_node_t* neighbor = meridian_node_create(htonl(0x0A000001), htons(8080));
+    meridian_node_t* neighbor = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
     ASSERT_NE(nullptr, neighbor);
 
     // Initially no neighbor filters
@@ -119,6 +122,16 @@ protected:
     void TearDown() override {}
 };
 
+// ============================================================================
+// EBF SERIALIZATION TESTS
+// ============================================================================
+
+class EBFSerializationTest : public ::testing::Test {
+protected:
+    void SetUp() override {}
+    void TearDown() override {}
+};
+
 TEST_F(RouteMessageTest, CreateDestroy) {
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* data = (const uint8_t*)"goal!";
@@ -137,7 +150,7 @@ TEST_F(RouteMessageTest, AddVisitedAndCheck) {
     );
     ASSERT_NE(nullptr, msg);
 
-    meridian_node_t* node = meridian_node_create(htonl(0x0A000001), htons(8080));
+    meridian_node_t* node = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
     ASSERT_NE(nullptr, node);
 
     // Node should not be visited initially
@@ -161,9 +174,9 @@ TEST_F(RouteMessageTest, MultipleVisitedNodes) {
     );
     ASSERT_NE(nullptr, msg);
 
-    meridian_node_t* node1 = meridian_node_create(htonl(0x0A000001), htons(8080));
-    meridian_node_t* node2 = meridian_node_create(htonl(0x0A000002), htons(8081));
-    meridian_node_t* node3 = meridian_node_create(htonl(0x0A000003), htons(8082));
+    meridian_node_t* node1 = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* node2 = meridian_node_create_unidentified(htonl(0x0A000002), htons(8081));
+    meridian_node_t* node3 = meridian_node_create_unidentified(htonl(0x0A000003), htons(8082));
 
     EXPECT_EQ(0, quasar_route_message_add_visited(msg, node1));
     EXPECT_EQ(0, quasar_route_message_add_visited(msg, node2));
@@ -193,7 +206,7 @@ TEST_F(RouteMessageTest, NullNodeHandling) {
 }
 
 TEST_F(RouteMessageTest, NullMessageHandling) {
-    meridian_node_t* node = meridian_node_create(htonl(0x0A000001), htons(8080));
+    meridian_node_t* node = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
     EXPECT_EQ(-1, quasar_route_message_add_visited(NULL, node));
     EXPECT_FALSE(quasar_route_message_has_visited(NULL, node));
     meridian_node_destroy(node);
@@ -223,12 +236,12 @@ TEST_F(RouteMessageTest, PublishersList) {
     EXPECT_EQ(0, msg->pub_count);
 
     // Add a publisher
-    meridian_node_t* pub1 = meridian_node_create(htonl(0x0A000001), htons(8080));
+    meridian_node_t* pub1 = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
     EXPECT_EQ(0, quasar_route_message_add_publisher(msg, pub1));
     EXPECT_EQ(1, msg->pub_count);
 
     // Add another publisher
-    meridian_node_t* pub2 = meridian_node_create(htonl(0x0A000002), htons(8081));
+    meridian_node_t* pub2 = meridian_node_create_unidentified(htonl(0x0A000002), htons(8081));
     EXPECT_EQ(0, quasar_route_message_add_publisher(msg, pub2));
     EXPECT_EQ(2, msg->pub_count);
 
@@ -237,7 +250,7 @@ TEST_F(RouteMessageTest, PublishersList) {
     EXPECT_TRUE(quasar_route_message_has_publisher(msg, pub2));
 
     // Unknown node should not be in publisher list
-    meridian_node_t* unknown = meridian_node_create(htonl(0x0A000003), htons(8082));
+    meridian_node_t* unknown = meridian_node_create_unidentified(htonl(0x0A000003), htons(8082));
     EXPECT_FALSE(quasar_route_message_has_publisher(msg, unknown));
 
     // NULL args should be safe
@@ -343,66 +356,42 @@ TEST_F(GossipTest, GossipStoresInNeighborFilter) {
     quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     ASSERT_NE(nullptr, q);
 
-    meridian_node_t* neighbor = meridian_node_create(htonl(0x0A000001), htons(8080));
+    meridian_node_t* neighbor = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
     ASSERT_NE(nullptr, neighbor);
 
-    // Build a minimal gossip buffer with a topic in level 0
-    // Header: magic, version, level_count, level_size, hash_count, omega, fp_bits
-    uint32_t level_size = 1024;
-    size_t bitset_bytes = level_size / 8;
-
-    // First, add the topic to a local filter to get its bitset data
+    // Build a CBOR-encoded gossip packet with a topic in level 0
     const uint8_t* topic = (const uint8_t*)"sports";
+    uint32_t level_size = 1024;
+
     attenuated_bloom_filter_t* local_filter = attenuated_bloom_filter_create(
         5, level_size, 3, 0.75f, 8);
     ASSERT_NE(nullptr, local_filter);
     attenuated_bloom_filter_subscribe(local_filter, topic, 6);
 
-    // Now serialize it using the same format as quasar_propagate
-    // We'll manually build the buffer
-    size_t header_size = 7 * sizeof(uint32_t);
-    size_t level_data_size = sizeof(uint32_t) + bitset_bytes + sizeof(uint32_t); // count + bitset + num_buckets (0)
-    size_t total = header_size + 5 * level_data_size; // 5 levels
-    uint8_t* data = (uint8_t*)calloc(total, 1);
+    // Encode as CBOR: [type, level_count, encoded_filter]
+    cbor_item_t* arr = cbor_new_definite_array(3);
+    cbor_array_push(arr, cbor_build_uint8(MERIDIAN_PACKET_TYPE_QUASAR_GOSSIP));
+    cbor_array_push(arr, cbor_build_uint32(5));
+    cbor_item_t* filter_item = attenuated_bloom_filter_encode(local_filter);
+    ASSERT_NE(nullptr, filter_item);
+    cbor_array_push(arr, filter_item);
 
-    // Header
-    uint32_t* header = (uint32_t*)data;
-    header[0] = htonl(0x51534152u); // magic
-    header[1] = htonl(1u);          // version
-    header[2] = htonl(5u);          // level_count
-    header[3] = htonl(level_size);   // level_size
-    header[4] = htonl(3u);          // hash_count
-    header[5] = htonl(750u);        // omega * 1000
-    header[6] = htonl(8u);          // fp_bits
+    unsigned char* buf = NULL;
+    size_t buf_len = 0;
+    size_t written = cbor_serialize_alloc(arr, &buf, &buf_len);
+    cbor_decref(&arr);
+    attenuated_bloom_filter_destroy(local_filter);
 
-    size_t offset = header_size;
-    for (uint32_t level = 0; level < 5; level++) {
-        elastic_bloom_filter_t* ebf = attenuated_bloom_filter_get_level(local_filter, level);
-        // count
-        *(uint32_t*)(data + offset) = htonl((uint32_t)elastic_bloom_filter_count(ebf));
-        offset += sizeof(uint32_t);
-        // bitset
-        const uint8_t* bitset_data = NULL;
-        size_t bitset_size = 0;
-        elastic_bloom_filter_get_bitset(ebf, &bitset_data, &bitset_size);
-        size_t copy_bytes = bitset_bytes < bitset_size ? bitset_bytes : bitset_size;
-        if (bitset_data != NULL && copy_bytes > 0) {
-            memcpy(data + offset, bitset_data, copy_bytes);
-        }
-        offset += bitset_bytes;
-        // num_buckets (0 for simplicity — we're just testing bitset propagation)
-        *(uint32_t*)(data + offset) = htonl(0u);
-        offset += sizeof(uint32_t);
-    }
+    ASSERT_GT(written, 0u);
+    ASSERT_NE(nullptr, buf);
 
-    EXPECT_EQ(0, quasar_on_gossip(q, data, total, neighbor));
+    EXPECT_EQ(0, quasar_on_gossip(q, buf, written, neighbor));
 
     // Verify neighbor filter was created
     attenuated_bloom_filter_t* nf = quasar_get_neighbor_filter(q, neighbor);
     ASSERT_NE(nullptr, nf);
 
     // The topic should be findable in the neighbor filter
-    // (level 0 of incoming becomes level 0 of stored filter)
     EXPECT_TRUE(attenuated_bloom_filter_check(nf, topic, 6, NULL));
 
     // Also verify it's in the aggregated routing filter (shifted to level 1)
@@ -411,8 +400,7 @@ TEST_F(GossipTest, GossipStoresInNeighborFilter) {
     EXPECT_TRUE(found);
     EXPECT_EQ(1u, hops); // shifted by +1
 
-    free(data);
-    attenuated_bloom_filter_destroy(local_filter);
+    free(buf);
     meridian_node_destroy(neighbor);
     quasar_destroy(q);
 }
@@ -429,7 +417,7 @@ protected:
 
 TEST_F(OnRouteMessageTest, NullMessageRejected) {
     quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
-    meridian_node_t* from = meridian_node_create(htonl(0x0A000001), htons(8080));
+    meridian_node_t* from = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
     EXPECT_EQ(-1, quasar_on_route_message(q, NULL, from));
     quasar_destroy(q);
     meridian_node_destroy(from);
@@ -441,7 +429,7 @@ TEST_F(OnRouteMessageTest, NullQuasarRejected) {
     quasar_route_message_t* msg = quasar_route_message_create(
         topic, 6, data, 5, 10, 256, 3
     );
-    meridian_node_t* from = meridian_node_create(htonl(0x0A000001), htons(8080));
+    meridian_node_t* from = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
     EXPECT_EQ(-1, quasar_on_route_message(NULL, msg, from));
     quasar_route_message_destroy(msg);
     meridian_node_destroy(from);
@@ -464,7 +452,7 @@ TEST_F(OnRouteMessageTest, LocalDeliveryViaRouteMessage) {
     quasar_route_message_t* msg = quasar_route_message_create(
         topic, 6, data, 5, 10, 256, 3
     );
-    meridian_node_t* from = meridian_node_create(htonl(0x0A000001), htons(8080));
+    meridian_node_t* from = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
 
     EXPECT_EQ(0, quasar_on_route_message(q, msg, from));
     EXPECT_EQ(1, call_count);
@@ -483,7 +471,7 @@ TEST_F(OnRouteMessageTest, ZeroHopsRemainingStopsForwarding) {
     quasar_route_message_t* msg = quasar_route_message_create(
         topic, 6, data, 5, 0, 256, 3
     );
-    meridian_node_t* from = meridian_node_create(htonl(0x0A000001), htons(8080));
+    meridian_node_t* from = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
 
     // Should return 0 without crashing (message has expired)
     EXPECT_EQ(0, quasar_on_route_message(q, msg, from));
@@ -577,7 +565,7 @@ TEST_F(DedupFilterTest, DuplicateRouteMessageDiscarded) {
 
     // Create a route message and deliver it — should trigger callback
     quasar_route_message_t* msg = quasar_route_message_create(topic, 6, data, 5, 10, 256, 3);
-    meridian_node_t* from = meridian_node_create(htonl(0x0A000001), htons(8080));
+    meridian_node_t* from = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
     EXPECT_EQ(0, quasar_on_route_message(q, msg, from));
     EXPECT_EQ(1, call_count);
 
@@ -607,7 +595,7 @@ TEST_F(DedupFilterTest, DifferentMessagesNotDiscarded) {
     // Two different route messages — different IDs — should both be delivered
     quasar_route_message_t* msg1 = quasar_route_message_create(topic, 6, data, 5, 10, 256, 3);
     quasar_route_message_t* msg2 = quasar_route_message_create(topic, 6, data, 5, 10, 256, 3);
-    meridian_node_t* from = meridian_node_create(htonl(0x0A000001), htons(8080));
+    meridian_node_t* from = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
 
     EXPECT_EQ(0, quasar_on_route_message(q, msg1, from));
     EXPECT_EQ(1, call_count);
@@ -648,7 +636,7 @@ TEST_F(QuasarTest, Algorithm2DirectedWalk) {
 
     // Node B publishes to "sports" — has node A as a neighbor with "sports" in its filter
     quasar_t* node_b = quasar_create(NULL, 5, 3, 4096, 3);
-    meridian_node_t* node_a_endpoint = meridian_node_create(htonl(0x0A000001), htons(8080));
+    meridian_node_t* node_a_endpoint = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
 
     // Set up node B's neighbor filter for node A
     attenuated_bloom_filter_t* nf = quasar_get_or_create_neighbor_filter(node_b, node_a_endpoint);
@@ -690,7 +678,7 @@ TEST_F(QuasarTest, NegativeInformationPreventsSelfLoop) {
     quasar_subscribe(q, topic, 6, 100);
 
     // Set up a neighbor filter for our own address (self-loop scenario)
-    meridian_node_t* self_node = meridian_node_create(htonl(0x0A000001), htons(8080));
+    meridian_node_t* self_node = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
     attenuated_bloom_filter_t* nf = quasar_get_or_create_neighbor_filter(q, self_node);
     ASSERT_NE(nullptr, nf);
     attenuated_bloom_filter_subscribe(nf, topic, 6);
@@ -728,10 +716,10 @@ TEST_F(RouteSerializeTest, RoundTrip) {
     );
     ASSERT_NE(nullptr, msg);
 
-    meridian_node_t* pub1 = meridian_node_create(htonl(0x0A000001), htons(8080));
+    meridian_node_t* pub1 = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
     quasar_route_message_add_publisher(msg, pub1);
 
-    meridian_node_t* visited1 = meridian_node_create(htonl(0x0A000002), htons(8081));
+    meridian_node_t* visited1 = meridian_node_create_unidentified(htonl(0x0A000002), htons(8081));
     quasar_route_message_add_visited(msg, visited1);
 
     // Serialize
@@ -777,4 +765,440 @@ TEST_F(RouteSerializeTest, InvalidMagicRejected) {
     uint8_t bad_data[32] = {0};
     quasar_route_message_t* msg = quasar_route_message_deserialize(bad_data, sizeof(bad_data));
     EXPECT_EQ(nullptr, msg);
+}
+TEST_F(EBFSerializationTest, RoundTripPreservesData) {
+    elastic_bloom_filter_t* ebf = elastic_bloom_filter_create(256, 3, 0.75f, 8);
+    ASSERT_NE(nullptr, ebf);
+
+    const uint8_t* hello = (const uint8_t*)"hello";
+    const uint8_t* world = (const uint8_t*)"world";
+    ASSERT_EQ(0, elastic_bloom_filter_add(ebf, hello, 5));
+    ASSERT_EQ(0, elastic_bloom_filter_add(ebf, world, 5));
+
+    cbor_item_t* encoded = elastic_bloom_filter_encode(ebf);
+    ASSERT_NE(nullptr, encoded);
+
+    // Serialize to bytes
+    unsigned char* buf = nullptr;
+    size_t buf_size = 0;
+    cbor_serialize_alloc(encoded, &buf, &buf_size);
+    ASSERT_NE(nullptr, buf);
+    ASSERT_GT(buf_size, 0u);
+
+    // Decode from bytes back to CBOR
+    struct cbor_load_result load_result;
+    cbor_item_t* loaded = cbor_load(buf, buf_size, &load_result);
+    ASSERT_NE(nullptr, loaded);
+    ASSERT_EQ(CBOR_ERR_NONE, load_result.error.code);
+
+    // Decode CBOR back to EBF
+    elastic_bloom_filter_t* decoded = elastic_bloom_filter_decode(loaded);
+    ASSERT_NE(nullptr, decoded);
+
+    // Verify both strings are still present
+    EXPECT_TRUE(elastic_bloom_filter_contains(decoded, hello, 5));
+    EXPECT_TRUE(elastic_bloom_filter_contains(decoded, world, 5));
+
+    elastic_bloom_filter_destroy(decoded);
+    cbor_decref(&loaded);
+    free(buf);
+    cbor_decref(&encoded);
+    elastic_bloom_filter_destroy(ebf);
+}
+
+TEST_F(EBFSerializationTest, EmptyFilterRoundTrip) {
+    elastic_bloom_filter_t* ebf = elastic_bloom_filter_create(256, 3, 0.75f, 8);
+    ASSERT_NE(nullptr, ebf);
+
+    cbor_item_t* encoded = elastic_bloom_filter_encode(ebf);
+    ASSERT_NE(nullptr, encoded);
+
+    unsigned char* buf = nullptr;
+    size_t buf_size = 0;
+    cbor_serialize_alloc(encoded, &buf, &buf_size);
+    ASSERT_NE(nullptr, buf);
+    ASSERT_GT(buf_size, 0u);
+
+    struct cbor_load_result load_result;
+    cbor_item_t* loaded = cbor_load(buf, buf_size, &load_result);
+    ASSERT_NE(nullptr, loaded);
+
+    elastic_bloom_filter_t* decoded = elastic_bloom_filter_decode(loaded);
+    ASSERT_NE(nullptr, decoded);
+
+    // No items added, so count should be 0
+    EXPECT_EQ(0u, elastic_bloom_filter_count(decoded));
+
+    // Strings that were never added should not be found
+    const uint8_t* absent = (const uint8_t*)"absent";
+    EXPECT_FALSE(elastic_bloom_filter_contains(decoded, absent, 6));
+
+    elastic_bloom_filter_destroy(decoded);
+    cbor_decref(&loaded);
+    free(buf);
+    cbor_decref(&encoded);
+    elastic_bloom_filter_destroy(ebf);
+}
+
+TEST_F(EBFSerializationTest, DecodeWrongSizeReturnsNull) {
+    // Manually construct a CBOR array with mismatched bitset_byte_len vs actual bytestring.
+    // The EBF encode format is: [size, hash_count, fp_bits, seed_a, seed_b, bitset_byte_len, bitset_bytes, num_occupied, ...]
+    cbor_item_t* arr = cbor_new_definite_array(8);
+    ASSERT_NE(nullptr, arr);
+
+    // bitset_byte_len says 32 bytes but the bytestring is only 4 — mismatch should fail
+    (void)cbor_array_push(arr, cbor_build_uint64(64));           // size
+    (void)cbor_array_push(arr, cbor_build_uint32(3));            // hash_count
+    (void)cbor_array_push(arr, cbor_build_uint32(8));            // fp_bits
+    (void)cbor_array_push(arr, cbor_build_uint64(1));            // seed_a
+    (void)cbor_array_push(arr, cbor_build_uint64(2));            // seed_b
+    (void)cbor_array_push(arr, cbor_build_uint64(32));           // bitset_byte_len (claims 32)
+    uint8_t small[4] = {0};
+    (void)cbor_array_push(arr, cbor_build_bytestring(small, 4)); // bitset_bytes (only 4)
+    (void)cbor_array_push(arr, cbor_build_uint64(0));            // num_occupied
+
+    elastic_bloom_filter_t* decoded = elastic_bloom_filter_decode(arr);
+    EXPECT_EQ(nullptr, decoded);
+
+    cbor_decref(&arr);
+}
+
+TEST_F(EBFSerializationTest, ExpandPreservesDataRoundTrip) {
+    // Use a very small initial size with low omega to trigger expand
+    elastic_bloom_filter_t* ebf = elastic_bloom_filter_create(16, 3, 0.5f, 8);
+    ASSERT_NE(nullptr, ebf);
+
+    // Add enough items to trigger expansion (omega=0.5 with size=16 means
+    // expansion after ~8 occupied buckets)
+    const uint8_t* items[] = {
+        (const uint8_t*)"alpha", (const uint8_t*)"bravo",
+        (const uint8_t*)"charlie", (const uint8_t*)"delta",
+        (const uint8_t*)"echo", (const uint8_t*)"foxtrot",
+        (const uint8_t*)"golf", (const uint8_t*)"hotel",
+        (const uint8_t*)"india", (const uint8_t*)"juliet"
+    };
+    size_t lens[] = {5, 5, 7, 5, 4, 7, 4, 5, 5, 6};
+    int num_items = 10;
+
+    for (int i = 0; i < num_items; i++) {
+        ASSERT_EQ(0, elastic_bloom_filter_add(ebf, items[i], lens[i]));
+    }
+
+    // Size should have expanded from 16
+    EXPECT_GT(elastic_bloom_filter_size(ebf), 16u);
+
+    cbor_item_t* encoded = elastic_bloom_filter_encode(ebf);
+    ASSERT_NE(nullptr, encoded);
+
+    unsigned char* buf = nullptr;
+    size_t buf_size = 0;
+    cbor_serialize_alloc(encoded, &buf, &buf_size);
+    ASSERT_NE(nullptr, buf);
+    ASSERT_GT(buf_size, 0u);
+
+    struct cbor_load_result load_result;
+    cbor_item_t* loaded = cbor_load(buf, buf_size, &load_result);
+    ASSERT_NE(nullptr, loaded);
+
+    elastic_bloom_filter_t* decoded = elastic_bloom_filter_decode(loaded);
+    ASSERT_NE(nullptr, decoded);
+
+    // All items should still be present after expand + round trip
+    for (int i = 0; i < num_items; i++) {
+        EXPECT_TRUE(elastic_bloom_filter_contains(decoded, items[i], lens[i]));
+    }
+
+    elastic_bloom_filter_destroy(decoded);
+    cbor_decref(&loaded);
+    free(buf);
+    cbor_decref(&encoded);
+    elastic_bloom_filter_destroy(ebf);
+}
+
+// ============================================================================
+// ABF SERIALIZATION TESTS
+// ============================================================================
+
+class ABFSerializationTest : public ::testing::Test {
+protected:
+    void SetUp() override {}
+    void TearDown() override {}
+};
+
+TEST_F(ABFSerializationTest, RoundTripPreservesAllLevels) {
+    attenuated_bloom_filter_t* abf = attenuated_bloom_filter_create(3, 256, 3, 0.75f, 8);
+    ASSERT_NE(nullptr, abf);
+
+    const uint8_t* topic = (const uint8_t*)"topic1";
+    ASSERT_EQ(0, attenuated_bloom_filter_subscribe(abf, topic, 6));
+
+    cbor_item_t* encoded = attenuated_bloom_filter_encode(abf);
+    ASSERT_NE(nullptr, encoded);
+
+    unsigned char* buf = nullptr;
+    size_t buf_size = 0;
+    cbor_serialize_alloc(encoded, &buf, &buf_size);
+    ASSERT_NE(nullptr, buf);
+    ASSERT_GT(buf_size, 0u);
+
+    struct cbor_load_result load_result;
+    cbor_item_t* loaded = cbor_load(buf, buf_size, &load_result);
+    ASSERT_NE(nullptr, loaded);
+
+    attenuated_bloom_filter_t* decoded = attenuated_bloom_filter_decode(loaded);
+    ASSERT_NE(nullptr, decoded);
+
+    // Level count preserved
+    EXPECT_EQ(3u, attenuated_bloom_filter_level_count(decoded));
+
+    // Topic should be found at level 0
+    uint32_t hops = 0;
+    EXPECT_TRUE(attenuated_bloom_filter_check(decoded, topic, 6, &hops));
+    EXPECT_EQ(0u, hops);
+
+    attenuated_bloom_filter_destroy(decoded);
+    cbor_decref(&loaded);
+    free(buf);
+    cbor_decref(&encoded);
+    attenuated_bloom_filter_destroy(abf);
+}
+
+TEST_F(ABFSerializationTest, SingleLevelRoundTrip) {
+    attenuated_bloom_filter_t* abf = attenuated_bloom_filter_create(1, 256, 3, 0.75f, 8);
+    ASSERT_NE(nullptr, abf);
+
+    const uint8_t* topic = (const uint8_t*)"single_level_topic";
+    ASSERT_EQ(0, attenuated_bloom_filter_subscribe(abf, topic, 19));
+
+    cbor_item_t* encoded = attenuated_bloom_filter_encode(abf);
+    ASSERT_NE(nullptr, encoded);
+
+    unsigned char* buf = nullptr;
+    size_t buf_size = 0;
+    cbor_serialize_alloc(encoded, &buf, &buf_size);
+    ASSERT_NE(nullptr, buf);
+
+    struct cbor_load_result load_result;
+    cbor_item_t* loaded = cbor_load(buf, buf_size, &load_result);
+    ASSERT_NE(nullptr, loaded);
+
+    attenuated_bloom_filter_t* decoded = attenuated_bloom_filter_decode(loaded);
+    ASSERT_NE(nullptr, decoded);
+
+    EXPECT_EQ(1u, attenuated_bloom_filter_level_count(decoded));
+    EXPECT_TRUE(attenuated_bloom_filter_check(decoded, topic, 19, nullptr));
+
+    attenuated_bloom_filter_destroy(decoded);
+    cbor_decref(&loaded);
+    free(buf);
+    cbor_decref(&encoded);
+    attenuated_bloom_filter_destroy(abf);
+}
+
+TEST_F(ABFSerializationTest, MergeShiftsLevels) {
+    // Create two ABFs with the same parameters
+    attenuated_bloom_filter_t* dest = attenuated_bloom_filter_create(3, 256, 3, 0.75f, 8);
+    attenuated_bloom_filter_t* src = attenuated_bloom_filter_create(3, 256, 3, 0.75f, 8);
+    ASSERT_NE(nullptr, dest);
+    ASSERT_NE(nullptr, src);
+
+    // Subscribe to "topic1" in src at level 0
+    const uint8_t* topic = (const uint8_t*)"topic1";
+    ASSERT_EQ(0, attenuated_bloom_filter_subscribe(src, topic, 6));
+
+    // Encode src, decode it, and merge into dest
+    cbor_item_t* src_encoded = attenuated_bloom_filter_encode(src);
+    ASSERT_NE(nullptr, src_encoded);
+
+    unsigned char* buf = nullptr;
+    size_t buf_size = 0;
+    cbor_serialize_alloc(src_encoded, &buf, &buf_size);
+    ASSERT_NE(nullptr, buf);
+
+    struct cbor_load_result load_result;
+    cbor_item_t* loaded = cbor_load(buf, buf_size, &load_result);
+    ASSERT_NE(nullptr, loaded);
+
+    attenuated_bloom_filter_t* decoded_src = attenuated_bloom_filter_decode(loaded);
+    ASSERT_NE(nullptr, decoded_src);
+
+    // Merge: src level 0 should shift to dest level 1
+    EXPECT_EQ(0, attenuated_bloom_filter_merge(dest, decoded_src));
+
+    // The topic should appear at level 1 in the merged dest
+    uint32_t hops = 0;
+    EXPECT_TRUE(attenuated_bloom_filter_check(dest, topic, 6, &hops));
+    EXPECT_EQ(1u, hops);
+
+    attenuated_bloom_filter_destroy(decoded_src);
+    cbor_decref(&loaded);
+    free(buf);
+    cbor_decref(&src_encoded);
+    attenuated_bloom_filter_destroy(src);
+    attenuated_bloom_filter_destroy(dest);
+}
+
+// ============================================================================
+// QUASAR GOSSIP TESTS
+// ============================================================================
+
+class QuasarGossipTest : public ::testing::Test {
+protected:
+    void SetUp() override {}
+    void TearDown() override {}
+};
+
+TEST_F(QuasarGossipTest, PropagateEncodesFilter) {
+    // Create a quasar with NULL protocol — propagate will fail at broadcast
+    // because meridian_protocol_broadcast(NULL, ...) will fail, but we can
+    // verify the encode path works by checking that propagate returns -1
+    // (from the broadcast failure) rather than crashing.
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    ASSERT_NE(nullptr, q);
+
+    const uint8_t* topic = (const uint8_t*)"test";
+    ASSERT_EQ(0, quasar_subscribe(q, topic, 4, 100));
+
+    // propagate will encode the filter and then call meridian_protocol_broadcast(NULL, ...)
+    // which should return -1, so propagate returns -1 (not crash)
+    int rc = quasar_propagate(q);
+    // Expected: -1 because protocol is NULL and broadcast fails
+    EXPECT_EQ(-1, rc);
+
+    quasar_destroy(q);
+}
+
+TEST_F(QuasarGossipTest, OnGossipDecodesAndMerges) {
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    ASSERT_NE(nullptr, q);
+
+    // Subscribe "topic1" locally so we can verify local sub is still at level 0 after merge
+    const uint8_t* local_topic = (const uint8_t*)"local_topic";
+    ASSERT_EQ(0, quasar_subscribe(q, local_topic, 11, 100));
+
+    // Build a QUASAR_GOSSIP packet manually:
+    // [uint8(50), uint32(level_count), encoded_abf]
+    attenuated_bloom_filter_t* remote_abf = attenuated_bloom_filter_create(5, 1024, 3, 0.75f, 8);
+    ASSERT_NE(nullptr, remote_abf);
+
+    const uint8_t* remote_topic = (const uint8_t*)"remote_topic";
+    ASSERT_EQ(0, attenuated_bloom_filter_subscribe(remote_abf, remote_topic, 12));
+
+    cbor_item_t* remote_encoded = attenuated_bloom_filter_encode(remote_abf);
+    ASSERT_NE(nullptr, remote_encoded);
+
+    cbor_item_t* packet = cbor_new_definite_array(3);
+    ASSERT_NE(nullptr, packet);
+    (void)cbor_array_push(packet, cbor_build_uint8(MERIDIAN_PACKET_TYPE_QUASAR_GOSSIP));
+    (void)cbor_array_push(packet, cbor_build_uint32(attenuated_bloom_filter_level_count(remote_abf)));
+    (void)cbor_array_push(packet, remote_encoded);
+
+    unsigned char* buf = nullptr;
+    size_t buf_size = 0;
+    cbor_serialize_alloc(packet, &buf, &buf_size);
+    ASSERT_NE(nullptr, buf);
+    ASSERT_GT(buf_size, 0u);
+
+    // Create a dummy sender node
+    meridian_node_t* from = meridian_node_create_unidentified(0x7F000001, 8080);
+    ASSERT_NE(nullptr, from);
+
+    int rc = quasar_on_gossip(q, buf, buf_size, from);
+    EXPECT_EQ(0, rc);
+
+    // The remote topic should appear at level 1 in the merged routing filter
+    // (merge shifts src levels by +1)
+    uint32_t hops = 0;
+    EXPECT_TRUE(attenuated_bloom_filter_check(q->routing, remote_topic, 12, &hops));
+    EXPECT_EQ(1u, hops);
+
+    meridian_node_destroy(from);
+    free(buf);
+    cbor_decref(&packet);
+    attenuated_bloom_filter_destroy(remote_abf);
+    quasar_destroy(q);
+}
+
+TEST_F(QuasarGossipTest, MergePreservesLocalSubscriptions) {
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    ASSERT_NE(nullptr, q);
+
+    const uint8_t* local_topic = (const uint8_t*)"local_topic";
+    ASSERT_EQ(0, quasar_subscribe(q, local_topic, 12, 100));
+
+    // Build a minimal valid gossip packet with an empty ABF
+    attenuated_bloom_filter_t* remote_abf = attenuated_bloom_filter_create(5, 1024, 3, 0.75f, 8);
+    ASSERT_NE(nullptr, remote_abf);
+
+    cbor_item_t* remote_encoded = attenuated_bloom_filter_encode(remote_abf);
+    ASSERT_NE(nullptr, remote_encoded);
+
+    cbor_item_t* packet = cbor_new_definite_array(3);
+    (void)cbor_array_push(packet, cbor_build_uint8(MERIDIAN_PACKET_TYPE_QUASAR_GOSSIP));
+    (void)cbor_array_push(packet, cbor_build_uint32(attenuated_bloom_filter_level_count(remote_abf)));
+    (void)cbor_array_push(packet, remote_encoded);
+
+    unsigned char* buf = nullptr;
+    size_t buf_size = 0;
+    cbor_serialize_alloc(packet, &buf, &buf_size);
+
+    meridian_node_t* from = meridian_node_create_unidentified(0x7F000001, 8080);
+    ASSERT_NE(nullptr, from);
+
+    int rc = quasar_on_gossip(q, buf, buf_size, from);
+    EXPECT_EQ(0, rc);
+
+    // local_topic should still be at level 0 after merge
+    uint32_t hops = 99;
+    EXPECT_TRUE(attenuated_bloom_filter_check(q->routing, local_topic, 12, &hops));
+    EXPECT_EQ(0u, hops);
+
+    meridian_node_destroy(from);
+    free(buf);
+    cbor_decref(&packet);
+    attenuated_bloom_filter_destroy(remote_abf);
+    quasar_destroy(q);
+}
+
+TEST_F(QuasarGossipTest, OnGossipInvalidCBOR) {
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    ASSERT_NE(nullptr, q);
+
+    const uint8_t garbage[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03};
+    meridian_node_t* from = meridian_node_create_unidentified(0x7F000001, 8080);
+
+    int rc = quasar_on_gossip(q, garbage, sizeof(garbage), from);
+    EXPECT_EQ(-1, rc);
+
+    meridian_node_destroy(from);
+    quasar_destroy(q);
+}
+
+TEST_F(QuasarGossipTest, OnGossipWrongType) {
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    ASSERT_NE(nullptr, q);
+
+    // Build a CBOR array with a wrong type byte (not QUASAR_GOSSIP=50)
+    cbor_item_t* packet = cbor_new_definite_array(3);
+    (void)cbor_array_push(packet, cbor_build_uint8(99));  // wrong type
+    (void)cbor_array_push(packet, cbor_build_uint32(5));
+
+    attenuated_bloom_filter_t* abf = attenuated_bloom_filter_create(5, 1024, 3, 0.75f, 8);
+    cbor_item_t* abf_encoded = attenuated_bloom_filter_encode(abf);
+    (void)cbor_array_push(packet, abf_encoded);
+
+    unsigned char* buf = nullptr;
+    size_t buf_size = 0;
+    cbor_serialize_alloc(packet, &buf, &buf_size);
+
+    meridian_node_t* from = meridian_node_create_unidentified(0x7F000001, 8080);
+
+    int rc = quasar_on_gossip(q, buf, buf_size, from);
+    EXPECT_EQ(-1, rc);
+
+    meridian_node_destroy(from);
+    free(buf);
+    cbor_decref(&packet);
+    attenuated_bloom_filter_destroy(abf);
+    quasar_destroy(q);
 }

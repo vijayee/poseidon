@@ -4,6 +4,7 @@
 
 #include "quasar.h"
 #include "quasar_route.h"
+#include "../Meridian/meridian_protocol.h"
 #include "../../Bloom/elastic_bloom_filter.h"
 #include "../../Util/allocator.h"
 #include <stdlib.h>
@@ -365,7 +366,7 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
                 );
                 if (republish_msg != NULL) {
                     bloom_filter_add(quasar->seen, (const uint8_t*)&republish_msg->id, sizeof(republish_msg->id));
-                    meridian_node_t* local = meridian_node_create(local_addr, local_port);
+                    meridian_node_t* local = meridian_node_create_unidentified(local_addr, local_port);
                     if (local != NULL) {
                         quasar_route_message_add_publisher(republish_msg, local);
                         quasar_route_message_add_visited(republish_msg, local);
@@ -417,14 +418,14 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
 
                 if (!negated) {
                     // Directed walk: forward to this neighbor
-                    meridian_node_t* target = meridian_node_create(nf->addr, nf->port);
+                    meridian_node_t* target = meridian_node_create_unidentified(nf->addr, nf->port);
                     quasar_route_message_t* fwd = quasar_route_message_create(
                         topic, topic_len, data, data_len,
                         quasar->max_hops, QUASAR_DEFAULT_NEGATIVE_SIZE, QUASAR_DEFAULT_NEGATIVE_HASHES
                     );
                     if (fwd != NULL) {
                         bloom_filter_add(quasar->seen, (const uint8_t*)&fwd->id, sizeof(fwd->id));
-                        meridian_node_t* local = meridian_node_create(local_addr, local_port);
+                        meridian_node_t* local = meridian_node_create_unidentified(local_addr, local_port);
                         if (local != NULL) {
                             quasar_route_message_add_publisher(fwd, local);
                             quasar_route_message_add_visited(fwd, local);
@@ -465,7 +466,7 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
         uint32_t local_addr = 0;
         uint16_t local_port = 0;
         meridian_protocol_get_local_node(quasar->protocol, &local_addr, &local_port);
-        meridian_node_t* local_node = meridian_node_create(local_addr, local_port);
+        meridian_node_t* local_node = meridian_node_create_unidentified(local_addr, local_port);
         if (local_node != NULL) {
             quasar_route_message_add_visited(msg, local_node);
             quasar_route_message_add_publisher(msg, local_node);
@@ -518,7 +519,7 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
     if (quasar->protocol != NULL) {
         meridian_protocol_get_local_node(quasar->protocol, &local_addr, &local_port);
     }
-    meridian_node_t* local_node = meridian_node_create(local_addr, local_port);
+    meridian_node_t* local_node = meridian_node_create_unidentified(local_addr, local_port);
     if (local_node != NULL) {
         quasar_route_message_add_visited(msg, local_node);
     }
@@ -607,7 +608,7 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
 
                 if (!negated) {
                     // Directed walk: forward the existing route message to this neighbor
-                    meridian_node_t* target = meridian_node_create(nf->addr, nf->port);
+                    meridian_node_t* target = meridian_node_create_unidentified(nf->addr, nf->port);
                     uint8_t* route_buf = NULL;
                     size_t route_buf_len = 0;
                     if (quasar_route_message_serialize(msg, &route_buf, &route_buf_len) == 0) {
@@ -654,98 +655,49 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
 // GOSSIP AND PROPAGATION
 // ============================================================================
 
-/**
- * Wire format for attenuated bloom filter serialization:
- *
- * Header (all uint32_t, network byte order):
- *   magic          - QUASAR_GOSSIP_MAGIC (0x51534152 = "QSAR")
- *   version        - QUASAR_GOSSIP_VERSION (1)
- *   level_count    - number of filter levels
- *   level_size     - bits per level
- *   hash_count      - hash functions per level
- *   omega_bits     - omega threshold * 1000 (fixed-point)
- *   fp_bits        - fingerprint width
- *
- * Per level:
- *   count          - element count in this level
- *   bitset_bytes   - raw bitset data (level_size / 8 bytes, rounded up)
- *   num_buckets    - number of non-empty buckets
- *   Per non-empty bucket:
- *     bucket_index - bucket position (uint32_t)
- *     num_entries  - entries in this bucket (uint32_t)
- *     Per entry:
- *       fingerprint - uint32_t
- */
-
-#define QUASAR_GOSSIP_MAGIC   0x51534152u
-#define QUASAR_GOSSIP_VERSION 1u
-
 int quasar_on_gossip(quasar_t* quasar, const uint8_t* data, size_t len, const struct meridian_node_t* from) {
     if (quasar == NULL || data == NULL || len < 7 * sizeof(uint32_t)) return -1;
 
-    // Read header
-    const uint32_t* header = (const uint32_t*)data;
-    uint32_t magic = ntohl(header[0]);
-    uint32_t version = ntohl(header[1]);
-    uint32_t level_count = ntohl(header[2]);
-    uint32_t level_size = ntohl(header[3]);
-    uint32_t hash_count = ntohl(header[4]);
-    uint32_t omega_fixed = ntohl(header[5]);
-    uint32_t fp_bits = ntohl(header[6]);
+    struct cbor_load_result result;
+    cbor_item_t* root = cbor_load(data, len, &result);
+    if (root == NULL || result.error.code != CBOR_ERR_NONE) {
+        if (root != NULL) cbor_decref(&root);
+        return -1;
+    }
 
-    if (magic != QUASAR_GOSSIP_MAGIC || version != QUASAR_GOSSIP_VERSION) return -1;
+    // Validate: must be a definite array with at least 3 elements
+    if (!cbor_isa_array(root) || !cbor_array_is_definite(root) ||
+        cbor_array_size(root) < 3) {
+        cbor_decref(&root);
+        return -1;
+    }
 
-    float omega = (float)omega_fixed / 1000.0f;
+    cbor_item_t** items = cbor_array_handle(root);
 
-    // Create a temporary attenuated bloom filter from the received data
-    attenuated_bloom_filter_t* incoming = attenuated_bloom_filter_create(
-        level_count, level_size, hash_count, omega, fp_bits
-    );
-    if (incoming == NULL) return -1;
+    // items[0]: packet type (must be QUASAR_GOSSIP)
+    if (!cbor_isa_uint(items[0])) {
+        cbor_decref(&root);
+        return -1;
+    }
+    uint8_t type = cbor_get_uint8(items[0]);
+    if (type != MERIDIAN_PACKET_TYPE_QUASAR_GOSSIP) {
+        cbor_decref(&root);
+        return -1;
+    }
 
-    // Deserialize each level's elastic bloom filter
-    size_t offset = 7 * sizeof(uint32_t);
-    for (uint32_t level = 0; level < level_count && offset < len; level++) {
-        if (offset + sizeof(uint32_t) > len) break;
-        // Skip count field (used for verification, not reconstruction)
-        offset += sizeof(uint32_t);
+    // items[1]: level_count (validated for structure)
+    if (!cbor_isa_uint(items[1])) {
+        cbor_decref(&root);
+        return -1;
+    }
+    uint32_t level_count = cbor_get_uint32(items[1]);
 
-        // Read bitset data
-        size_t bitset_bytes = level_size / 8;
-        if (level_size % 8 > 0) bitset_bytes++;
-        if (offset + bitset_bytes > len) break;
-
-        elastic_bloom_filter_t* ebf = attenuated_bloom_filter_get_level(incoming, level);
-        if (ebf != NULL) {
-            // Set bitset from serialized data
-            if (elastic_bloom_filter_set_bitset(ebf, data + offset, bitset_bytes) != 0) {
-                offset += bitset_bytes;
-                break;
-            }
-        }
-        offset += bitset_bytes;
-
-        // Read bucket entries
-        if (offset + sizeof(uint32_t) > len) break;
-        uint32_t num_buckets = ntohl(*(const uint32_t*)(data + offset));
-        offset += sizeof(uint32_t);
-
-        for (uint32_t b = 0; b < num_buckets && offset + 2 * sizeof(uint32_t) <= len; b++) {
-            uint32_t bucket_index = ntohl(*(const uint32_t*)(data + offset));
-            offset += sizeof(uint32_t);
-            uint32_t num_entries = ntohl(*(const uint32_t*)(data + offset));
-            offset += sizeof(uint32_t);
-
-            if (ebf != NULL && bucket_index < elastic_bloom_filter_size(ebf)) {
-                for (uint32_t e = 0; e < num_entries && offset + sizeof(uint32_t) <= len; e++) {
-                    uint32_t fp = ntohl(*(const uint32_t*)(data + offset));
-                    offset += sizeof(uint32_t);
-                    elastic_bloom_filter_bucket_insert(ebf, bucket_index, fp);
-                }
-            } else {
-                offset += num_entries * sizeof(uint32_t);
-            }
-        }
+    // items[2]: encoded attenuated bloom filter
+    attenuated_bloom_filter_t* decoded = attenuated_bloom_filter_decode(items[2]);
+    if (decoded == NULL || attenuated_bloom_filter_level_count(decoded) != level_count) {
+        if (decoded != NULL) attenuated_bloom_filter_destroy(decoded);
+        cbor_decref(&root);
+        return -1;
     }
 
     // Store the incoming filter in the per-neighbor slot for directed routing (Algorithm 2)
@@ -760,184 +712,93 @@ int quasar_on_gossip(quasar_t* quasar, const uint8_t* data, size_t len, const st
                 break;
             }
         }
-        // Transfer ownership of incoming to the neighbor filter slot
+        // Transfer ownership of decoded to the neighbor filter slot
         quasar_neighbor_filter_t nf;
         nf.addr = from->addr;
         nf.port = from->port;
-        nf.filter = incoming;
+        nf.filter = decoded;
         vec_push(&quasar->neighbor_filters, nf);
         // Also merge into the aggregated routing filter for local checks
-        attenuated_bloom_filter_merge(quasar->routing, incoming);
+        attenuated_bloom_filter_merge(quasar->routing, decoded);
         platform_unlock(&quasar->lock);
     } else {
         // No sender info — just merge into routing and destroy
-        int result = attenuated_bloom_filter_merge(quasar->routing, incoming);
-        attenuated_bloom_filter_destroy(incoming);
+        int result = attenuated_bloom_filter_merge(quasar->routing, decoded);
+        attenuated_bloom_filter_destroy(decoded);
+        cbor_decref(&root);
         return result;
     }
+
+    cbor_decref(&root);
     return 0;
-}
-
-// Iteration callback context for collecting bucket entries during propagate
-typedef struct {
-    size_t* bucket_indices;
-    uint32_t* fingerprints;
-    size_t count;
-    size_t capacity;
-} propagate_collect_ctx_t;
-
-// File-scope callback for elastic_bloom_filter_iterate
-static void propagate_collect_entry(void* ctx, size_t bucket_idx, uint32_t fingerprint) {
-    propagate_collect_ctx_t* cctx = (propagate_collect_ctx_t*)ctx;
-    if (cctx->count >= cctx->capacity) return;
-    cctx->bucket_indices[cctx->count] = bucket_idx;
-    cctx->fingerprints[cctx->count] = fingerprint;
-    cctx->count++;
 }
 
 int quasar_propagate(quasar_t* quasar) {
     if (quasar == NULL) return -1;
     if (quasar->protocol == NULL) return -1;
 
+    platform_lock(&quasar->lock);
+
+    // Encode the attenuated bloom filter to CBOR
+    cbor_item_t* encoded_filter = attenuated_bloom_filter_encode(quasar->routing);
+    if (encoded_filter == NULL) {
+        platform_unlock(&quasar->lock);
+        return -1;
+    }
+
+    // Read level_count under lock since it reads quasar->routing
     uint32_t level_count = attenuated_bloom_filter_level_count(quasar->routing);
-    size_t level_size = QUASAR_DEFAULT_SIZE;
-    size_t bitset_bytes = level_size / 8;
-    if (level_size % 8 > 0) bitset_bytes++;
 
-    // Phase 1: Calculate total size by iterating all levels
-    // Extra margin per level for concurrent modifications between sizing and writing
-    const size_t margin_per_level = 256;
-    size_t total_size = 7 * sizeof(uint32_t); // header
+    platform_unlock(&quasar->lock);
 
-    for (uint32_t level = 0; level < level_count; level++) {
-        elastic_bloom_filter_t* ebf = attenuated_bloom_filter_get_level(quasar->routing, level);
-        if (ebf == NULL) break;
-
-        total_size += sizeof(uint32_t); // count
-        total_size += bitset_bytes;     // bitset data
-        total_size += sizeof(uint32_t); // num_buckets
-
-        // Iterate to count entries for sizing
-        propagate_collect_ctx_t cctx;
-        cctx.capacity = elastic_bloom_filter_count(ebf) * QUASAR_DEFAULT_HASH_COUNT + 16;
-        cctx.bucket_indices = get_clear_memory(sizeof(size_t) * cctx.capacity);
-        cctx.fingerprints = get_clear_memory(sizeof(uint32_t) * cctx.capacity);
-        cctx.count = 0;
-
-        elastic_bloom_filter_iterate(ebf, propagate_collect_entry, &cctx);
-
-        // Count distinct non-empty buckets
-        uint32_t num_non_empty = 0;
-        size_t last_bucket = SIZE_MAX;
-        for (size_t i = 0; i < cctx.count; i++) {
-            if (cctx.bucket_indices[i] != last_bucket) {
-                num_non_empty++;
-                last_bucket = cctx.bucket_indices[i];
-            }
-        }
-
-        total_size += num_non_empty * 2 * sizeof(uint32_t); // bucket headers
-        total_size += cctx.count * sizeof(uint32_t);         // fingerprints
-        total_size += margin_per_level;                       // safety margin
-
-        free(cctx.bucket_indices);
-        free(cctx.fingerprints);
+    // Build the QUASAR_GOSSIP packet: [type, level_count, encoded_filter]
+    cbor_item_t* packet = cbor_new_definite_array(3);
+    if (packet == NULL) {
+        cbor_decref(&encoded_filter);
+        return -1;
     }
 
-    // Phase 2: Write serialized data
-    uint8_t* buf = get_clear_memory(total_size);
-    if (buf == NULL) return -1;
-
-    // Write header
-    uint32_t* header = (uint32_t*)buf;
-    header[0] = htonl(QUASAR_GOSSIP_MAGIC);
-    header[1] = htonl(QUASAR_GOSSIP_VERSION);
-    header[2] = htonl(level_count);
-    header[3] = htonl((uint32_t)level_size);
-    header[4] = htonl(QUASAR_DEFAULT_HASH_COUNT);
-    header[5] = htonl((uint32_t)(QUASAR_DEFAULT_OMEGA * 1000.0f));
-    header[6] = htonl(QUASAR_DEFAULT_FP_BITS);
-    size_t offset = 7 * sizeof(uint32_t);
-
-    // Serialize each level
-    for (uint32_t level = 0; level < level_count; level++) {
-        elastic_bloom_filter_t* ebf = attenuated_bloom_filter_get_level(quasar->routing, level);
-        if (ebf == NULL) break;
-
-        // count
-        *(uint32_t*)(buf + offset) = htonl((uint32_t)elastic_bloom_filter_count(ebf));
-        offset += sizeof(uint32_t);
-
-        // bitset data
-        const uint8_t* bitset_data = NULL;
-        size_t bitset_size = 0;
-        elastic_bloom_filter_get_bitset(ebf, &bitset_data, &bitset_size);
-        size_t copy_bytes = bitset_bytes < bitset_size ? bitset_bytes : bitset_size;
-        if (bitset_data != NULL && copy_bytes > 0) {
-            memcpy(buf + offset, bitset_data, copy_bytes);
-        }
-        offset += bitset_bytes;
-
-        // Collect all bucket entries via iterate
-        propagate_collect_ctx_t cctx;
-        cctx.capacity = elastic_bloom_filter_count(ebf) * QUASAR_DEFAULT_HASH_COUNT + 16;
-        cctx.bucket_indices = get_clear_memory(sizeof(size_t) * cctx.capacity);
-        cctx.fingerprints = get_clear_memory(sizeof(uint32_t) * cctx.capacity);
-        cctx.count = 0;
-
-        elastic_bloom_filter_iterate(ebf, propagate_collect_entry, &cctx);
-
-        // Group entries by bucket and write
-        size_t entry_idx = 0;
-        uint32_t num_non_empty = 0;
-
-        // First pass: count non-empty buckets
-        size_t last_bucket = SIZE_MAX;
-        for (size_t i = 0; i < cctx.count; i++) {
-            if (cctx.bucket_indices[i] != last_bucket) {
-                num_non_empty++;
-                last_bucket = cctx.bucket_indices[i];
-            }
-        }
-
-        // Write num_buckets
-        *(uint32_t*)(buf + offset) = htonl(num_non_empty);
-        offset += sizeof(uint32_t);
-
-        // Second pass: write bucket entries grouped by bucket
-        entry_idx = 0;
-        while (entry_idx < cctx.count) {
-            size_t current_bucket = cctx.bucket_indices[entry_idx];
-
-            // Count entries in this bucket
-            uint32_t entries_in_bucket = 0;
-            size_t start = entry_idx;
-            while (entry_idx < cctx.count && cctx.bucket_indices[entry_idx] == current_bucket) {
-                entries_in_bucket++;
-                entry_idx++;
-            }
-
-            // Write bucket header
-            *(uint32_t*)(buf + offset) = htonl((uint32_t)current_bucket);
-            offset += sizeof(uint32_t);
-            *(uint32_t*)(buf + offset) = htonl(entries_in_bucket);
-            offset += sizeof(uint32_t);
-
-            // Write fingerprints
-            for (size_t e = start; e < entry_idx; e++) {
-                *(uint32_t*)(buf + offset) = htonl(cctx.fingerprints[e]);
-                offset += sizeof(uint32_t);
-            }
-        }
-
-        free(cctx.bucket_indices);
-        free(cctx.fingerprints);
+    cbor_item_t* type_item = cbor_build_uint8(MERIDIAN_PACKET_TYPE_QUASAR_GOSSIP);
+    cbor_item_t* level_item = cbor_build_uint32(level_count);
+    if (type_item == NULL || level_item == NULL) {
+        if (type_item != NULL) cbor_decref(&type_item);
+        if (level_item != NULL) cbor_decref(&level_item);
+        cbor_decref(&packet);
+        cbor_decref(&encoded_filter);
+        return -1;
     }
 
-    // Broadcast the serialized filter to all connected peers
-    int result = meridian_protocol_broadcast(quasar->protocol, buf, offset);
+    bool ok = cbor_array_push(packet, type_item) &&
+              cbor_array_push(packet, level_item) &&
+              cbor_array_push(packet, encoded_filter);
+    if (!ok) {
+        cbor_decref(&type_item);
+        cbor_decref(&level_item);
+        cbor_decref(&packet);
+        cbor_decref(&encoded_filter);
+        return -1;
+    }
+
+    // cbor_array_push increfs each item, so we can decref our local refs now
+    cbor_decref(&type_item);
+    cbor_decref(&level_item);
+    cbor_decref(&encoded_filter);
+
+    // Serialize to bytes
+    unsigned char* buf = NULL;
+    size_t buf_size = 0;
+    cbor_serialize_alloc(packet, &buf, &buf_size);
+    if (buf == NULL || buf_size == 0) {
+        cbor_decref(&packet);
+        return -1;
+    }
+
+    // Broadcast to all connected peers
+    int rc = meridian_protocol_broadcast(quasar->protocol, buf, buf_size);
+
     free(buf);
-    return result;
+    cbor_decref(&packet);
+    return rc == 0 ? 0 : -1;
 }
 
 // ============================================================================

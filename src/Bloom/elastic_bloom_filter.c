@@ -4,6 +4,7 @@
 
 #include "elastic_bloom_filter.h"
 #include "../Util/allocator.h"
+#include <cbor.h>
 #include <xxh3.h>
 #include <stdlib.h>
 #include <string.h>
@@ -321,4 +322,147 @@ int elastic_bloom_filter_set_bitset(elastic_bloom_filter_t* ebf, const uint8_t* 
     memcpy(ebf->bits->data, data, size);
     platform_unlock(&ebf->lock);
     return 0;
+}
+
+cbor_item_t* elastic_bloom_filter_encode(const elastic_bloom_filter_t* ebf) {
+    if (ebf == NULL) return NULL;
+
+    platform_lock(&((elastic_bloom_filter_t*)ebf)->lock);
+
+    /* Count occupied buckets for sparse encoding */
+    size_t num_occupied = 0;
+    for (size_t i = 0; i < ebf->bucket_count; i++) {
+        if (!bucket_is_empty(ebf->buckets[i])) num_occupied++;
+    }
+
+    /* 8 fixed fields + one sub-array per occupied bucket */
+    cbor_item_t* arr = cbor_new_definite_array(8 + num_occupied);
+    if (arr == NULL) goto fail;
+
+    /* Fixed metadata fields */
+    if (!cbor_array_push(arr, cbor_build_uint64((uint64_t)ebf->size))) goto fail;
+    if (!cbor_array_push(arr, cbor_build_uint32(ebf->hash_count))) goto fail;
+    if (!cbor_array_push(arr, cbor_build_uint32(ebf->fp_bits))) goto fail;
+    if (!cbor_array_push(arr, cbor_build_uint64(ebf->seed_a))) goto fail;
+    if (!cbor_array_push(arr, cbor_build_uint64(ebf->seed_b))) goto fail;
+    if (!cbor_array_push(arr, cbor_build_uint64((uint64_t)ebf->bits->size))) goto fail;
+    if (!cbor_array_push(arr, cbor_build_bytestring(ebf->bits->data, ebf->bits->size))) goto fail;
+    if (!cbor_array_push(arr, cbor_build_uint64((uint64_t)num_occupied))) goto fail;
+
+    /* Sparse bucket encoding: only non-empty buckets */
+    for (size_t i = 0; i < ebf->bucket_count; i++) {
+        if (bucket_is_empty(ebf->buckets[i])) continue;
+
+        /* Count fingerprints in this bucket */
+        size_t fp_count = 0;
+        ebf_bucket_entry_t* curr = ebf->buckets[i];
+        while (curr != NULL) {
+            fp_count++;
+            curr = curr->next;
+        }
+
+        /* Sub-array: [bucket_index, num_fps, fp1, fp2, ...] */
+        cbor_item_t* bucket_arr = cbor_new_definite_array(2 + fp_count);
+        if (bucket_arr == NULL) goto fail;
+
+        if (!cbor_array_push(bucket_arr, cbor_build_uint64((uint64_t)i))) goto fail_bucket;
+        if (!cbor_array_push(bucket_arr, cbor_build_uint64((uint64_t)fp_count))) goto fail_bucket;
+
+        curr = ebf->buckets[i];
+        while (curr != NULL) {
+            if (!cbor_array_push(bucket_arr, cbor_build_uint32(curr->fingerprint))) goto fail_bucket;
+            curr = curr->next;
+        }
+
+        if (!cbor_array_push(arr, bucket_arr)) goto fail_bucket;
+        continue;
+
+    fail_bucket:
+        cbor_decref(&bucket_arr);
+        goto fail;
+    }
+
+    platform_unlock(&((elastic_bloom_filter_t*)ebf)->lock);
+    return arr;
+
+fail:
+    platform_unlock(&((elastic_bloom_filter_t*)ebf)->lock);
+    if (arr != NULL) cbor_decref(&arr);
+    return NULL;
+}
+
+elastic_bloom_filter_t* elastic_bloom_filter_decode(cbor_item_t* item) {
+    if (item == NULL || !cbor_isa_array(item) || !cbor_array_is_definite(item))
+        return NULL;
+
+    cbor_item_t** elems = cbor_array_handle(item);
+    size_t arr_size = cbor_array_size(item);
+    if (arr_size < 8) return NULL;
+
+    /* Read fixed metadata */
+    uint64_t size = cbor_get_uint64(elems[0]);
+    uint32_t hash_count = (uint32_t)cbor_get_int(elems[1]);
+    uint32_t fp_bits = (uint32_t)cbor_get_int(elems[2]);
+    uint64_t seed_a = cbor_get_uint64(elems[3]);
+    uint64_t seed_b = cbor_get_uint64(elems[4]);
+    uint64_t bitset_byte_len = cbor_get_uint64(elems[5]);
+
+    if (!cbor_isa_bytestring(elems[6])) return NULL;
+    if (cbor_bytestring_length(elems[6]) != bitset_byte_len) return NULL;
+
+    uint64_t num_occupied = cbor_get_uint64(elems[7]);
+
+    /* Validate: 8 fixed + num_occupied bucket sub-arrays */
+    if (arr_size != 8 + (size_t)num_occupied) return NULL;
+
+    /* Create filter (omega=0.5 is placeholder; not transmitted) */
+    elastic_bloom_filter_t* ebf = elastic_bloom_filter_create((size_t)size, hash_count, 0.5f, fp_bits);
+    if (ebf == NULL) return NULL;
+
+    /* Overwrite seeds that create() defaulted to 1/2 */
+    ebf->seed_a = seed_a;
+    ebf->seed_b = seed_b;
+
+    /* Replace bitset with decoded data */
+    bitset_destroy(ebf->bits);
+    ebf->bits = bitset_create((size_t)bitset_byte_len);
+    if (ebf->bits == NULL) {
+        elastic_bloom_filter_destroy(ebf);
+        return NULL;
+    }
+    memcpy(ebf->bits->data, cbor_bytestring_handle(elems[6]), (size_t)bitset_byte_len);
+
+    /* Reconstruct sparse buckets */
+    for (size_t k = 0; k < (size_t)num_occupied; k++) {
+        cbor_item_t* bucket_item = elems[8 + k];
+        if (!cbor_isa_array(bucket_item) || !cbor_array_is_definite(bucket_item)) {
+            elastic_bloom_filter_destroy(ebf);
+            return NULL;
+        }
+        cbor_item_t** bucket_elems = cbor_array_handle(bucket_item);
+        size_t bucket_arr_size = cbor_array_size(bucket_item);
+        if (bucket_arr_size < 2) {
+            elastic_bloom_filter_destroy(ebf);
+            return NULL;
+        }
+
+        size_t bucket_index = (size_t)cbor_get_uint64(bucket_elems[0]);
+        uint64_t fp_count = cbor_get_uint64(bucket_elems[1]);
+
+        if (bucket_arr_size != 2 + (size_t)fp_count || bucket_index >= ebf->bucket_count) {
+            elastic_bloom_filter_destroy(ebf);
+            return NULL;
+        }
+
+        /* Insert fingerprints in reverse order so the linked list matches original */
+        for (uint64_t f = fp_count; f > 0; f--) {
+            uint32_t fp = (uint32_t)cbor_get_int(bucket_elems[1 + f]);
+            bucket_insert(&ebf->buckets[bucket_index], fp);
+        }
+    }
+
+    /* Rebuild bitset from buckets for consistency */
+    rebuild_bitset(ebf);
+
+    return ebf;
 }

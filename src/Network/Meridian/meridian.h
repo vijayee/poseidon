@@ -12,6 +12,7 @@
 #include "../../Util/log.h"
 #include "../../Workers/pool.h"
 #include "../../Time/wheel.h"
+#include "../../Crypto/node_id.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,6 +56,7 @@ typedef enum {
  */
 typedef struct meridian_node_t {
     refcounter_t refcounter;  /**< Reference counting for lifetime management */
+    poseidon_node_id_t id;    /**< Node identity (BLAKE3 hash of public key) */
     uint32_t addr;            /**< IPv4 address in network byte order */
     uint16_t port;           /**< Port number in network byte order */
     uint32_t rendv_addr;     /**< Rendezvous point address (for NAT traversal) */
@@ -87,27 +89,63 @@ typedef struct meridian_config_t {
 // ============================================================================
 
 /**
- * Creates a new meridian node with the given address and port.
+ * Creates a new meridian node with the given address, port, and identity.
  * Rendezvous fields are initialized to zero (no rendezvous point).
+ * Pass NULL for id to create an unidentified node.
  *
  * @param addr  IPv4 address in network byte order
  * @param port  Port number in network byte order
+ * @param id    Node identity (may be NULL for unidentified nodes)
  * @return      New node with refcount=1, or NULL on allocation failure
  */
-meridian_node_t* meridian_node_create(uint32_t addr, uint16_t port);
+meridian_node_t* meridian_node_create(uint32_t addr, uint16_t port,
+                                       const poseidon_node_id_t* id);
 
 /**
  * Creates a new meridian node that acts as a rendezvous point for NAT traversal.
  * The node stores its own address/port plus the rendezvous point it's associated with.
+ * Pass NULL for id to create an unidentified node.
  *
  * @param addr         Node's IPv4 address
  * @param port         Node's port
  * @param rendv_addr   Rendezvous server address
  * @param rendv_port   Rendezvous server port
+ * @param id           Node identity (may be NULL for unidentified nodes)
  * @return             New rendezvous node with refcount=1
  */
 meridian_node_t* meridian_node_create_rendv(uint32_t addr, uint16_t port,
-                                            uint32_t rendv_addr, uint16_t rendv_port);
+                                            uint32_t rendv_addr, uint16_t rendv_port,
+                                            const poseidon_node_id_t* id);
+
+/**
+ * Creates a new meridian node without PKI identity.
+ * Equivalent to meridian_node_create(addr, port, NULL).
+ *
+ * @param addr  IPv4 address in network byte order
+ * @param port  Port number in network byte order
+ * @return      New unidentified node with refcount=1
+ */
+meridian_node_t* meridian_node_create_unidentified(uint32_t addr, uint16_t port);
+
+/**
+ * Compares two nodes by PKI identity.
+ * Returns false if either node has a null (all-zero) identity.
+ *
+ * @param a  First node (may be NULL)
+ * @param b  Second node (may be NULL)
+ * @return   true if both nodes have non-null identities that match
+ */
+bool meridian_node_equals_by_id(const meridian_node_t* a, const meridian_node_t* b);
+
+/**
+ * Compares two nodes by network address and port.
+ * Used for QUIC connection lookup where identity is not yet established.
+ *
+ * @param a  First node (may be NULL)
+ * @param b  Second node (may be NULL)
+ * @return   true if both nodes have the same addr and port
+ */
+bool meridian_node_equals_by_addr(const meridian_node_t* a, const meridian_node_t* b);
 
 /**
  * Releases a node's reference. If this was the last reference, the node

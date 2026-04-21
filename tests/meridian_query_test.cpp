@@ -43,8 +43,8 @@ TEST_F(MeridianQueryTest, AddTargetsToQuery) {
     meridian_query_t* query = meridian_query_create(
         12345, MERIDIAN_QUERY_TYPE_CLOSEST, 5000);
 
-    meridian_node_t* node1 = meridian_node_create(0xC0A80001, 8080);
-    meridian_node_t* node2 = meridian_node_create(0xC0A80002, 8081);
+    meridian_node_t* node1 = meridian_node_create(0xC0A80001, 8080, NULL);
+    meridian_node_t* node2 = meridian_node_create(0xC0A80002, 8081, NULL);
 
     ASSERT_NE(nullptr, node1);
     ASSERT_NE(nullptr, node2);
@@ -62,7 +62,7 @@ TEST_F(MeridianQueryTest, SetLatency) {
     meridian_query_t* query = meridian_query_create(
         12345, MERIDIAN_QUERY_TYPE_MEASURE, 5000);
 
-    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080, NULL);
     ASSERT_NE(nullptr, node);
 
     EXPECT_EQ(0, meridian_query_add_target(query, node));
@@ -77,9 +77,9 @@ TEST_F(MeridianQueryTest, GetClosest) {
     meridian_query_t* query = meridian_query_create(
         12345, MERIDIAN_QUERY_TYPE_CLOSEST, 5000);
 
-    meridian_node_t* node1 = meridian_node_create(0xC0A80001, 8080);
-    meridian_node_t* node2 = meridian_node_create(0xC0A80002, 8080);
-    meridian_node_t* node3 = meridian_node_create(0xC0A80003, 8080);
+    meridian_node_t* node1 = meridian_node_create(0xC0A80001, 8080, NULL);
+    meridian_node_t* node2 = meridian_node_create(0xC0A80002, 8080, NULL);
+    meridian_node_t* node3 = meridian_node_create(0xC0A80003, 8080, NULL);
 
     ASSERT_NE(nullptr, node1);
     ASSERT_NE(nullptr, node2);

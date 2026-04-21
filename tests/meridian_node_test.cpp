@@ -19,7 +19,7 @@ TEST_F(MeridianNodeTest, CreateBasicNode) {
     uint32_t addr = 0xC0A80001; // 192.168.0.1
     uint16_t port = 8080;
 
-    meridian_node_t* node = meridian_node_create(addr, port);
+    meridian_node_t* node = meridian_node_create(addr, port, NULL);
     ASSERT_NE(nullptr, node);
     EXPECT_EQ(addr, node->addr);
     EXPECT_EQ(port, node->port);
@@ -36,7 +36,7 @@ TEST_F(MeridianNodeTest, CreateRendvNode) {
     uint32_t rendv_addr = 0xC0A80002;
     uint16_t rendv_port = 8081;
 
-    meridian_node_t* node = meridian_node_create_rendv(addr, port, rendv_addr, rendv_port);
+    meridian_node_t* node = meridian_node_create_rendv(addr, port, rendv_addr, rendv_port, NULL);
     ASSERT_NE(nullptr, node);
     EXPECT_EQ(addr, node->addr);
     EXPECT_EQ(port, node->port);
@@ -48,9 +48,9 @@ TEST_F(MeridianNodeTest, CreateRendvNode) {
 }
 
 TEST_F(MeridianNodeTest, LatencyComparison) {
-    meridian_node_t* node1 = meridian_node_create(0xC0A80001, 8080);
-    meridian_node_t* node2 = meridian_node_create(0xC0A80002, 8080);
-    meridian_node_t* node3 = meridian_node_create(0xC0A80001, 8080); // same addr and port as node1
+    meridian_node_t* node1 = meridian_node_create(0xC0A80001, 8080, NULL);
+    meridian_node_t* node2 = meridian_node_create(0xC0A80002, 8080, NULL);
+    meridian_node_t* node3 = meridian_node_create(0xC0A80001, 8080, NULL); // same addr and port as node1
 
     ASSERT_NE(nullptr, node1);
     ASSERT_NE(nullptr, node2);

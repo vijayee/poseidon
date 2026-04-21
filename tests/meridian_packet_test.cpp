@@ -28,8 +28,8 @@ TEST_F(MeridianPacketTest, AddGossipTargets) {
     meridian_gossip_packet_t* pkt = meridian_gossip_packet_create();
     ASSERT_NE(nullptr, pkt);
 
-    meridian_node_t* node1 = meridian_node_create(0xC0A80001, 8080);
-    meridian_node_t* node2 = meridian_node_create_rendv(0xC0A80002, 8081, 0xC0A80003, 8082);
+    meridian_node_t* node1 = meridian_node_create(0xC0A80001, 8080, NULL);
+    meridian_node_t* node2 = meridian_node_create_rendv(0xC0A80002, 8081, 0xC0A80003, 8082, NULL);
 
     EXPECT_EQ(0, meridian_gossip_packet_add_target(pkt, node1));
     EXPECT_EQ(0, meridian_gossip_packet_add_target(pkt, node2));
@@ -54,7 +54,7 @@ TEST_F(MeridianPacketTest, AddPingNodes) {
     meridian_ping_packet_t* pkt = meridian_ping_packet_create();
     ASSERT_NE(nullptr, pkt);
 
-    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080, NULL);
     ASSERT_NE(nullptr, node);
 
     EXPECT_EQ(0, meridian_ping_packet_add_node(pkt, node, 1500));

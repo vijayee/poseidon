@@ -5,6 +5,7 @@
 #include "../../Util/threadding.h"
 #include "meridian_ring.h"
 #include "../../Util/allocator.h"
+#include "../../Crypto/node_id.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -80,6 +81,13 @@ static int ring_latency_cmp(const void* a, const void* b) {
     return 0;
 }
 
+static bool node_identity_match(const meridian_node_t* a, const meridian_node_t* b) {
+    if (!poseidon_node_id_is_null(&a->id) && !poseidon_node_id_is_null(&b->id)) {
+        return meridian_node_equals_by_id(a, b);
+    }
+    return meridian_node_equals_by_addr(a, b);
+}
+
 // ============================================================================
 // NODE INSERTION AND REMOVAL
 // ============================================================================
@@ -138,7 +146,7 @@ int meridian_ring_set_erase(meridian_ring_set_t* set, meridian_node_t* node) {
         int idx = -1;
         for (int j = 0; j < set->rings[i].primary.length; j++) {
             meridian_node_t* n = set->rings[i].primary.data[j];
-            if (n->addr == node->addr && n->port == node->port) {
+            if (node_identity_match(n, node)) {
                 idx = j;
                 break;
             }
@@ -152,7 +160,7 @@ int meridian_ring_set_erase(meridian_ring_set_t* set, meridian_node_t* node) {
         idx = -1;
         for (int j = 0; j < set->rings[i].secondary.length; j++) {
             meridian_node_t* n = set->rings[i].secondary.data[j];
-            if (n->addr == node->addr && n->port == node->port) {
+            if (node_identity_match(n, node)) {
                 idx = j;
                 break;
             }
@@ -183,7 +191,7 @@ int meridian_ring_set_erase_ring(meridian_ring_set_t* set, meridian_node_t* node
     int idx = -1;
     for (int j = 0; j < set->rings[ring_num].primary.length; j++) {
         meridian_node_t* n = set->rings[ring_num].primary.data[j];
-        if (n->addr == node->addr && n->port == node->port) {
+        if (node_identity_match(n, node)) {
             idx = j;
             break;
         }
@@ -196,7 +204,7 @@ int meridian_ring_set_erase_ring(meridian_ring_set_t* set, meridian_node_t* node
     idx = -1;
     for (int j = 0; j < set->rings[ring_num].secondary.length; j++) {
         meridian_node_t* n = set->rings[ring_num].secondary.data[j];
-        if (n->addr == node->addr && n->port == node->port) {
+        if (node_identity_match(n, node)) {
             idx = j;
             break;
         }

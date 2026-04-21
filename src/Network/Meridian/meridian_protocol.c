@@ -26,6 +26,23 @@ static QUIC_STATUS QUIC_API
 ConnectionCallback(HQUIC Connection, void* Context,
                    QUIC_CONNECTION_EVENT* Event);
 
+static void gossip_outbound_cb(void* ctx, const uint8_t* data, size_t len,
+                                const meridian_node_t* target) {
+    meridian_protocol_t* protocol = (meridian_protocol_t*)ctx;
+    meridian_protocol_send_packet(protocol, data, len, target);
+}
+
+static void gossip_completed_cb(void* ctx, uint64_t query_id,
+                                 meridian_node_t** peers, size_t num_peers) {
+    meridian_protocol_t* protocol = (meridian_protocol_t*)ctx;
+    (void)query_id;
+    for (size_t i = 0; i < num_peers; i++) {
+        // Latency unknown for gossip-discovered peers; insert into ring 0
+        // until actual measurement updates their placement
+        meridian_ring_set_insert(protocol->ring_set, peers[i], 0, NULL);
+    }
+}
+
 // ============================================================================
 // PROTOCOL LIFECYCLE
 // ============================================================================
@@ -47,6 +64,9 @@ meridian_protocol_t* meridian_protocol_create(const meridian_protocol_config_t* 
     protocol->config.replace_interval_s = config->replace_interval_s;
     protocol->config.gossip_timeout_ms = config->gossip_timeout_ms;
     protocol->config.measure_timeout_ms = config->measure_timeout_ms;
+    protocol->config.tls_key_path = config->tls_key_path;
+    protocol->config.tls_cert_path = config->tls_cert_path;
+    memcpy(&protocol->config.local_node_id, &config->local_node_id, sizeof(poseidon_node_id_t));
     protocol->config.pool = config->pool;
     protocol->config.wheel = config->wheel;
 
@@ -210,10 +230,18 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
         return -1;
     }
 
-    // Load credentials (none for now - insecure mode for testing)
+    // Load credentials
     QUIC_CREDENTIAL_CONFIG CredConfig = {0};
-    CredConfig.Flags = QUIC_CREDENTIAL_FLAG_NONE;
-    CredConfig.Type = QUIC_CREDENTIAL_TYPE_NONE;
+    QUIC_CERTIFICATE_FILE CertFile = {0};
+    if (protocol->config.tls_key_path != NULL && protocol->config.tls_cert_path != NULL) {
+        CertFile.PrivateKeyFile = protocol->config.tls_key_path;
+        CertFile.CertificateFile = protocol->config.tls_cert_path;
+        CredConfig.CertificateFile = &CertFile;
+        CredConfig.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
+    } else {
+        CredConfig.Flags = QUIC_CREDENTIAL_FLAG_NONE;
+        CredConfig.Type = QUIC_CREDENTIAL_TYPE_NONE;
+    }
 
     if (QUIC_FAILED(Status = protocol->msquic->ConfigurationLoadCredential(
             protocol->configuration,
@@ -281,8 +309,8 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
     // Initialize gossip
     meridian_gossip_config_t gossip_config = {
         .user_ctx = protocol,
-        .outbound_cb = NULL,
-        .completed_cb = NULL,
+        .outbound_cb = gossip_outbound_cb,
+        .completed_cb = gossip_completed_cb,
         .init_interval_s = protocol->config.init_gossip_interval_s,
         .num_init_intervals = protocol->config.num_init_gossip_intervals,
         .steady_state_interval_s = protocol->config.steady_state_gossip_interval_s,
@@ -364,7 +392,7 @@ int meridian_protocol_add_seed_node(meridian_protocol_t* protocol,
     if (protocol == NULL) return -1;
     if (protocol->num_seed_nodes >= 16) return -1;
 
-    meridian_node_t* node = meridian_node_create(addr, port);
+    meridian_node_t* node = meridian_node_create(addr, port, NULL);
     if (node == NULL) return -1;
 
     protocol->seed_nodes[protocol->num_seed_nodes++] = node;
@@ -386,7 +414,7 @@ int meridian_protocol_connect(meridian_protocol_t* protocol,
     }
 
     // Create peer node
-    meridian_node_t* node = meridian_node_create(addr, port);
+    meridian_node_t* node = meridian_node_create(addr, port, NULL);
     if (node == NULL) return -1;
 
     // Create QUIC connection
@@ -666,8 +694,34 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
         }
     }
 
+    if (!cbor_array_is_definite(item) || cbor_array_size(item) < 1) {
+        cbor_decref(&item);
+        return -1;
+    }
+
+    cbor_item_t** items = cbor_array_handle(item);
+    uint8_t type = cbor_get_uint8(items[0]);
+
+    int rc = 0;
+    switch (type) {
+    case MERIDIAN_PACKET_TYPE_GOSSIP:
+    case MERIDIAN_PACKET_TYPE_GOSSIP_PULL:
+        rc = meridian_gossip_handle_on_packet(protocol->gossip_handle, data, len, from);
+        break;
+    case MERIDIAN_PACKET_TYPE_QUASAR_GOSSIP:
+        if (protocol->callbacks.on_quasar_gossip != NULL) {
+            protocol->callbacks.on_quasar_gossip(protocol->callbacks.quasar_ctx, protocol, data, len);
+        }
+        break;
+    default:
+        if (protocol->callbacks.on_packet != NULL) {
+            protocol->callbacks.on_packet(protocol->callbacks.user_ctx, protocol, data, len);
+        }
+        break;
+    }
+
     cbor_decref(&item);
-    return 0;
+    return rc;
 }
 
 int meridian_protocol_on_measure_result(meridian_protocol_t* protocol,
