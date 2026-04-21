@@ -632,3 +632,79 @@ TEST_F(DedupFilterTest, RouteMessageCarriesID) {
 
     quasar_route_message_destroy(msg);
 }
+
+TEST_F(QuasarTest, Algorithm2DirectedWalk) {
+    // Node A subscribes to "sports"
+    quasar_t* node_a = quasar_create(NULL, 5, 3, 4096, 3);
+    const uint8_t* topic = (const uint8_t*)"sports";
+    int delivered = 0;
+    quasar_set_delivery_callback(node_a, [](void* ctx, const uint8_t*, size_t,
+                                            const uint8_t*, size_t) {
+        int* count = (int*)ctx;
+        (*count)++;
+    }, &delivered);
+    quasar_subscribe(node_a, topic, 6, 100);
+
+    // Node B publishes to "sports" — has node A as a neighbor with "sports" in its filter
+    quasar_t* node_b = quasar_create(NULL, 5, 3, 4096, 3);
+    meridian_node_t* node_a_endpoint = meridian_node_create(htonl(0x0A000001), htons(8080));
+
+    // Set up node B's neighbor filter for node A
+    attenuated_bloom_filter_t* nf = quasar_get_or_create_neighbor_filter(node_b, node_a_endpoint);
+    ASSERT_NE(nullptr, nf);
+    // Node A subscribes to "sports", so level 0 of A's filter has it
+    attenuated_bloom_filter_subscribe(nf, topic, 6);
+    // Also merge into routing for local check
+    attenuated_bloom_filter_merge(node_b->routing, nf);
+
+    // Check: node B's routing filter should show "sports" at hops > 0
+    uint32_t hops = 0;
+    bool found = attenuated_bloom_filter_check(node_b->routing, topic, 6, &hops);
+    EXPECT_TRUE(found);
+    EXPECT_GT(hops, 0u);
+
+    // Publish from node B — should find directed route to node A
+    const uint8_t* data = (const uint8_t*)"goal!";
+    EXPECT_EQ(0, quasar_publish(node_b, topic, 6, data, 5));
+
+    meridian_node_destroy(node_a_endpoint);
+    quasar_destroy(node_b);
+    quasar_destroy(node_a);
+}
+
+TEST_F(QuasarTest, NegativeInformationPreventsSelfLoop) {
+    // Node subscribes to "sports" and has itself as a neighbor
+    // Publishing should deliver locally but NOT forward to self
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    const uint8_t* topic = (const uint8_t*)"sports";
+
+    int delivered = 0;
+    quasar_set_delivery_callback(q, [](void* ctx, const uint8_t*, size_t,
+                                        const uint8_t*, size_t) {
+        int* count = (int*)ctx;
+        (*count)++;
+    }, &delivered);
+
+    // Subscribe locally
+    quasar_subscribe(q, topic, 6, 100);
+
+    // Set up a neighbor filter for our own address (self-loop scenario)
+    meridian_node_t* self_node = meridian_node_create(htonl(0x0A000001), htons(8080));
+    attenuated_bloom_filter_t* nf = quasar_get_or_create_neighbor_filter(q, self_node);
+    ASSERT_NE(nullptr, nf);
+    attenuated_bloom_filter_subscribe(nf, topic, 6);
+    // Add self node ID to level 0 (this is what negative info checks against)
+    uint8_t self_key[6];
+    memcpy(self_key, &self_node->addr, sizeof(uint32_t));
+    memcpy(self_key + sizeof(uint32_t), &self_node->port, sizeof(uint16_t));
+    elastic_bloom_filter_add(attenuated_bloom_filter_get_level(nf, 0), self_key, sizeof(self_key));
+    attenuated_bloom_filter_merge(q->routing, nf);
+
+    // Publish — should deliver locally (we're subscribed) but NOT forward to self
+    const uint8_t* data = (const uint8_t*)"goal!";
+    EXPECT_EQ(0, quasar_publish(q, topic, 6, data, 5));
+    EXPECT_EQ(1, delivered);
+
+    meridian_node_destroy(self_node);
+    quasar_destroy(q);
+}

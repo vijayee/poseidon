@@ -306,50 +306,95 @@ int quasar_unsubscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len)
 // PUBLISHING
 // ============================================================================
 
-int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len, const uint8_t* data, size_t data_len) {
+int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
+                   const uint8_t* data, size_t data_len) {
     if (quasar == NULL || topic == NULL) return -1;
+
+    // Check if locally subscribed
+    bool locally_subscribed = false;
     platform_lock(&quasar->lock);
+    for (int i = 0; i < quasar->local_subs.length; i++) {
+        if (quasar->local_subs.data[i].topic != NULL &&
+            quasar->local_subs.data[i].topic->size == topic_len &&
+            memcmp(quasar->local_subs.data[i].topic->data, topic, topic_len) == 0) {
+            locally_subscribed = true;
+            break;
+        }
+    }
 
-    // Check the attenuated filter to determine routing direction
-    uint32_t hops = 0;
-    bool found = attenuated_bloom_filter_check(quasar->routing, topic, topic_len, &hops);
-
-    if (found && hops == 0) {
-        // Local delivery: this node is subscribed to the topic
+    if (locally_subscribed) {
+        // Algorithm 2, lines 4-8: deliver locally, add self to PUB, re-publish to all neighbors
         quasar_message_id_t msg_id = quasar_message_id_get_next();
         bloom_filter_add(quasar->seen, (const uint8_t*)&msg_id, sizeof(msg_id));
+
         if (quasar->on_delivery != NULL) {
             quasar_delivery_cb_t cb = quasar->on_delivery;
             void* ctx = quasar->delivery_ctx;
             platform_unlock(&quasar->lock);
             cb(ctx, topic, topic_len, data, data_len);
-            return 0;
+            platform_lock(&quasar->lock);
         }
-        platform_unlock(&quasar->lock);
-        return 0;
-    }
 
-    if (found && hops > 0) {
-        // Directed routing: a subscriber exists hops steps away through a neighbor.
-        // Forward toward the neighbor that contributed the matching filter level.
-        // The Meridian protocol's find_closest selects the best next hop.
+        // Re-publish to all overlay neighbors
         if (quasar->protocol != NULL) {
-            platform_unlock(&quasar->lock);
-            // TODO: Serialize the message with topic+payload and send via
-            // meridian_protocol_send_packet toward the neighbor identified by
-            // the routing filter match. This requires tracking which neighbor
-            // contributed each level of the attenuated filter.
-            return 0;
+            uint32_t local_addr = 0;
+            uint16_t local_port = 0;
+            meridian_protocol_get_local_node(quasar->protocol, &local_addr, &local_port);
+
+            size_t num_peers = 0;
+            meridian_node_t** peers = meridian_protocol_get_connected_peers(quasar->protocol, &num_peers);
+            for (size_t i = 0; i < num_peers; i++) {
+                // TODO: Serialize route message with PUB={self} and send via meridian_protocol_send_packet
+            }
         }
         platform_unlock(&quasar->lock);
         return 0;
     }
-
-    // Random walk: no known route to a subscriber.
-    // Create a route message with a negative bloom filter to prevent revisiting
-    // nodes during the walk. Forward to alpha random neighbors not in the filter.
     platform_unlock(&quasar->lock);
 
+    // Algorithm 2, lines 10-19: Directed walk
+    if (quasar->protocol != NULL) {
+        platform_lock(&quasar->lock);
+
+        uint32_t local_addr = 0;
+        uint16_t local_port = 0;
+        meridian_protocol_get_local_node(quasar->protocol, &local_addr, &local_port);
+        uint8_t local_key[6];
+        memcpy(local_key, &local_addr, sizeof(uint32_t));
+        memcpy(local_key + sizeof(uint32_t), &local_port, sizeof(uint16_t));
+
+        uint32_t level_count = attenuated_bloom_filter_level_count(quasar->routing);
+        for (uint32_t level = 0; level < level_count; level++) {
+            for (int ni = 0; ni < quasar->neighbor_filters.length; ni++) {
+                quasar_neighbor_filter_t* nf = &quasar->neighbor_filters.data[ni];
+                if (nf->filter == NULL) continue;
+                elastic_bloom_filter_t* ebf = attenuated_bloom_filter_get_level(nf->filter, level);
+                if (ebf == NULL) continue;
+
+                if (!elastic_bloom_filter_contains(ebf, topic, topic_len)) continue;
+
+                // Topic found at level L in neighbor O's filter — check negative info
+                bool negated = false;
+                if (local_addr != 0 || local_port != 0) {
+                    if (elastic_bloom_filter_contains(ebf, local_key, sizeof(local_key))) {
+                        negated = true;
+                    }
+                }
+
+                if (!negated) {
+                    // Directed walk: forward to this neighbor
+                    meridian_node_t* target = meridian_node_create(nf->addr, nf->port);
+                    // TODO: Serialize route message and send via meridian_protocol_send_packet
+                    meridian_node_destroy(target);
+                    platform_unlock(&quasar->lock);
+                    return 0;
+                }
+            }
+        }
+        platform_unlock(&quasar->lock);
+    }
+
+    // Algorithm 2, lines 20-21: Random walk
     quasar_route_message_t* msg = quasar_route_message_create(
         topic, topic_len, data, data_len,
         quasar->max_hops,
@@ -358,7 +403,7 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len, con
     );
     if (msg == NULL) return -1;
 
-    // Add this node to the negative filter so we don't route back to ourselves
+    // Add local node as publisher and to visited filter
     if (quasar->protocol != NULL) {
         uint32_t local_addr = 0;
         uint16_t local_port = 0;
@@ -366,11 +411,12 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len, con
         meridian_node_t* local_node = meridian_node_create(local_addr, local_port);
         if (local_node != NULL) {
             quasar_route_message_add_visited(msg, local_node);
+            quasar_route_message_add_publisher(msg, local_node);
             meridian_node_destroy(local_node);
         }
     }
 
-    // Forward to alpha random neighbors not in the negative filter
+    // Forward to alpha random unvisited neighbors
     int result = 0;
     if (quasar->protocol != NULL) {
         size_t num_peers = 0;
@@ -378,8 +424,7 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len, con
         uint32_t sent = 0;
         for (size_t i = 0; i < num_peers && sent < quasar->alpha; i++) {
             if (!quasar_route_message_has_visited(msg, peers[i])) {
-                // TODO: Serialize route message and send via meridian_protocol_send_packet.
-                // For now, mark the peer as visited and count the forward.
+                // TODO: Serialize route message and send via meridian_protocol_send_packet
                 quasar_route_message_add_visited(msg, peers[i]);
                 sent++;
             }
@@ -397,79 +442,130 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len, con
 int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const struct meridian_node_t* from) {
     if (quasar == NULL || msg == NULL) return -1;
 
-    // Dedup check: discard if we've already seen this message
+    // Algorithm 2, line 1: Dedup check
     platform_lock(&quasar->lock);
     if (bloom_filter_contains(quasar->seen, (const uint8_t*)&msg->id, sizeof(msg->id))) {
         platform_unlock(&quasar->lock);
         return 0;
     }
     bloom_filter_add(quasar->seen, (const uint8_t*)&msg->id, sizeof(msg->id));
-    platform_unlock(&quasar->lock);
 
-    // Add this node to the negative filter
+    // Get local node info
+    uint32_t local_addr = 0;
+    uint16_t local_port = 0;
     if (quasar->protocol != NULL) {
-        uint32_t local_addr = 0;
-        uint16_t local_port = 0;
         meridian_protocol_get_local_node(quasar->protocol, &local_addr, &local_port);
-        meridian_node_t* local_node = meridian_node_create(local_addr, local_port);
-        if (local_node != NULL) {
-            quasar_route_message_add_visited(msg, local_node);
-            meridian_node_destroy(local_node);
+    }
+    meridian_node_t* local_node = meridian_node_create(local_addr, local_port);
+    if (local_node != NULL) {
+        quasar_route_message_add_visited(msg, local_node);
+        quasar_route_message_add_publisher(msg, local_node);
+    }
+
+    // Algorithm 2, lines 3-8: Check if locally subscribed
+    bool locally_subscribed = false;
+    for (int i = 0; i < quasar->local_subs.length; i++) {
+        if (quasar->local_subs.data[i].topic != NULL &&
+            quasar->local_subs.data[i].topic->size == msg->topic->size &&
+            memcmp(quasar->local_subs.data[i].topic->data, msg->topic->data, msg->topic->size) == 0) {
+            locally_subscribed = true;
+            break;
         }
     }
 
-    // Check the routing filter for the topic (before TTL check — local delivery always works)
-    platform_lock(&quasar->lock);
-    uint32_t hops = 0;
-    bool found = attenuated_bloom_filter_check(quasar->routing, msg->topic->data, msg->topic->size, &hops);
-
-    if (found && hops == 0) {
-        // Local delivery: this node is subscribed — deliver regardless of TTL
+    if (locally_subscribed) {
         if (quasar->on_delivery != NULL) {
             quasar_delivery_cb_t cb = quasar->on_delivery;
             void* ctx = quasar->delivery_ctx;
             platform_unlock(&quasar->lock);
             cb(ctx, msg->topic->data, msg->topic->size, msg->data->data, msg->data->size);
-            return 0;
+            platform_lock(&quasar->lock);
         }
+
+        // Re-publish to all overlay neighbors
+        if (quasar->protocol != NULL) {
+            size_t num_peers = 0;
+            meridian_node_t** peers = meridian_protocol_get_connected_peers(quasar->protocol, &num_peers);
+            for (size_t i = 0; i < num_peers; i++) {
+                // TODO: Serialize route message and send via meridian_protocol_send_packet
+            }
+        }
+
+        if (local_node != NULL) meridian_node_destroy(local_node);
         platform_unlock(&quasar->lock);
         return 0;
     }
 
     platform_unlock(&quasar->lock);
 
-    // Check TTL — if no hops remaining, stop forwarding (but local delivery already handled above)
+    // Algorithm 2, line 9: Check TTL
     platform_lock(&msg->lock);
     if (msg->hops_remaining == 0) {
         platform_unlock(&msg->lock);
+        if (local_node != NULL) meridian_node_destroy(local_node);
         return 0;
     }
     msg->hops_remaining--;
     platform_unlock(&msg->lock);
 
-    if (found && hops > 0) {
-        // Directed routing: forward toward the subscriber
-        if (quasar->protocol != NULL) {
-            // TODO: Forward the route message toward the neighbor that contributed
-            // the matching filter level, using meridian_protocol_send_packet.
-            return 0;
+    // Algorithm 2, lines 10-19: Directed walk
+    if (quasar != NULL) {
+        platform_lock(&quasar->lock);
+        uint32_t level_count = attenuated_bloom_filter_level_count(quasar->routing);
+
+        for (uint32_t level = 0; level < level_count; level++) {
+            for (int ni = 0; ni < quasar->neighbor_filters.length; ni++) {
+                quasar_neighbor_filter_t* nf = &quasar->neighbor_filters.data[ni];
+                if (nf->filter == NULL) continue;
+                elastic_bloom_filter_t* ebf = attenuated_bloom_filter_get_level(nf->filter, level);
+                if (ebf == NULL) continue;
+
+                if (!elastic_bloom_filter_contains(ebf, msg->topic->data, msg->topic->size)) continue;
+
+                // Check negative information: is any publisher at this same level?
+                bool negated = false;
+                for (uint32_t pi = 0; pi < msg->pub_count; pi++) {
+                    uint8_t pub_key[6];
+                    memcpy(pub_key, &msg->pub_addrs[pi], sizeof(uint32_t));
+                    memcpy(pub_key + sizeof(uint32_t), &msg->pub_ports[pi], sizeof(uint16_t));
+                    if (elastic_bloom_filter_contains(ebf, pub_key, sizeof(pub_key))) {
+                        negated = true;
+                        break;
+                    }
+                }
+
+                if (!negated) {
+                    // Directed walk: forward to this neighbor
+                    meridian_node_t* target = meridian_node_create(nf->addr, nf->port);
+                    // TODO: Serialize route message and send via meridian_protocol_send_packet
+                    meridian_node_destroy(target);
+                    if (local_node != NULL) meridian_node_destroy(local_node);
+                    platform_unlock(&quasar->lock);
+                    return 0;
+                }
+            }
         }
-        return 0;
+        platform_unlock(&quasar->lock);
     }
 
-    // Random walk: continue forwarding to alpha random neighbors not in the negative filter
-    if (quasar->protocol == NULL) return 0;
+    // Algorithm 2, lines 20-21: Random walk
+    if (quasar->protocol == NULL) {
+        if (local_node != NULL) meridian_node_destroy(local_node);
+        return 0;
+    }
 
     size_t num_peers = 0;
     meridian_node_t** peers = meridian_protocol_get_connected_peers(quasar->protocol, &num_peers);
     uint32_t sent = 0;
     for (size_t i = 0; i < num_peers && sent < quasar->alpha; i++) {
         if (!quasar_route_message_has_visited(msg, peers[i])) {
+            // TODO: Serialize route message and send via meridian_protocol_send_packet
             quasar_route_message_add_visited(msg, peers[i]);
-            // TODO: Serialize route message and forward via meridian_protocol_send_packet.
             sent++;
         }
     }
+
+    if (local_node != NULL) meridian_node_destroy(local_node);
     return 0;
 }
 
