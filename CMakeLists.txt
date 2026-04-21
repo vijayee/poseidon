@@ -42,6 +42,7 @@ set(BUFFER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Buffer)
 set(BLOOM_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Bloom)
 set(QUASAR_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Network/Quasar)
 set(CRYPTO_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Crypto)
+set(CHANNEL_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Channel)
 
 # Poseidon Library
 set(POSEIDON_SOURCES
@@ -86,6 +87,8 @@ set(POSEIDON_SOURCES
     ${CRYPTO_SRC_DIR}/blake3_wrapper.c
     ${CRYPTO_SRC_DIR}/node_id.c
     ${CRYPTO_SRC_DIR}/key_pair.c
+    ${CHANNEL_SRC_DIR}/channel.c
+    ${CHANNEL_SRC_DIR}/channel_manager.c
 )
 
 add_library(poseidon STATIC ${POSEIDON_SOURCES})
@@ -180,3 +183,6 @@ add_meridian_test(quasar_test tests/quasar_test.cpp)
 
 # PKI Tests
 add_meridian_test(pki_test tests/pki_test.cpp)
+
+# Channel Tests
+add_meridian_test(channel_test tests/channel_test.cpp)
