@@ -191,7 +191,7 @@ int meridian_ring_set_erase_ring(meridian_ring_set_t* set, meridian_node_t* node
     int idx = -1;
     for (int j = 0; j < set->rings[ring_num].primary.length; j++) {
         meridian_node_t* n = set->rings[ring_num].primary.data[j];
-        if (n->addr == node->addr && n->port == node->port) {
+        if (node_identity_match(n, node)) {
             idx = j;
             break;
         }
@@ -204,7 +204,7 @@ int meridian_ring_set_erase_ring(meridian_ring_set_t* set, meridian_node_t* node
     idx = -1;
     for (int j = 0; j < set->rings[ring_num].secondary.length; j++) {
         meridian_node_t* n = set->rings[ring_num].secondary.data[j];
-        if (n->addr == node->addr && n->port == node->port) {
+        if (node_identity_match(n, node)) {
             idx = j;
             break;
         }

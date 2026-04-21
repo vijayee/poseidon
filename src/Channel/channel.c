@@ -8,6 +8,7 @@
 #include "../Crypto/key_pair.h"
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
 
 // ============================================================================
 // DEFAULT CONFIGURATION
@@ -130,6 +131,15 @@ void poseidon_channel_destroy(poseidon_channel_t* channel) {
         if (channel->quasar != NULL) quasar_destroy(channel->quasar);
         if (channel->protocol != NULL) meridian_protocol_destroy(channel->protocol);
         if (channel->key_pair != NULL) poseidon_key_pair_destroy(channel->key_pair);
+
+        // Clean up TLS files
+        char key_path[256];
+        char cert_path[256];
+        snprintf(key_path, sizeof(key_path), "/tmp/poseidon_%s_key.pem", channel->node_id.str);
+        snprintf(cert_path, sizeof(cert_path), "/tmp/poseidon_%s_cert.pem", channel->node_id.str);
+        unlink(key_path);
+        unlink(cert_path);
+
         platform_lock_destroy(&channel->lock);
         free(channel);
     }

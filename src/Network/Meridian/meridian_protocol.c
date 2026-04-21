@@ -36,6 +36,8 @@ static void gossip_completed_cb(void* ctx, uint64_t query_id,
     meridian_protocol_t* protocol = (meridian_protocol_t*)ctx;
     (void)query_id;
     for (size_t i = 0; i < num_peers; i++) {
+        // Latency unknown for gossip-discovered peers; insert into ring 0
+        // until actual measurement updates their placement
         meridian_ring_set_insert(protocol->ring_set, peers[i], 0, NULL);
     }
 }
