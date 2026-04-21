@@ -341,8 +341,6 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
 
     if (locally_subscribed) {
         // Algorithm 2, lines 4-8: deliver locally, add self to PUB, re-publish to all neighbors
-        quasar_message_id_t msg_id = quasar_message_id_get_next();
-        bloom_filter_add(quasar->seen, (const uint8_t*)&msg_id, sizeof(msg_id));
 
         if (quasar->on_delivery != NULL) {
             quasar_delivery_cb_t cb = quasar->on_delivery;
@@ -366,6 +364,7 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
                     quasar->max_hops, QUASAR_DEFAULT_NEGATIVE_SIZE, QUASAR_DEFAULT_NEGATIVE_HASHES
                 );
                 if (republish_msg != NULL) {
+                    bloom_filter_add(quasar->seen, (const uint8_t*)&republish_msg->id, sizeof(republish_msg->id));
                     meridian_node_t* local = meridian_node_create(local_addr, local_port);
                     if (local != NULL) {
                         quasar_route_message_add_publisher(republish_msg, local);
@@ -424,6 +423,7 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
                         quasar->max_hops, QUASAR_DEFAULT_NEGATIVE_SIZE, QUASAR_DEFAULT_NEGATIVE_HASHES
                     );
                     if (fwd != NULL) {
+                        bloom_filter_add(quasar->seen, (const uint8_t*)&fwd->id, sizeof(fwd->id));
                         meridian_node_t* local = meridian_node_create(local_addr, local_port);
                         if (local != NULL) {
                             quasar_route_message_add_publisher(fwd, local);
@@ -455,6 +455,10 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
         QUASAR_DEFAULT_NEGATIVE_HASHES
     );
     if (msg == NULL) return -1;
+
+    platform_lock(&quasar->lock);
+    bloom_filter_add(quasar->seen, (const uint8_t*)&msg->id, sizeof(msg->id));
+    platform_unlock(&quasar->lock);
 
     // Add local node as publisher and to visited filter
     if (quasar->protocol != NULL) {
@@ -517,7 +521,6 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
     meridian_node_t* local_node = meridian_node_create(local_addr, local_port);
     if (local_node != NULL) {
         quasar_route_message_add_visited(msg, local_node);
-        quasar_route_message_add_publisher(msg, local_node);
     }
 
     // Algorithm 2, lines 3-8: Check if locally subscribed
@@ -532,6 +535,11 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
     }
 
     if (locally_subscribed) {
+        // Algorithm 2, line 8: append own node ID to PUB
+        if (local_node != NULL) {
+            quasar_route_message_add_publisher(msg, local_node);
+        }
+
         if (quasar->on_delivery != NULL) {
             quasar_delivery_cb_t cb = quasar->on_delivery;
             void* ctx = quasar->delivery_ctx;

@@ -52,14 +52,61 @@ TEST_F(MeridianRingTest, FindClosest) {
     ASSERT_NE(nullptr, node1);
     ASSERT_NE(nullptr, node2);
 
-    meridian_ring_set_insert(ring_set, node1, 1000, NULL);
-    meridian_ring_set_insert(ring_set, node2, 5000, NULL);
+    // node1 at latency 1 maps to ring 0 (lowest), node2 at latency 1000 maps to higher ring
+    meridian_ring_set_insert(ring_set, node1, 1, NULL);
+    meridian_ring_set_insert(ring_set, node2, 1000, NULL);
 
     meridian_node_t* closest = meridian_ring_set_find_closest(ring_set, 0xC0A80003, 8080);
-    // Should find one of the nodes (implementation-specific which)
+    // Should return the lowest-latency node (ring 0)
+    ASSERT_NE(nullptr, closest);
+    EXPECT_EQ(closest->addr, node1->addr);
 
     meridian_node_destroy(node1);
     meridian_node_destroy(node2);
+}
+
+TEST_F(MeridianRingTest, FindClosestReturnsLowestRing) {
+    meridian_node_t* node_fast = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* node_mid = meridian_node_create(0xC0A80002, 8080);
+    meridian_node_t* node_slow = meridian_node_create(0xC0A80003, 8080);
+
+    ASSERT_NE(nullptr, node_fast);
+    ASSERT_NE(nullptr, node_mid);
+    ASSERT_NE(nullptr, node_slow);
+
+    // Insert at different latency tiers: fast (ring 0), medium (ring ~9), slow (ring ~13)
+    meridian_ring_set_insert(ring_set, node_fast, 1, NULL);
+    meridian_ring_set_insert(ring_set, node_mid, 1000, NULL);
+    meridian_ring_set_insert(ring_set, node_slow, 10000, NULL);
+
+    meridian_node_t* closest = meridian_ring_set_find_closest(ring_set, 0, 0);
+    ASSERT_NE(nullptr, closest);
+    EXPECT_EQ(closest->addr, node_fast->addr);
+
+    meridian_node_destroy(node_fast);
+    meridian_node_destroy(node_mid);
+    meridian_node_destroy(node_slow);
+}
+
+TEST_F(MeridianRingTest, FindClosestSkipsEmptyRings) {
+    meridian_node_t* node = meridian_node_create(0xC0A80001, 8080);
+
+    ASSERT_NE(nullptr, node);
+
+    // Insert at latency 1000 (higher ring), leaving ring 0 empty
+    meridian_ring_set_insert(ring_set, node, 1000, NULL);
+
+    meridian_node_t* closest = meridian_ring_set_find_closest(ring_set, 0, 0);
+    ASSERT_NE(nullptr, closest);
+    // Should still return the node from the first non-empty ring
+    EXPECT_EQ(closest->addr, node->addr);
+
+    meridian_node_destroy(node);
+}
+
+TEST_F(MeridianRingTest, FindClosestEmptySet) {
+    meridian_node_t* closest = meridian_ring_set_find_closest(ring_set, 0xC0A80001, 8080);
+    EXPECT_EQ(nullptr, closest);
 }
 
 TEST_F(MeridianRingTest, EraseNode) {

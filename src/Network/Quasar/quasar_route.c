@@ -8,6 +8,7 @@
 #include "../Meridian/meridian_packet.h"
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 #include <arpa/inet.h>
 
 // ============================================================================
@@ -164,6 +165,7 @@ quasar_route_message_t* quasar_route_message_deserialize(const uint8_t* data, si
     }
     offset += visited_bit_bytes;
 
-    (void)offset; // Suppress unused warning in release builds where asserts are off
+    assert(offset == expected && "deserialize did not consume all bytes");
+    return msg;
     return msg;
 }

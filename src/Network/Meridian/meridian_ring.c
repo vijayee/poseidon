@@ -241,40 +241,28 @@ int meridian_ring_set_get_ring(meridian_ring_set_t* set, uint32_t latency_us) {
 // ============================================================================
 
 /**
- * Finds the closest node to a target address/port across all rings.
- * Uses a simple heuristic: find a node whose address is between
- * the current closest and the target address.
- *
- * Note: This is a placeholder implementation. A full implementation
- * would use actual latency data or coordinate-based routing.
+ * Finds the closest node by scanning rings from lowest to highest latency.
+ * Returns the first primary node found in the lowest non-empty ring.
+ * This is O(MERIDIAN_MAX_RINGS) and reflects actual latency ordering.
  *
  * @param set         Ring set to search
- * @param target_addr Target IPv4 address
- * @param target_port Target port
- * @return            Closest node found, or NULL if none exist
+ * @param target_addr Unused (reserved for future tiebreaking)
+ * @param target_port Unused (reserved for future tiebreaking)
+ * @return            Lowest-latency node found, or NULL if no primary nodes exist
  */
 meridian_node_t* meridian_ring_set_find_closest(meridian_ring_set_t* set,
                                                  uint32_t target_addr,
                                                  uint16_t target_port) {
-    (void)target_port; // Reserved for port-based tiebreaking
+    (void)target_addr;
+    (void)target_port;
     if (set == NULL) return NULL;
 
-    meridian_node_t* closest = NULL;
-    int closest_ring = -1;
-
-    // Scan all rings looking for the best candidate
     for (int i = 0; i < MERIDIAN_MAX_RINGS; i++) {
-        for (int j = 0; j < set->rings[i].primary.length; j++) {
-            meridian_node_t* n = set->rings[i].primary.data[j];
-            // Heuristic: prefer nodes between current closest and target
-            if (closest == NULL ||
-                (n->addr > closest->addr && n->addr < target_addr)) {
-                closest = n;
-                closest_ring = i;
-            }
+        if (set->rings[i].primary.length > 0) {
+            return set->rings[i].primary.data[0];
         }
     }
-    return closest;
+    return NULL;
 }
 
 // ============================================================================

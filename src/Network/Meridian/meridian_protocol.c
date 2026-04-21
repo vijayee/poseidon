@@ -4,6 +4,7 @@
 
 #include "../../Util/threadding.h"
 #include "meridian_protocol.h"
+#include "../Quasar/quasar_route.h"
 #include "../../Util/allocator.h"
 #include "../../Util/vec.h"
 #include <stdlib.h>
@@ -65,6 +66,10 @@ meridian_protocol_t* meridian_protocol_create(const meridian_protocol_config_t* 
     protocol->rendv_handle = meridian_rendv_handle_create();
     protocol->latency_cache = meridian_latency_cache_create(MERIDIAN_PROBE_CACHE_SIZE);
 
+    protocol->pending_measures = NULL;
+    protocol->num_pending_measures = 0;
+    protocol->pending_measures_capacity = 0;
+
     protocol->num_seed_nodes = 0;
     protocol->num_connected_peers = 0;
 
@@ -114,6 +119,11 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol) {
         if (protocol->latency_cache) {
             meridian_latency_cache_destroy(protocol->latency_cache);
         }
+
+        for (size_t i = 0; i < protocol->num_pending_measures; i++) {
+            meridian_measure_request_destroy(protocol->pending_measures[i]);
+        }
+        free(protocol->pending_measures);
 
         for (size_t i = 0; i < protocol->num_seed_nodes; i++) {
             if (protocol->seed_nodes[i]) {
@@ -592,7 +602,7 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
     // Check if this is a Quasar route message (uses its own magic, not CBOR)
     if (len >= 4) {
         uint32_t magic = ntohl(*(const uint32_t*)data);
-        if (magic == 0x51524F54u) { // QUASAR_ROUTE_MAGIC
+        if (magic == QUASAR_ROUTE_MAGIC) {
             // Forward to the application callback for Quasar handling
             if (protocol->callbacks.on_packet != NULL) {
                 protocol->callbacks.on_packet(protocol->callbacks.user_ctx, protocol, data, len);
@@ -604,6 +614,56 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
     struct cbor_load_result result;
     cbor_item_t* item = cbor_load(data, len, &result);
     if (item == NULL) return -1;
+
+    // Decode base header to dispatch measurement PONG responses
+    meridian_packet_t pkt;
+    if (meridian_packet_decode(item, &pkt) == 0) {
+        if (pkt.type == MERIDIAN_PACKET_TYPE_RET_PING) {
+            // PONG response: find matching pending measure and compute RTT
+            platform_lock(&protocol->lock);
+            for (size_t i = 0; i < protocol->num_pending_measures; i++) {
+                meridian_measure_request_t* req = protocol->pending_measures[i];
+                if (req != NULL && req->query_id == pkt.query_id) {
+                    struct timeval now;
+                    gettimeofday(&now, NULL);
+                    struct timeval elapsed;
+                    timersub(&now, &req->start_time, &elapsed);
+                    uint32_t rtt_us = (uint32_t)(elapsed.tv_sec * 1000000 + elapsed.tv_usec);
+
+                    meridian_measure_result_t meas_result;
+                    meas_result.node = req->target;
+                    meas_result.latency_us = rtt_us;
+                    meas_result.success = true;
+
+                    meridian_measure_callback_t cb = req->callback;
+                    void* ctx = req->ctx;
+                    meridian_node_t* node = req->target;
+                    if (node) {
+                        refcounter_reference(&node->refcounter);
+                    }
+
+                    // Remove from pending list
+                    protocol->pending_measures[i] =
+                        protocol->pending_measures[protocol->num_pending_measures - 1];
+                    protocol->pending_measures[protocol->num_pending_measures - 1] = NULL;
+                    protocol->num_pending_measures--;
+
+                    platform_unlock(&protocol->lock);
+
+                    // Insert into latency cache and invoke callback
+                    meridian_latency_cache_insert(protocol->latency_cache, node, rtt_us);
+                    if (cb) {
+                        cb(ctx, &meas_result);
+                    }
+
+                    meridian_measure_request_destroy(req);
+                    cbor_decref(&item);
+                    return 0;
+                }
+            }
+            platform_unlock(&protocol->lock);
+        }
+    }
 
     cbor_decref(&item);
     return 0;
@@ -617,6 +677,57 @@ int meridian_protocol_on_measure_result(meridian_protocol_t* protocol,
         meridian_latency_cache_insert(protocol->latency_cache,
                                       result->node, result->latency_us);
     }
+
+    return 0;
+}
+
+int meridian_protocol_send_measure(meridian_protocol_t* protocol,
+                                    meridian_measure_request_t* req) {
+    if (protocol == NULL || req == NULL || req->target == NULL) return -1;
+
+    // Record send time for RTT computation
+    gettimeofday(&req->start_time, NULL);
+
+    // Build a PING packet with the request's query_id
+    meridian_packet_t pkt;
+    pkt.type = MERIDIAN_PACKET_TYPE_PING;
+    pkt.query_id = req->query_id;
+    pkt.magic = MERIDIAN_MAGIC_NUMBER;
+    pkt.rendv_addr = 0;
+    pkt.rendv_port = 0;
+
+    // Encode and send
+    cbor_item_t* encoded = meridian_packet_encode(&pkt);
+    if (encoded == NULL) return -1;
+
+    size_t buf_len = 0;
+    uint8_t* buf = NULL;
+    cbor_serialize_alloc(encoded, &buf, &buf_len);
+    cbor_decref(&encoded);
+
+    if (buf == NULL) return -1;
+
+    int result = meridian_protocol_send_packet(protocol, buf, buf_len, req->target);
+    free(buf);
+
+    if (result != 0) return -1;
+
+    // Register the request as pending
+    platform_lock(&protocol->lock);
+    if (protocol->num_pending_measures >= protocol->pending_measures_capacity) {
+        size_t new_cap = protocol->pending_measures_capacity == 0 ? 8 :
+                         protocol->pending_measures_capacity * 2;
+        meridian_measure_request_t** new_arr = (meridian_measure_request_t**)
+            realloc(protocol->pending_measures, new_cap * sizeof(meridian_measure_request_t*));
+        if (new_arr == NULL) {
+            platform_unlock(&protocol->lock);
+            return -1;
+        }
+        protocol->pending_measures = new_arr;
+        protocol->pending_measures_capacity = new_cap;
+    }
+    protocol->pending_measures[protocol->num_pending_measures++] = req;
+    platform_unlock(&protocol->lock);
 
     return 0;
 }

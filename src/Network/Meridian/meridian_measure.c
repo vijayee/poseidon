@@ -4,6 +4,7 @@
 
 #include "../../Util/threadding.h"
 #include "meridian_measure.h"
+#include "meridian_protocol.h"
 #include <string.h>
 #include <stdlib.h>
 #include <sys/time.h>
@@ -268,36 +269,21 @@ bool meridian_measure_request_is_expired(const meridian_measure_request_t* req) 
 }
 
 /**
- * Executes a measure request, calculating elapsed time and invoking callback.
- * This is a placeholder implementation that measures time-to-execute
- * rather than actual network latency.
+ * Executes a measure request by sending a PING to the target node.
+ * The callback will be invoked asynchronously when the PONG response arrives
+ * and the RTT is computed by the protocol layer.
  *
- * @param req  Request to execute
- * @return     0 on success, -1 on failure (already completed or NULL)
+ * The request must have its target set. The protocol reference is needed
+ * to send the PING packet via the network.
+ *
+ * @param req       Request to execute
+ * @param protocol  Protocol instance for sending the PING
+ * @return          0 on success (PING sent), -1 on failure
  */
-int meridian_measure_request_execute(meridian_measure_request_t* req) {
+int meridian_measure_request_execute(meridian_measure_request_t* req,
+                                     meridian_protocol_t* protocol) {
     if (req == NULL || req->completed) return -1;
 
-    meridian_measure_result_t result = {
-        .node = req->target,
-        .latency_us = 0,
-        .success = false
-    };
-
-    struct timeval now;
-    gettimeofday(&now, NULL);
-
-    struct timeval elapsed;
-    timersub(&now, &req->start_time, &elapsed);
-    result.latency_us = (uint32_t)(elapsed.tv_sec * 1000000 + elapsed.tv_usec);
-    result.success = true;
-
-    req->completed = true;
-
-    // Invoke callback with results
-    if (req->callback) {
-        req->callback(req->ctx, &result);
-    }
-
-    return 0;
+    // Send the PING and register as pending — RTT will be computed on PONG receipt
+    return meridian_protocol_send_measure(protocol, req);
 }

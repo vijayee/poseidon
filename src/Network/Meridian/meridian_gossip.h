@@ -288,14 +288,6 @@ int meridian_gossip_handle_on_packet(meridian_gossip_handle_t* handle,
 int meridian_gossip_handle_send_gossip(meridian_gossip_handle_t* handle,
                                        meridian_node_t** targets, size_t num_targets);
 
-/**
- * Gets a peer for this gossip handle.
- * (Currently a placeholder - returns NULL)
- *
- * @return  NULL (placeholder)
- */
-meridian_gossip_handle_t* meridian_gossip_handle_get_peer(void);
-
 #ifdef __cplusplus
 }
 #endif

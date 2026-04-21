@@ -149,15 +149,13 @@ int meridian_ring_set_get_ring(meridian_ring_set_t* set, uint32_t latency_us);
 // ============================================================================
 
 /**
- * Finds the closest node to a target address/port across all rings.
- *
- * Uses a heuristic to find nodes between current best and target.
- * Note: This is a placeholder; full impl would use actual latency data.
+ * Finds the closest node by scanning rings from lowest to highest latency.
+ * Returns the first primary node found in the lowest non-empty ring.
  *
  * @param set         Ring set to search
- * @param target_addr Target IPv4 address
- * @param target_port Target port
- * @return            Closest node found, or NULL if none exist
+ * @param target_addr Unused (reserved for future tiebreaking)
+ * @param target_port Unused (reserved for future tiebreaking)
+ * @return            Lowest-latency node found, or NULL if no primary nodes exist
  */
 meridian_node_t* meridian_ring_set_find_closest(meridian_ring_set_t* set,
                                                  uint32_t target_addr,

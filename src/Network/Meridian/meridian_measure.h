@@ -12,6 +12,9 @@
 #include "meridian.h"
 #include "../../Util/allocator.h"
 
+// Forward declaration for async measurement
+typedef struct meridian_protocol_t meridian_protocol_t;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -211,13 +214,16 @@ int meridian_measure_request_set_timeout(meridian_measure_request_t* req, uint32
 bool meridian_measure_request_is_expired(const meridian_measure_request_t* req);
 
 /**
- * Executes a measure request and invokes the completion callback.
- * Calculates elapsed time from start to execution.
+ * Executes a measure request by sending a PING to the target node.
+ * The callback will be invoked asynchronously when the PONG response arrives
+ * and the RTT is computed by the protocol layer.
  *
- * @param req  Request to execute
- * @return     0 on success, -1 on failure
+ * @param req       Request to execute
+ * @param protocol  Protocol instance for sending the PING
+ * @return          0 on success (PING sent), -1 on failure
  */
-int meridian_measure_request_execute(meridian_measure_request_t* req);
+int meridian_measure_request_execute(meridian_measure_request_t* req,
+                                     meridian_protocol_t* protocol);
 
 #ifdef __cplusplus
 }

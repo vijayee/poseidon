@@ -121,6 +121,11 @@ typedef struct meridian_protocol_t {
     meridian_gossip_handle_t* gossip_handle;    /**< Gossip protocol handling */
     meridian_latency_cache_t* latency_cache;   /**< Recent latency measurements */
 
+    // Pending measurement requests awaiting PONG responses
+    meridian_measure_request_t** pending_measures; /**< Array of pending measure requests */
+    size_t num_pending_measures;                    /**< Count of pending measure requests */
+    size_t pending_measures_capacity;               /**< Allocated capacity */
+
     work_pool_t* pool;                          /**< Work pool for async tasks */
     hierarchical_timing_wheel_t* wheel;         /**< Timer scheduling */
 
@@ -322,6 +327,18 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
  */
 int meridian_protocol_on_measure_result(meridian_protocol_t* protocol,
                                          const meridian_measure_result_t* result);
+
+/**
+ * Sends a PING to measure latency to a target node and registers the request.
+ * When the PONG response arrives, the callback in the request is invoked with
+ * the measured RTT.
+ *
+ * @param protocol  Protocol to send from
+ * @param req       Measure request (must have target, callback, and query_id set)
+ * @return          0 on success, -1 on failure
+ */
+int meridian_protocol_send_measure(meridian_protocol_t* protocol,
+                                    meridian_measure_request_t* req);
 
 // ============================================================================
 // CALLBACKS

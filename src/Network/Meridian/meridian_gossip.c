@@ -415,12 +415,3 @@ int meridian_gossip_handle_send_gossip(meridian_gossip_handle_t* handle,
     return 0;
 }
 
-/**
- * Gets a peer for this gossip handle.
- * (Currently a placeholder - returns NULL)
- *
- * @return  NULL (placeholder)
- */
-meridian_gossip_handle_t* meridian_gossip_handle_get_peer(void) {
-    return NULL;
-}
