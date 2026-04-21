@@ -3,6 +3,7 @@
 //
 
 #include "quasar.h"
+#include "quasar_route.h"
 #include "../../Bloom/elastic_bloom_filter.h"
 #include "../../Util/allocator.h"
 #include <stdlib.h>
@@ -344,7 +345,25 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
             size_t num_peers = 0;
             meridian_node_t** peers = meridian_protocol_get_connected_peers(quasar->protocol, &num_peers);
             for (size_t i = 0; i < num_peers; i++) {
-                // TODO: Serialize route message with PUB={self} and send via meridian_protocol_send_packet
+                quasar_route_message_t* republish_msg = quasar_route_message_create(
+                    topic, topic_len, data, data_len,
+                    quasar->max_hops, QUASAR_DEFAULT_NEGATIVE_SIZE, QUASAR_DEFAULT_NEGATIVE_HASHES
+                );
+                if (republish_msg != NULL) {
+                    meridian_node_t* local = meridian_node_create(local_addr, local_port);
+                    if (local != NULL) {
+                        quasar_route_message_add_publisher(republish_msg, local);
+                        quasar_route_message_add_visited(republish_msg, local);
+                        meridian_node_destroy(local);
+                    }
+                    uint8_t* route_buf = NULL;
+                    size_t route_buf_len = 0;
+                    if (quasar_route_message_serialize(republish_msg, &route_buf, &route_buf_len) == 0) {
+                        meridian_protocol_send_packet(quasar->protocol, route_buf, route_buf_len, peers[i]);
+                        free(route_buf);
+                    }
+                    quasar_route_message_destroy(republish_msg);
+                }
             }
         }
         platform_unlock(&quasar->lock);
@@ -384,7 +403,25 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
                 if (!negated) {
                     // Directed walk: forward to this neighbor
                     meridian_node_t* target = meridian_node_create(nf->addr, nf->port);
-                    // TODO: Serialize route message and send via meridian_protocol_send_packet
+                    quasar_route_message_t* fwd = quasar_route_message_create(
+                        topic, topic_len, data, data_len,
+                        quasar->max_hops, QUASAR_DEFAULT_NEGATIVE_SIZE, QUASAR_DEFAULT_NEGATIVE_HASHES
+                    );
+                    if (fwd != NULL) {
+                        meridian_node_t* local = meridian_node_create(local_addr, local_port);
+                        if (local != NULL) {
+                            quasar_route_message_add_publisher(fwd, local);
+                            quasar_route_message_add_visited(fwd, local);
+                            meridian_node_destroy(local);
+                        }
+                        uint8_t* route_buf = NULL;
+                        size_t route_buf_len = 0;
+                        if (quasar_route_message_serialize(fwd, &route_buf, &route_buf_len) == 0) {
+                            meridian_protocol_send_packet(quasar->protocol, route_buf, route_buf_len, target);
+                            free(route_buf);
+                        }
+                        quasar_route_message_destroy(fwd);
+                    }
                     meridian_node_destroy(target);
                     platform_unlock(&quasar->lock);
                     return 0;
@@ -424,7 +461,12 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
         uint32_t sent = 0;
         for (size_t i = 0; i < num_peers && sent < quasar->alpha; i++) {
             if (!quasar_route_message_has_visited(msg, peers[i])) {
-                // TODO: Serialize route message and send via meridian_protocol_send_packet
+                uint8_t* route_buf = NULL;
+                size_t route_buf_len = 0;
+                if (quasar_route_message_serialize(msg, &route_buf, &route_buf_len) == 0) {
+                    meridian_protocol_send_packet(quasar->protocol, route_buf, route_buf_len, peers[i]);
+                    free(route_buf);
+                }
                 quasar_route_message_add_visited(msg, peers[i]);
                 sent++;
             }
@@ -487,7 +529,12 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
             size_t num_peers = 0;
             meridian_node_t** peers = meridian_protocol_get_connected_peers(quasar->protocol, &num_peers);
             for (size_t i = 0; i < num_peers; i++) {
-                // TODO: Serialize route message and send via meridian_protocol_send_packet
+                uint8_t* route_buf = NULL;
+                size_t route_buf_len = 0;
+                if (quasar_route_message_serialize(msg, &route_buf, &route_buf_len) == 0) {
+                    meridian_protocol_send_packet(quasar->protocol, route_buf, route_buf_len, peers[i]);
+                    free(route_buf);
+                }
             }
         }
 
@@ -535,9 +582,14 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
                 }
 
                 if (!negated) {
-                    // Directed walk: forward to this neighbor
+                    // Directed walk: forward the existing route message to this neighbor
                     meridian_node_t* target = meridian_node_create(nf->addr, nf->port);
-                    // TODO: Serialize route message and send via meridian_protocol_send_packet
+                    uint8_t* route_buf = NULL;
+                    size_t route_buf_len = 0;
+                    if (quasar_route_message_serialize(msg, &route_buf, &route_buf_len) == 0) {
+                        meridian_protocol_send_packet(quasar->protocol, route_buf, route_buf_len, target);
+                        free(route_buf);
+                    }
                     meridian_node_destroy(target);
                     if (local_node != NULL) meridian_node_destroy(local_node);
                     platform_unlock(&quasar->lock);
@@ -559,7 +611,12 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
     uint32_t sent = 0;
     for (size_t i = 0; i < num_peers && sent < quasar->alpha; i++) {
         if (!quasar_route_message_has_visited(msg, peers[i])) {
-            // TODO: Serialize route message and send via meridian_protocol_send_packet
+            uint8_t* route_buf = NULL;
+            size_t route_buf_len = 0;
+            if (quasar_route_message_serialize(msg, &route_buf, &route_buf_len) == 0) {
+                meridian_protocol_send_packet(quasar->protocol, route_buf, route_buf_len, peers[i]);
+                free(route_buf);
+            }
             quasar_route_message_add_visited(msg, peers[i]);
             sent++;
         }

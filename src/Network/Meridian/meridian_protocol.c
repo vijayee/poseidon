@@ -589,6 +589,18 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
                                  const meridian_node_t* from) {
     if (protocol == NULL || data == NULL || from == NULL) return -1;
 
+    // Check if this is a Quasar route message (uses its own magic, not CBOR)
+    if (len >= 4) {
+        uint32_t magic = ntohl(*(const uint32_t*)data);
+        if (magic == 0x51524F54u) { // QUASAR_ROUTE_MAGIC
+            // Forward to the application callback for Quasar handling
+            if (protocol->callbacks.on_packet != NULL) {
+                protocol->callbacks.on_packet(protocol->callbacks.user_ctx, protocol, data, len);
+            }
+            return 0;
+        }
+    }
+
     struct cbor_load_result result;
     cbor_item_t* item = cbor_load(data, len, &result);
     if (item == NULL) return -1;
