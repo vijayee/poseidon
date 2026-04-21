@@ -98,6 +98,9 @@ extern "C" {
 /** Channel bootstrap reply: Response with connection info */
 #define MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP_REPLY  41
 
+/** Quasar gossip: Routing filter propagation between peers */
+#define MERIDIAN_PACKET_TYPE_QUASAR_GOSSIP           50
+
 // ============================================================================
 // PROTOCOL CONSTANTS
 // ============================================================================

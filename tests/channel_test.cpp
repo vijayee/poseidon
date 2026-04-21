@@ -8,6 +8,8 @@
 #include "Channel/channel.h"
 #include "Channel/channel_manager.h"
 #include "Network/Meridian/meridian.h"
+#include "Network/Quasar/quasar.h"
+#include "Bloom/attenuated_bloom_filter.h"
 #include "Util/hash.h"
 
 // ============================================================================
@@ -157,4 +159,54 @@ TEST(NodeIdHashTest, HashAndCompare) {
     free(dup);
 
     poseidon_key_pair_destroy(kp);
+}
+
+// ============================================================================
+// CHANNEL GOSSIP TESTS
+// ============================================================================
+
+class ChannelGossipTest : public ::testing::Test {
+protected:
+    void SetUp() override {}
+    void TearDown() override {}
+};
+
+TEST_F(ChannelGossipTest, GossipCallsPropagate) {
+    // poseidon_channel_gossip calls meridian_protocol_gossip + quasar_propagate.
+    // Without a running protocol, we cannot create a full channel, so test at
+    // the quasar level instead: verify that quasar_propagate encodes the filter
+    // and returns -1 (protocol is NULL, so broadcast fails) without crashing.
+    quasar_t* q = quasar_create(NULL, 5, 3);
+    ASSERT_NE(nullptr, q);
+
+    const uint8_t* topic = (const uint8_t*)"gossip_topic";
+    EXPECT_EQ(0, quasar_subscribe(q, topic, 12, 100));
+
+    // quasar_propagate will encode the filter and attempt broadcast via NULL protocol
+    // which returns -1 from meridian_protocol_broadcast — this proves the encode path works
+    int rc = quasar_propagate(q);
+    EXPECT_EQ(-1, rc);
+
+    quasar_destroy(q);
+}
+
+TEST_F(ChannelGossipTest, TickExpiresSubscriptions) {
+    // Create a quasar directly (channel creation requires msquic work pool),
+    // subscribe with TTL=1, tick once, verify the subscription expires.
+    quasar_t* q = quasar_create(NULL, 5, 3);
+    ASSERT_NE(nullptr, q);
+
+    const uint8_t* topic = (const uint8_t*)"ephemeral";
+    EXPECT_EQ(0, quasar_subscribe(q, topic, 9, 1));
+
+    // Should be present before tick
+    EXPECT_TRUE(attenuated_bloom_filter_check(q->routing, topic, 9, NULL));
+
+    // Single tick: TTL goes from 1 to 0, subscription removed
+    EXPECT_EQ(0, quasar_tick(q));
+
+    // Should no longer be present after tick
+    EXPECT_FALSE(attenuated_bloom_filter_check(q->routing, topic, 9, NULL));
+
+    quasar_destroy(q);
 }

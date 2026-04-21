@@ -63,6 +63,13 @@ typedef struct meridian_protocol_callbacks_t {
     meridian_protocol_event_cb_t on_packet;    /**< Called for each received packet */
     meridian_protocol_event_cb_t on_node_joined; /**< Called when a node joins */
     meridian_protocol_event_cb_t on_node_left;   /**< Called when a node leaves */
+
+    /**
+     * Called when a QUASAR_GOSSIP packet arrives.
+     * The data/len point to the raw CBOR payload (the full packet, including type byte).
+     */
+    meridian_protocol_event_cb_t on_quasar_gossip;
+    void* quasar_ctx;                  /**< Context for quasar callback */
 } meridian_protocol_callbacks_t;
 
 // ============================================================================

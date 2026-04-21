@@ -51,6 +51,28 @@ size_t elastic_bloom_filter_count(elastic_bloom_filter_t* ebf);
 size_t elastic_bloom_filter_size(elastic_bloom_filter_t* ebf);
 float elastic_bloom_filter_ratio(elastic_bloom_filter_t* ebf);
 
+#include <cbor.h>
+
+/** Encode an elastic bloom filter to a CBOR item.
+ *
+ * Produces a definite array with sparse bucket encoding.
+ * Thread-safe: acquires the filter lock for the duration.
+ *
+ * @param ebf The elastic bloom filter to encode
+ * @return CBOR item representing the filter, or NULL on error
+ */
+cbor_item_t* elastic_bloom_filter_encode(const elastic_bloom_filter_t* ebf);
+
+/** Decode an elastic bloom filter from a CBOR item.
+ *
+ * Reconstructs the filter from the sparse bucket encoding produced
+ * by elastic_bloom_filter_encode.
+ *
+ * @param item CBOR item to decode from
+ * @return Decoded elastic bloom filter, or NULL on error
+ */
+elastic_bloom_filter_t* elastic_bloom_filter_decode(cbor_item_t* item);
+
 #ifdef __cplusplus
 }
 #endif

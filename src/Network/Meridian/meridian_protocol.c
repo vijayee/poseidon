@@ -635,6 +635,11 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
     case MERIDIAN_PACKET_TYPE_GOSSIP_PULL:
         rc = meridian_gossip_handle_on_packet(protocol->gossip_handle, data, len, from);
         break;
+    case MERIDIAN_PACKET_TYPE_QUASAR_GOSSIP:
+        if (protocol->callbacks.on_quasar_gossip != NULL) {
+            protocol->callbacks.on_quasar_gossip(protocol->callbacks.quasar_ctx, protocol, data, len);
+        }
+        break;
     default:
         if (protocol->callbacks.on_packet != NULL) {
             protocol->callbacks.on_packet(protocol->callbacks.user_ctx, protocol, data, len);

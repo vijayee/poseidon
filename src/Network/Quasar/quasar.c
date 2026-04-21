@@ -3,6 +3,7 @@
 //
 
 #include "quasar.h"
+#include "../Meridian/meridian_protocol.h"
 #include "../../Util/allocator.h"
 #include <stdlib.h>
 #include <string.h>
@@ -149,17 +150,123 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len, con
 int quasar_on_gossip(quasar_t* quasar, const uint8_t* data, size_t len, const struct meridian_node_t* from) {
     if (quasar == NULL || data == NULL) return -1;
 
-    // TODO: Decode incoming routing filter from peer, merge into local filter
-    // (shifted by one level because the peer is 1 hop away)
+    struct cbor_load_result result;
+    cbor_item_t* root = cbor_load(data, len, &result);
+    if (root == NULL || result.error.code != CBOR_ERR_NONE) {
+        if (root != NULL) cbor_decref(&root);
+        return -1;
+    }
+
+    // Validate: must be a definite array with at least 3 elements
+    if (!cbor_isa_array(root) || !cbor_array_is_definite(root) ||
+        cbor_array_size(root) < 3) {
+        cbor_decref(&root);
+        return -1;
+    }
+
+    cbor_item_t** items = cbor_array_handle(root);
+
+    // items[0]: packet type (must be QUASAR_GOSSIP)
+    if (!cbor_isa_uint(items[0])) {
+        cbor_decref(&root);
+        return -1;
+    }
+    uint8_t type = cbor_get_uint8(items[0]);
+    if (type != MERIDIAN_PACKET_TYPE_QUASAR_GOSSIP) {
+        cbor_decref(&root);
+        return -1;
+    }
+
+    // items[1]: level_count (validated for structure)
+    if (!cbor_isa_uint(items[1])) {
+        cbor_decref(&root);
+        return -1;
+    }
+    uint32_t level_count = cbor_get_uint32(items[1]);
+
+    // items[2]: encoded attenuated bloom filter
+    attenuated_bloom_filter_t* decoded = attenuated_bloom_filter_decode(items[2]);
+    if (decoded == NULL || attenuated_bloom_filter_level_count(decoded) != level_count) {
+        if (decoded != NULL) attenuated_bloom_filter_destroy(decoded);
+        cbor_decref(&root);
+        return -1;
+    }
+
+    // Merge under lock — merge shifts src levels by +1 automatically
+    platform_lock(&quasar->lock);
+    attenuated_bloom_filter_merge(quasar->routing, decoded);
+    platform_unlock(&quasar->lock);
+
+    attenuated_bloom_filter_destroy(decoded);
+    cbor_decref(&root);
     return 0;
 }
 
 int quasar_propagate(quasar_t* quasar) {
     if (quasar == NULL) return -1;
 
-    // TODO: Serialize the local routing filter and send to neighbors via
-    // meridian_protocol_broadcast. Neighbors merge it shifted by one level.
-    return 0;
+    platform_lock(&quasar->lock);
+
+    // Encode the attenuated bloom filter to CBOR
+    cbor_item_t* encoded_filter = attenuated_bloom_filter_encode(quasar->routing);
+    if (encoded_filter == NULL) {
+        platform_unlock(&quasar->lock);
+        return -1;
+    }
+
+    // Read level_count under lock since it reads quasar->routing
+    uint32_t level_count = attenuated_bloom_filter_level_count(quasar->routing);
+
+    platform_unlock(&quasar->lock);
+
+    // Build the QUASAR_GOSSIP packet: [type, level_count, encoded_filter]
+    cbor_item_t* packet = cbor_new_definite_array(3);
+    if (packet == NULL) {
+        cbor_decref(&encoded_filter);
+        return -1;
+    }
+
+    cbor_item_t* type_item = cbor_build_uint8(MERIDIAN_PACKET_TYPE_QUASAR_GOSSIP);
+    cbor_item_t* level_item = cbor_build_uint32(level_count);
+    if (type_item == NULL || level_item == NULL) {
+        if (type_item != NULL) cbor_decref(&type_item);
+        if (level_item != NULL) cbor_decref(&level_item);
+        cbor_decref(&packet);
+        cbor_decref(&encoded_filter);
+        return -1;
+    }
+
+    bool ok = cbor_array_push(packet, type_item) &&
+              cbor_array_push(packet, level_item) &&
+              cbor_array_push(packet, encoded_filter);
+    if (!ok) {
+        cbor_decref(&type_item);
+        cbor_decref(&level_item);
+        cbor_decref(&packet);
+        cbor_decref(&encoded_filter);
+        return -1;
+    }
+
+    // cbor_array_push increfs each item, so we can decref our local refs now
+    cbor_decref(&type_item);
+    cbor_decref(&level_item);
+    cbor_decref(&encoded_filter);
+
+    // Serialize to bytes
+    unsigned char* buf = NULL;
+    size_t buf_size = 0;
+    cbor_serialize_alloc(packet, &buf, &buf_size);
+    if (buf == NULL || buf_size == 0) {
+        cbor_decref(&packet);
+        return -1;
+    }
+
+    // Broadcast to all connected peers
+    int rc = meridian_protocol_broadcast(quasar->protocol, buf, buf_size);
+
+    free(buf);
+    cbor_decref(&packet);
+    return rc == 0 ? 0 : -1;
 }
 
 // ============================================================================
