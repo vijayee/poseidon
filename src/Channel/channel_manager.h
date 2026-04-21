@@ -7,13 +7,13 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "../../RefCounter/refcounter.h"
-#include "../../Crypto/key_pair.h"
-#include "../../Crypto/node_id.h"
+#include "../RefCounter/refcounter.h"
+#include "../Crypto/key_pair.h"
+#include "../Crypto/node_id.h"
 #include "channel.h"
-#include "../Meridian/meridian.h"
-#include "../../Workers/pool.h"
-#include "../../Time/wheel.h"
+#include "../Network/Meridian/meridian.h"
+#include "../Workers/pool.h"
+#include "../Time/wheel.h"
 
 #ifdef __cplusplus
 extern "C" {

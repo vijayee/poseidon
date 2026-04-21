@@ -9,6 +9,10 @@
 #include "../Buffer/buffer.h"
 #include "../Crypto/node_id.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 size_t hash_pointer(const void* ptr);
 size_t hash_uint32(const void* data);
 size_t hash_uint64(const void* data);
@@ -24,5 +28,9 @@ int compare_buffer(const void* data1, const void* data2);
 size_t hash_poseidon_node_id(const void* data);
 int compare_poseidon_node_id(const void* data1, const void* data2);
 poseidon_node_id_t* duplicate_poseidon_node_id(const poseidon_node_id_t* id);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif //POSEIDON_HASH_H
