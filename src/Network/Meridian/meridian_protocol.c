@@ -31,6 +31,15 @@ static void gossip_outbound_cb(void* ctx, const uint8_t* data, size_t len,
     meridian_protocol_send_packet(protocol, data, len, target);
 }
 
+static void gossip_completed_cb(void* ctx, uint64_t query_id,
+                                 meridian_node_t** peers, size_t num_peers) {
+    meridian_protocol_t* protocol = (meridian_protocol_t*)ctx;
+    (void)query_id;
+    for (size_t i = 0; i < num_peers; i++) {
+        meridian_ring_set_insert(protocol->ring_set, peers[i], 0, NULL);
+    }
+}
+
 // ============================================================================
 // PROTOCOL LIFECYCLE
 // ============================================================================
@@ -289,7 +298,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
     meridian_gossip_config_t gossip_config = {
         .user_ctx = protocol,
         .outbound_cb = gossip_outbound_cb,
-        .completed_cb = NULL,
+        .completed_cb = gossip_completed_cb,
         .init_interval_s = protocol->config.init_gossip_interval_s,
         .num_init_intervals = protocol->config.num_init_gossip_intervals,
         .steady_state_interval_s = protocol->config.steady_state_gossip_interval_s,
@@ -610,8 +619,29 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
     cbor_item_t* item = cbor_load(data, len, &result);
     if (item == NULL) return -1;
 
+    if (!cbor_array_is_definite(item) || cbor_array_size(item) < 1) {
+        cbor_decref(&item);
+        return -1;
+    }
+
+    cbor_item_t** items = cbor_array_handle(item);
+    uint8_t type = cbor_get_uint8(items[0]);
+
+    int rc = 0;
+    switch (type) {
+    case MERIDIAN_PACKET_TYPE_GOSSIP:
+    case MERIDIAN_PACKET_TYPE_GOSSIP_PULL:
+        rc = meridian_gossip_handle_on_packet(protocol->gossip_handle, data, len, from);
+        break;
+    default:
+        if (protocol->callbacks.on_packet != NULL) {
+            protocol->callbacks.on_packet(protocol->callbacks.user_ctx, protocol, data, len);
+        }
+        break;
+    }
+
     cbor_decref(&item);
-    return 0;
+    return rc;
 }
 
 int meridian_protocol_on_measure_result(meridian_protocol_t* protocol,

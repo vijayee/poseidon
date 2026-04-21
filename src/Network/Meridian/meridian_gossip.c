@@ -4,10 +4,12 @@
 
 #include "../../Util/threadding.h"
 #include "meridian_gossip.h"
+#include "meridian_packet.h"
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
 #include <errno.h>
+#include <cbor.h>
 
 // ============================================================================
 // GOSSIP LIFECYCLE
@@ -350,13 +352,45 @@ int meridian_gossip_handle_stop(meridian_gossip_handle_t* handle) {
 int meridian_gossip_handle_on_packet(meridian_gossip_handle_t* handle,
                                       const uint8_t* data, size_t len,
                                       const meridian_node_t* from) {
-    (void)handle;
-    (void)data;
-    (void)len;
-    (void)from;
     if (handle == NULL || data == NULL || from == NULL) return -1;
 
-    return 0;
+    struct cbor_load_result result;
+    cbor_item_t* item = cbor_load(data, len, &result);
+    if (item == NULL) return -1;
+
+    if (!cbor_array_is_definite(item) || cbor_array_size(item) < 1) {
+        cbor_decref(&item);
+        return -1;
+    }
+
+    cbor_item_t** items = cbor_array_handle(item);
+    uint8_t type = cbor_get_uint8(items[0]);
+
+    int rc = -1;
+    if (type == MERIDIAN_PACKET_TYPE_GOSSIP) {
+        meridian_gossip_packet_t* pkt = meridian_gossip_decode(item);
+        if (pkt != NULL) {
+            platform_lock(&handle->lock);
+            for (size_t i = 0; i < handle->active_gossips.length; i++) {
+                meridian_gossip_t* g = handle->active_gossips.data[i];
+                if (g->query_id == pkt->base.query_id) {
+                    meridian_gossip_handle_response(g, pkt);
+                    break;
+                }
+            }
+            platform_unlock(&handle->lock);
+
+            if (handle->config.completed_cb != NULL && pkt->targets.length > 0) {
+                handle->config.completed_cb(handle->config.user_ctx, pkt->base.query_id,
+                                            pkt->targets.data, pkt->targets.length);
+            }
+            meridian_gossip_packet_destroy(pkt);
+            rc = 0;
+        }
+    }
+
+    cbor_decref(&item);
+    return rc;
 }
 
 /**

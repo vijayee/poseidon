@@ -93,6 +93,11 @@ extern "C" {
 /** Endpoint gone: Notification that a peer disconnected */
 #define MERIDIAN_PACKET_TYPE_ENDPOINT_GONE   37
 
+/** Channel bootstrap: Join request for a specific channel topic */
+#define MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP       40
+/** Channel bootstrap reply: Response with connection info */
+#define MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP_REPLY  41
+
 // ============================================================================
 // PROTOCOL CONSTANTS
 // ============================================================================
