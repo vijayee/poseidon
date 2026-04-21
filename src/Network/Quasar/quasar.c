@@ -274,6 +274,22 @@ int quasar_subscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len, u
         sub.topic = buffer_create_from_pointer_copy((uint8_t*)topic, topic_len);
         sub.ttl = ttl;
         vec_push(&quasar->local_subs, sub);
+
+        // Algorithm 1, line 4: Insert own node ID at level 0 for negative information
+        if (quasar->protocol != NULL) {
+            uint32_t addr = 0;
+            uint16_t port = 0;
+            meridian_protocol_get_local_node(quasar->protocol, &addr, &port);
+            if (addr != 0 || port != 0) {
+                uint8_t node_key[6];
+                memcpy(node_key, &addr, sizeof(addr));
+                memcpy(node_key + sizeof(addr), &port, sizeof(port));
+                elastic_bloom_filter_t* level0 = attenuated_bloom_filter_get_level(quasar->routing, 0);
+                if (level0 != NULL) {
+                    elastic_bloom_filter_add(level0, node_key, sizeof(node_key));
+                }
+            }
+        }
     }
 
     platform_unlock(&quasar->lock);
