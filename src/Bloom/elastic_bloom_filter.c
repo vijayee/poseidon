@@ -276,3 +276,49 @@ float elastic_bloom_filter_ratio(elastic_bloom_filter_t* ebf) {
     }
     return (float)occupied / (float)ebf->bucket_count;
 }
+
+int elastic_bloom_filter_iterate(elastic_bloom_filter_t* ebf, ebf_entry_cb_t callback, void* ctx) {
+    if (ebf == NULL || callback == NULL) return -1;
+    platform_lock(&ebf->lock);
+    for (size_t i = 0; i < ebf->bucket_count; i++) {
+        ebf_bucket_entry_t* curr = ebf->buckets[i];
+        while (curr != NULL) {
+            callback(ctx, i, curr->fingerprint);
+            curr = curr->next;
+        }
+    }
+    platform_unlock(&ebf->lock);
+    return 0;
+}
+
+int elastic_bloom_filter_bucket_insert(elastic_bloom_filter_t* ebf, size_t bucket_idx, uint32_t fingerprint) {
+    if (ebf == NULL || bucket_idx >= ebf->bucket_count) return -1;
+    platform_lock(&ebf->lock);
+    bitset_set(ebf->bits, bucket_idx, true);
+    if (!bucket_contains(ebf->buckets[bucket_idx], fingerprint)) {
+        bucket_insert(&ebf->buckets[bucket_idx], fingerprint);
+    }
+    platform_unlock(&ebf->lock);
+    return 0;
+}
+
+int elastic_bloom_filter_get_bitset(elastic_bloom_filter_t* ebf, const uint8_t** out_data, size_t* out_size) {
+    if (ebf == NULL || out_data == NULL || out_size == NULL) return -1;
+    platform_lock(&ebf->lock);
+    *out_data = ebf->bits->data;
+    *out_size = ebf->bits->size;
+    platform_unlock(&ebf->lock);
+    return 0;
+}
+
+int elastic_bloom_filter_set_bitset(elastic_bloom_filter_t* ebf, const uint8_t* data, size_t size) {
+    if (ebf == NULL || data == NULL) return -1;
+    platform_lock(&ebf->lock);
+    if (size != ebf->bits->size) {
+        platform_unlock(&ebf->lock);
+        return -1;
+    }
+    memcpy(ebf->bits->data, data, size);
+    platform_unlock(&ebf->lock);
+    return 0;
+}

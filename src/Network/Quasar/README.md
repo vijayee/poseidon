@@ -40,9 +40,24 @@ typedef struct quasar_subscription_t {
 } quasar_subscription_t;
 ```
 
+### quasar_route_message_t
+
+A message being routed through the Quasar overlay. Carries a **negative bloom filter** that records which nodes have already been visited during a random walk, preventing routing loops and redundant delivery per the Quasar paper.
+
+```c
+typedef struct quasar_route_message_t {
+    refcounter_t refcounter;           // Lifetime management
+    buffer_t* topic;                   // Topic identifier
+    buffer_t* data;                    // Message payload
+    bloom_filter_t* visited;           // Negative filter: nodes already visited in this walk
+    uint32_t hops_remaining;           // TTL for this random walk (decremented each hop)
+    PLATFORMLOCKTYPE(lock);            // Thread-safe access
+} quasar_route_message_t;
+```
+
 ### quasar_t
 
-Main Quasar instance. Ties together the Meridian protocol, the routing filter, and local subscriptions.
+Main Quasar instance. Ties together the Meridian protocol, the routing filter, local subscriptions, and the delivery callback.
 
 ```c
 typedef struct quasar_t {
@@ -52,6 +67,8 @@ typedef struct quasar_t {
     vec_t(quasar_subscription_t) local_subs;       // Locally active subscriptions
     uint32_t max_hops;                             // Maximum routing hops (determines filter depth)
     uint32_t alpha;                                // Fan-out for random walk when no route known
+    quasar_delivery_cb_t on_delivery;              // Called when a message is delivered locally
+    void* delivery_ctx;                            // User context for delivery callback
     PLATFORMLOCKTYPE(lock);                        // Thread-safe access
 } quasar_t;
 ```
@@ -75,11 +92,21 @@ This shift-on-merge creates a distance-gradient: the level at which a topic appe
 
 When a node publishes a message to a topic, `quasar_publish` checks the routing filter:
 
-1. **Local delivery (hops == 0):** The topic is in level 0 — this node is subscribed. Deliver locally.
+1. **Local delivery (hops == 0):** The topic is in level 0 — this node is subscribed. Deliver locally via the `on_delivery` callback.
 2. **Directed routing (hops > 0):** The topic appears at some level N — a subscriber is N hops away. Forward the message toward the neighbor that contributed the matching filter level.
-3. **Random walk (not found):** The topic doesn't appear in any level. No route to a subscriber is known. Forward the message to `alpha` random neighbors (fan-out). This random walk ensures messages eventually reach subscribers even when the routing filter hasn't converged yet.
+3. **Random walk (not found):** The topic doesn't appear in any level. No route to a subscriber is known. Create a `quasar_route_message_t` with a **negative bloom filter** initialized with the local node, then forward to `alpha` random neighbors that are not in the negative filter.
 
 The `alpha` parameter controls the fan-out of random walks. Higher values increase the probability of reaching subscribers quickly but consume more bandwidth.
+
+### Negative Bloom Filter (Random Walk Dedup)
+
+Each routed message carries a **negative bloom filter** (`visited` field in `quasar_route_message_t`). When a node receives a message via random walk:
+
+1. The node adds itself to the negative filter (`quasar_route_message_add_visited`)
+2. When selecting random neighbors for forwarding, nodes already in the negative filter are skipped
+3. This prevents the message from being routed to the same peer repeatedly, avoiding routing loops
+
+The negative filter is probabilistic: it may produce false positives (a node may appear visited even if it wasn't), which causes some neighbors to be unnecessarily skipped. This is by design — it errs on the side of skipping rather than revisiting, reducing bandwidth waste.
 
 ### Elastic Bloom Filters
 
@@ -134,6 +161,9 @@ Quasar depends on Meridian for all transport and peer discovery:
 // Create Quasar overlay on top of a running Meridian protocol
 quasar_t* quasar = quasar_create(protocol, 5, 3);
 
+// Set a callback for local message delivery
+quasar_set_delivery_callback(quasar, my_delivery_handler, my_ctx);
+
 // Subscribe to a topic
 quasar_subscribe(quasar, (uint8_t*)"sensors/temp", 12, 100);
 
@@ -143,6 +173,16 @@ quasar_publish(quasar, (uint8_t*)"sensors/temp", 12, payload, payload_len);
 // Periodically: propagate routing filters and expire TTLs
 quasar_propagate(quasar);
 quasar_tick(quasar);
+
+// Handle an incoming routed message (from Meridian on_packet callback)
+quasar_route_message_t* msg = quasar_route_message_create(
+    topic, topic_len, data, data_len, max_hops, 2048, 3
+);
+quasar_on_route_message(quasar, msg, from_node);
+quasar_route_message_destroy(msg);
+
+// Handle incoming gossip (from Meridian gossip callback)
+quasar_on_gossip(quasar, gossip_data, gossip_len, from_node);
 
 // Unsubscribe
 quasar_unsubscribe(quasar, (uint8_t*)"sensors/temp", 12);
