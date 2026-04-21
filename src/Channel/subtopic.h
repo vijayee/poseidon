@@ -14,7 +14,7 @@ extern "C" {
 #define SUBTOPIC_SEPARATOR '/'
 
 /**
- * Parses a backslash-delimited subtopic path into components.
+ * Parses a slash-delimited subtopic path into components.
  * "Feeds/friend-only" -> ["Feeds", "friend-only"]
  *
  * @param path       Subtopic path string (null-terminated)
