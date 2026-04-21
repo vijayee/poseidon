@@ -657,6 +657,7 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
                     }
 
                     meridian_measure_request_destroy(req);
+                    meridian_node_destroy(node);
                     cbor_decref(&item);
                     return 0;
                 }
