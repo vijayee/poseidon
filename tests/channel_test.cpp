@@ -7,10 +7,62 @@
 #include "Crypto/node_id.h"
 #include "Channel/channel.h"
 #include "Channel/channel_manager.h"
+#include "Channel/subtopic.h"
 #include "Network/Meridian/meridian.h"
 #include "Network/Quasar/quasar.h"
 #include "Bloom/attenuated_bloom_filter.h"
 #include "Util/hash.h"
+
+// ============================================================================
+// SUBTOPIC TESTS
+// ============================================================================
+
+TEST(SubtopicTest, ParseSimplePath) {
+    char parts[8][64];
+    int count = subtopic_parse("Feeds/friend-only", parts, 8, 64);
+    EXPECT_EQ(2, count);
+    EXPECT_STREQ("Feeds", parts[0]);
+    EXPECT_STREQ("friend-only", parts[1]);
+}
+
+TEST(SubtopicTest, ParseSinglePart) {
+    char parts[8][64];
+    int count = subtopic_parse("Feeds", parts, 8, 64);
+    EXPECT_EQ(1, count);
+    EXPECT_STREQ("Feeds", parts[0]);
+}
+
+TEST(SubtopicTest, ParseEmptyReturnsZero) {
+    char parts[8][64];
+    int count = subtopic_parse("", parts, 8, 64);
+    EXPECT_EQ(0, count);
+}
+
+TEST(SubtopicTest, ParseNullReturnsError) {
+    char parts[8][64];
+    int count = subtopic_parse(NULL, parts, 8, 64);
+    EXPECT_EQ(-1, count);
+}
+
+TEST(SubtopicTest, MatchExact) {
+    EXPECT_TRUE(subtopic_matches("Feeds/friend-only", "Feeds/friend-only"));
+}
+
+TEST(SubtopicTest, MatchPrefixSubscription) {
+    EXPECT_TRUE(subtopic_matches("Feeds/friend-only", "Feeds"));
+}
+
+TEST(SubtopicTest, NoMatchDeeperSubscription) {
+    EXPECT_FALSE(subtopic_matches("Feeds/public", "Feeds/private"));
+}
+
+TEST(SubtopicTest, NoMatchDifferentRoot) {
+    EXPECT_FALSE(subtopic_matches("Posts/public", "Feeds"));
+}
+
+TEST(SubtopicTest, MatchRootSubscription) {
+    EXPECT_TRUE(subtopic_matches("Feeds/friend-only", ""));
+}
 
 // ============================================================================
 // NODE IDENTITY TESTS

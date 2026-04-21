@@ -91,6 +91,7 @@ set(POSEIDON_SOURCES
     ${CRYPTO_SRC_DIR}/key_pair.c
     ${CHANNEL_SRC_DIR}/channel.c
     ${CHANNEL_SRC_DIR}/channel_manager.c
+    ${CHANNEL_SRC_DIR}/subtopic.c
 )
 
 add_library(poseidon STATIC ${POSEIDON_SOURCES})

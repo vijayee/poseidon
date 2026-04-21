@@ -30,7 +30,7 @@ reference https://github.com/libp2p/go-libp2p/tree/master/p2p/protocol/holepunch
 Nodes in the network will be identified by PKI. Identifier of the note will be the base58 hash of its public key. We
 may generate this with OpenSSL as well as a full certificate that can be used by the QUIC protocol for connecting. The
 network communication will be divided into channels. Each channel will have its own port or series of ports that can be
-used to connect to it. Users will automatically be connected to the dial channel, which will be the default channel when
+used to connect to it. Users will automatically be connected to the dial channel, whicheIT  will be the default channel when
 the network starts. The dial channel will be used to find specific peer nodes within the network.
 It will also be used to bootstrap nodes to other channels. The channel can be created at any time and will be uniquely
 identified by the base58 hash of the generated public key. Every channel will consist of a Meridian network with a
