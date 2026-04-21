@@ -61,6 +61,8 @@ typedef struct meridian_relay_server_config_t {
     uint32_t idle_timeout_ms;          /**< Connection idle timeout in milliseconds */
     uint32_t keepalive_interval_ms;    /**< Keep-alive probe interval in milliseconds */
     uint32_t max_datagram_size;        /**< Maximum datagram payload size */
+    const char* tls_key_path;          /**< Path to TLS private key PEM (NULL = insecure) */
+    const char* tls_cert_path;         /**< Path to TLS certificate PEM (NULL = insecure) */
 } meridian_relay_server_config_t;
 
 /**

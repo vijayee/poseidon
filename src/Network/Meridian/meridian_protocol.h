@@ -20,6 +20,7 @@
 #include "meridian_conn.h"
 #include "../../Workers/pool.h"
 #include "../../Time/wheel.h"
+#include "../../Crypto/node_id.h"
 #include "msquic.h"
 
 #ifdef __cplusplus
@@ -84,6 +85,9 @@ typedef struct meridian_protocol_config_t {
     uint32_t replace_interval_s;              /**< Ring replacement check interval */
     uint32_t gossip_timeout_ms;              /**< Timeout for gossip replies */
     uint32_t measure_timeout_ms;             /**< Timeout for measure replies */
+    const char* tls_key_path;                /**< Path to TLS private key PEM (NULL = insecure) */
+    const char* tls_cert_path;               /**< Path to TLS certificate PEM (NULL = insecure) */
+    poseidon_node_id_t local_node_id;        /**< This node's identity */
     work_pool_t* pool;                       /**< Work pool for async operations */
     hierarchical_timing_wheel_t* wheel;       /**< Timing wheel for scheduling */
 } meridian_protocol_config_t;

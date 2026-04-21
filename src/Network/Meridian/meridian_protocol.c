@@ -200,10 +200,18 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
         return -1;
     }
 
-    // Load credentials (none for now - insecure mode for testing)
+    // Load credentials
     QUIC_CREDENTIAL_CONFIG CredConfig = {0};
-    CredConfig.Flags = QUIC_CREDENTIAL_FLAG_NONE;
-    CredConfig.Type = QUIC_CREDENTIAL_TYPE_NONE;
+    QUIC_CERTIFICATE_FILE CertFile = {0};
+    if (protocol->config.tls_key_path != NULL && protocol->config.tls_cert_path != NULL) {
+        CertFile.PrivateKeyFile = protocol->config.tls_key_path;
+        CertFile.CertificateFile = protocol->config.tls_cert_path;
+        CredConfig.CertificateFile = &CertFile;
+        CredConfig.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
+    } else {
+        CredConfig.Flags = QUIC_CREDENTIAL_FLAG_NONE;
+        CredConfig.Type = QUIC_CREDENTIAL_TYPE_NONE;
+    }
 
     if (QUIC_FAILED(Status = protocol->msquic->ConfigurationLoadCredential(
             protocol->configuration,
