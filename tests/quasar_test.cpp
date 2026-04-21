@@ -7,6 +7,7 @@
 #include <arpa/inet.h>
 #include "Network/Quasar/quasar.h"
 #include "Network/Quasar/quasar_message_id.h"
+#include "Network/Quasar/quasar_route.h"
 #include "Bloom/attenuated_bloom_filter.h"
 
 class QuasarTest : public ::testing::Test {
@@ -707,4 +708,73 @@ TEST_F(QuasarTest, NegativeInformationPreventsSelfLoop) {
 
     meridian_node_destroy(self_node);
     quasar_destroy(q);
+}
+
+// ============================================================================
+// ROUTE MESSAGE SERIALIZATION TESTS
+// ============================================================================
+
+class RouteSerializeTest : public ::testing::Test {
+protected:
+    void SetUp() override { quasar_message_id_init(); }
+};
+
+TEST_F(RouteSerializeTest, RoundTrip) {
+    const uint8_t* topic = (const uint8_t*)"sports";
+    const uint8_t* data = (const uint8_t*)"goal!";
+
+    quasar_route_message_t* msg = quasar_route_message_create(
+        topic, 6, data, 5, 10, 256, 3
+    );
+    ASSERT_NE(nullptr, msg);
+
+    meridian_node_t* pub1 = meridian_node_create(htonl(0x0A000001), htons(8080));
+    quasar_route_message_add_publisher(msg, pub1);
+
+    meridian_node_t* visited1 = meridian_node_create(htonl(0x0A000002), htons(8081));
+    quasar_route_message_add_visited(msg, visited1);
+
+    // Serialize
+    uint8_t* buf = NULL;
+    size_t buf_len = 0;
+    EXPECT_EQ(0, quasar_route_message_serialize(msg, &buf, &buf_len));
+    ASSERT_NE(nullptr, buf);
+    EXPECT_GT(buf_len, 0u);
+
+    // Deserialize
+    quasar_route_message_t* msg2 = quasar_route_message_deserialize(buf, buf_len);
+    ASSERT_NE(nullptr, msg2);
+
+    // Verify fields match
+    EXPECT_EQ(msg->hops_remaining, msg2->hops_remaining);
+    EXPECT_EQ(msg->topic->size, msg2->topic->size);
+    EXPECT_EQ(0, memcmp(msg->topic->data, msg2->topic->data, msg->topic->size));
+    EXPECT_EQ(msg->data->size, msg2->data->size);
+    EXPECT_EQ(0, memcmp(msg->data->data, msg2->data->data, msg->data->size));
+    EXPECT_EQ(msg->pub_count, msg2->pub_count);
+    if (msg2->pub_count > 0) {
+        EXPECT_EQ(msg->pub_addrs[0], msg2->pub_addrs[0]);
+        EXPECT_EQ(msg->pub_ports[0], msg2->pub_ports[0]);
+    }
+
+    // Verify visited filter
+    EXPECT_TRUE(quasar_route_message_has_visited(msg2, visited1));
+
+    free(buf);
+    meridian_node_destroy(pub1);
+    meridian_node_destroy(visited1);
+    quasar_route_message_destroy(msg);
+    quasar_route_message_destroy(msg2);
+}
+
+TEST_F(RouteSerializeTest, NullMessageRejected) {
+    uint8_t* buf = NULL;
+    size_t buf_len = 0;
+    EXPECT_EQ(-1, quasar_route_message_serialize(NULL, &buf, &buf_len));
+}
+
+TEST_F(RouteSerializeTest, InvalidMagicRejected) {
+    uint8_t bad_data[32] = {0};
+    quasar_route_message_t* msg = quasar_route_message_deserialize(bad_data, sizeof(bad_data));
+    EXPECT_EQ(nullptr, msg);
 }
