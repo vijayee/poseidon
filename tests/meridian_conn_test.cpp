@@ -9,7 +9,7 @@ protected:
 };
 
 TEST_F(ConnTest, CreateDestroy) {
-    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080, NULL);
     ASSERT_NE(nullptr, peer);
     meridian_conn_t* conn = meridian_conn_create(peer, NULL, MERIDIAN_NAT_TYPE_OPEN);
     ASSERT_NE(nullptr, conn);
@@ -19,7 +19,7 @@ TEST_F(ConnTest, CreateDestroy) {
 }
 
 TEST_F(ConnTest, SymmetricNatStartsRelayOnly) {
-    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080, NULL);
     meridian_conn_t* conn = meridian_conn_create(peer, NULL, MERIDIAN_NAT_TYPE_SYMMETRIC);
     ASSERT_NE(nullptr, conn);
     EXPECT_EQ(MERIDIAN_CONN_STATE_RELAY_ONLY, meridian_conn_get_state(conn));
@@ -30,7 +30,7 @@ TEST_F(ConnTest, SymmetricNatStartsRelayOnly) {
 }
 
 TEST_F(ConnTest, OpenNatStartsTryingDirect) {
-    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080, NULL);
     meridian_conn_t* conn = meridian_conn_create(peer, NULL, MERIDIAN_NAT_TYPE_OPEN);
     ASSERT_NE(nullptr, conn);
     EXPECT_EQ(MERIDIAN_CONN_STATE_TRYING_DIRECT, meridian_conn_get_state(conn));
@@ -39,7 +39,7 @@ TEST_F(ConnTest, OpenNatStartsTryingDirect) {
 }
 
 TEST_F(ConnTest, SetPeerNatType) {
-    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080, NULL);
     meridian_conn_t* conn = meridian_conn_create(peer, NULL, MERIDIAN_NAT_TYPE_OPEN);
     ASSERT_NE(nullptr, conn);
     meridian_conn_set_peer_nat_type(conn, MERIDIAN_NAT_TYPE_FULL_CONE);
@@ -49,7 +49,7 @@ TEST_F(ConnTest, SetPeerNatType) {
 }
 
 TEST_F(ConnTest, SetPeerSymmetricNatDowngrades) {
-    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080, NULL);
     meridian_conn_t* conn = meridian_conn_create(peer, NULL, MERIDIAN_NAT_TYPE_OPEN);
     ASSERT_NE(nullptr, conn);
     meridian_conn_set_peer_nat_type(conn, MERIDIAN_NAT_TYPE_SYMMETRIC);
@@ -60,7 +60,7 @@ TEST_F(ConnTest, SetPeerSymmetricNatDowngrades) {
 }
 
 TEST_F(ConnTest, SetPeerReflexive) {
-    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080, NULL);
     meridian_conn_t* conn = meridian_conn_create(peer, NULL, MERIDIAN_NAT_TYPE_OPEN);
     ASSERT_NE(nullptr, conn);
     meridian_conn_set_peer_reflexive(conn, 0x0A000001, 9090);
@@ -71,7 +71,7 @@ TEST_F(ConnTest, SetPeerReflexive) {
 }
 
 TEST_F(ConnTest, Disconnect) {
-    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080, NULL);
     meridian_conn_t* conn = meridian_conn_create(peer, NULL, MERIDIAN_NAT_TYPE_OPEN);
     ASSERT_NE(nullptr, conn);
     meridian_conn_connect(conn);
@@ -83,7 +83,7 @@ TEST_F(ConnTest, Disconnect) {
 }
 
 TEST_F(ConnTest, UpgradeToDirectRequiresReflexive) {
-    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080);
+    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080, NULL);
     meridian_conn_t* conn = meridian_conn_create(peer, NULL, MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE);
     ASSERT_NE(nullptr, conn);
     // Start in RELAY state (no peer address)

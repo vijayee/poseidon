@@ -354,7 +354,7 @@ int meridian_protocol_add_seed_node(meridian_protocol_t* protocol,
     if (protocol == NULL) return -1;
     if (protocol->num_seed_nodes >= 16) return -1;
 
-    meridian_node_t* node = meridian_node_create(addr, port);
+    meridian_node_t* node = meridian_node_create(addr, port, NULL);
     if (node == NULL) return -1;
 
     protocol->seed_nodes[protocol->num_seed_nodes++] = node;
@@ -376,7 +376,7 @@ int meridian_protocol_connect(meridian_protocol_t* protocol,
     }
 
     // Create peer node
-    meridian_node_t* node = meridian_node_create(addr, port);
+    meridian_node_t* node = meridian_node_create(addr, port, NULL);
     if (node == NULL) return -1;
 
     // Create QUIC connection

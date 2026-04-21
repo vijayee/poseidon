@@ -782,7 +782,7 @@ Public API headers (`.h` files) should have Doxygen-style comments for:
  * @param port  Port number in network byte order
  * @return      New node with refcount=1, or NULL on allocation failure
  */
-meridian_node_t* meridian_node_create(uint32_t addr, uint16_t port);
+meridian_node_t* meridian_node_create(uint32_t addr, uint16_t port, const poseidon_node_id_t* id);
 ```
 
 ### Implementation Comments

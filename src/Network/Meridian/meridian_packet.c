@@ -168,7 +168,8 @@ meridian_gossip_packet_t* meridian_gossip_decode(cbor_item_t* item) {
             cbor_get_uint32(target_items[0]),
             cbor_get_uint16(target_items[1]),
             cbor_get_uint32(target_items[2]),
-            cbor_get_uint16(target_items[3])
+            cbor_get_uint16(target_items[3]),
+            NULL
         );
         if (node == NULL || vec_push(&pkt->targets, node) != 0) {
             if (node) meridian_node_destroy(node);
@@ -331,7 +332,7 @@ meridian_ping_packet_t* meridian_ping_decode(cbor_item_t* item) {
         uint32_t addr = cbor_get_uint32(&node_items[0]);
         uint16_t port = cbor_get_uint16(&node_items[1]);
         uint32_t latency = cbor_get_uint32(&node_items[2]);
-        meridian_node_t* node = meridian_node_create(addr, port);
+        meridian_node_t* node = meridian_node_create(addr, port, NULL);
         if (node == NULL || vec_push(&pkt->nodes, node) != 0 ||
             vec_push(&pkt->latencies, latency) != 0) {
             if (node) meridian_node_destroy(node);
@@ -581,7 +582,7 @@ meridian_ret_response_t* meridian_ret_response_decode(cbor_item_t* item) {
  */
 meridian_node_t* meridian_node_from_latency(const meridian_node_latency_t* nl) {
     if (nl == NULL) return NULL;
-    return meridian_node_create(nl->addr, nl->port);
+    return meridian_node_create(nl->addr, nl->port, NULL);
 }
 
 // ============================================================================
