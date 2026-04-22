@@ -12,6 +12,64 @@
 #include "Network/Quasar/quasar.h"
 #include "Bloom/attenuated_bloom_filter.h"
 #include "Util/hash.h"
+#include "Channel/topic_alias.h"
+
+// ============================================================================
+// TOPIC ALIAS TESTS
+// ============================================================================
+
+TEST(TopicAliasTest, CreateDestroy) {
+    topic_alias_registry_t* reg = topic_alias_registry_create(16);
+    ASSERT_NE(nullptr, reg);
+    topic_alias_registry_destroy(reg);
+}
+
+TEST(TopicAliasTest, RegisterAndResolve) {
+    topic_alias_registry_t* reg = topic_alias_registry_create(16);
+    ASSERT_NE(nullptr, reg);
+
+    EXPECT_EQ(0, topic_alias_register(reg, "Alice", "X4jKL9abc"));
+    const char* resolved = topic_alias_resolve(reg, "Alice");
+    ASSERT_NE(nullptr, resolved);
+    EXPECT_STREQ("X4jKL9abc", resolved);
+
+    topic_alias_registry_destroy(reg);
+}
+
+TEST(TopicAliasTest, UnknownAliasReturnsNull) {
+    topic_alias_registry_t* reg = topic_alias_registry_create(16);
+    ASSERT_NE(nullptr, reg);
+
+    EXPECT_EQ(NULL, topic_alias_resolve(reg, "Unknown"));
+
+    topic_alias_registry_destroy(reg);
+}
+
+TEST(TopicAliasTest, DuplicateAliasRejected) {
+    topic_alias_registry_t* reg = topic_alias_registry_create(16);
+    ASSERT_NE(nullptr, reg);
+
+    EXPECT_EQ(0, topic_alias_register(reg, "Alice", "X4jKL9abc"));
+    // Duplicate alias with different target should fail
+    EXPECT_EQ(-1, topic_alias_register(reg, "Alice", "Y7mNP2def"));
+
+    // Original should still resolve
+    const char* resolved = topic_alias_resolve(reg, "Alice");
+    EXPECT_STREQ("X4jKL9abc", resolved);
+
+    topic_alias_registry_destroy(reg);
+}
+
+TEST(TopicAliasTest, UnregisterAlias) {
+    topic_alias_registry_t* reg = topic_alias_registry_create(16);
+    ASSERT_NE(nullptr, reg);
+
+    topic_alias_register(reg, "Alice", "X4jKL9abc");
+    EXPECT_EQ(0, topic_alias_unregister(reg, "Alice"));
+    EXPECT_EQ(NULL, topic_alias_resolve(reg, "Alice"));
+
+    topic_alias_registry_destroy(reg);
+}
 
 // ============================================================================
 // SUBTOPIC TESTS
@@ -365,4 +423,49 @@ TEST_F(ChannelGossipTest, TickExpiresSubscriptions) {
     EXPECT_FALSE(attenuated_bloom_filter_check(q->routing, topic, 9, NULL));
 
     quasar_destroy(q);
+}
+
+// ============================================================================
+// CHANNEL MESSAGE ENVELOPE TESTS
+// ============================================================================
+
+#include "Channel/channel_message.h"
+
+TEST(ChannelMessageTest, EncodeDecodeRoundTrip) {
+    const char* subtopic = "Feeds/friend-only";
+    const uint8_t data[] = {0x01, 0x02, 0x03, 0x04};
+
+    cbor_item_t* encoded = channel_message_encode(
+        (const uint8_t*)subtopic, strlen(subtopic), data, sizeof(data));
+    ASSERT_NE(nullptr, encoded);
+
+    unsigned char* buf = NULL;
+    size_t buf_len = 0;
+    size_t written = cbor_serialize_alloc(encoded, &buf, &buf_len);
+    cbor_decref(&encoded);
+    ASSERT_GT(written, 0u);
+    ASSERT_NE(nullptr, buf);
+
+    // Decode
+    struct cbor_load_result result;
+    cbor_item_t* loaded = cbor_load(buf, written, &result);
+    ASSERT_NE(nullptr, loaded);
+
+    char out_subtopic[256] = {0};
+    uint8_t out_data[256] = {0};
+    size_t out_data_len = 0;
+    int rc = channel_message_decode(loaded, out_subtopic, sizeof(out_subtopic),
+                                    out_data, sizeof(out_data), &out_data_len);
+    EXPECT_EQ(0, rc);
+    EXPECT_STREQ(subtopic, out_subtopic);
+    EXPECT_EQ(sizeof(data), out_data_len);
+    EXPECT_EQ(0, memcmp(data, out_data, sizeof(data)));
+
+    cbor_decref(&loaded);
+    free(buf);
+}
+
+TEST(ChannelMessageTest, NullInputsRejected) {
+    EXPECT_EQ(NULL, channel_message_encode(NULL, 5, (const uint8_t*)"x", 1));
+    EXPECT_EQ(-1, channel_message_decode(NULL, NULL, 0, NULL, 0, NULL));
 }

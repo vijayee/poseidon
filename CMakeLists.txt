@@ -92,6 +92,8 @@ set(POSEIDON_SOURCES
     ${CHANNEL_SRC_DIR}/channel.c
     ${CHANNEL_SRC_DIR}/channel_manager.c
     ${CHANNEL_SRC_DIR}/subtopic.c
+    ${CHANNEL_SRC_DIR}/channel_message.c
+    ${CHANNEL_SRC_DIR}/topic_alias.c
 )
 
 add_library(poseidon STATIC ${POSEIDON_SOURCES})
