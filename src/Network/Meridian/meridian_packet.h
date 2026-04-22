@@ -98,6 +98,135 @@ extern "C" {
 /** Channel bootstrap reply: Response with connection info */
 #define MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP_REPLY  41
 
+// ============================================================================
+// CHANNEL BOOTSTRAP STRUCTURES
+// ============================================================================
+
+/**
+ * Channel bootstrap request packet.
+ * Published via Quasar on the dial channel by a node wanting to join.
+ *
+ * Wire format (CBOR array):
+ * [type(40), string(topic_id), string(sender_node_id), uint64(timestamp_us)]
+ */
+typedef struct meridian_channel_bootstrap_t {
+    uint8_t type;              /**< Packet type (MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP) */
+    char topic_id[64];         /**< Topic ID string */
+    char sender_node_id[64];   /**< Sender node ID string */
+    uint64_t timestamp_us;     /**< Timestamp in microseconds */
+} meridian_channel_bootstrap_t;
+
+/**
+ * Channel bootstrap reply packet.
+ * Sent directly back to the requester by existing channel members.
+ *
+ * Wire format (CBOR array):
+ * [type(41), string(topic_id), string(responder_node_id),
+ *  uint32(responder_addr), uint16(responder_port), uint64(timestamp_us),
+ *  array([uint32(addr), uint16(port)], ...)]
+ */
+typedef struct meridian_channel_bootstrap_reply_t {
+    uint8_t type;                 /**< Packet type (MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP_REPLY) */
+    char topic_id[64];            /**< Topic ID string */
+    char responder_node_id[64];   /**< Responder node ID string */
+    uint32_t responder_addr;      /**< Responder IPv4 address */
+    uint16_t responder_port;      /**< Responder port */
+    uint64_t timestamp_us;        /**< Timestamp in microseconds */
+    uint32_t seed_addrs[16];      /**< Seed node addresses */
+    uint16_t seed_ports[16];      /**< Seed node ports */
+    size_t num_seeds;             /**< Number of valid seed entries */
+} meridian_channel_bootstrap_reply_t;
+
+// ============================================================================
+// CHANNEL BOOTSTRAP PACKET OPERATIONS
+// ============================================================================
+
+/**
+ * Encodes a channel bootstrap request into CBOR.
+ *
+ * CBOR structure:
+ * [type(40), string(topic_id), string(sender_node_id), uint64(timestamp_us)]
+ *
+ * @param topic_id         Topic ID string
+ * @param sender_node_id   Sender node ID string
+ * @param timestamp_us     Timestamp in microseconds
+ * @return                 CBOR array item, or NULL on failure
+ */
+cbor_item_t* meridian_channel_bootstrap_encode(const char* topic_id,
+                                                const char* sender_node_id,
+                                                uint64_t timestamp_us);
+
+/**
+ * Decodes a CBOR channel bootstrap request.
+ *
+ * @param item               CBOR array to decode
+ * @param topic_id           Output buffer for topic ID
+ * @param topic_buf_size     Size of topic_id buffer
+ * @param sender_node_id     Output buffer for sender node ID
+ * @param node_id_buf_size   Size of sender_node_id buffer
+ * @param timestamp_us       Output timestamp
+ * @return                   0 on success, -1 on failure
+ */
+int meridian_channel_bootstrap_decode(const cbor_item_t* item,
+                                       char* topic_id, size_t topic_buf_size,
+                                       char* sender_node_id, size_t node_id_buf_size,
+                                       uint64_t* timestamp_us);
+
+/**
+ * Encodes a channel bootstrap reply into CBOR.
+ *
+ * CBOR structure:
+ * [type(41), string(topic_id), string(responder_node_id),
+ *  uint32(responder_addr), uint16(responder_port), uint64(timestamp_us),
+ *  array([uint32, uint16], ...)]
+ *
+ * @param topic_id            Topic ID string
+ * @param responder_node_id   Responder node ID string
+ * @param responder_addr      Responder IPv4 address
+ * @param responder_port      Responder port
+ * @param timestamp_us        Timestamp in microseconds
+ * @param seed_addrs          Seed node addresses
+ * @param seed_ports          Seed node ports
+ * @param num_seeds           Number of seed nodes
+ * @return                    CBOR array item, or NULL on failure
+ */
+cbor_item_t* meridian_channel_bootstrap_reply_encode(const char* topic_id,
+                                                      const char* responder_node_id,
+                                                      uint32_t responder_addr,
+                                                      uint16_t responder_port,
+                                                      uint64_t timestamp_us,
+                                                      const uint32_t* seed_addrs,
+                                                      const uint16_t* seed_ports,
+                                                      size_t num_seeds);
+
+/**
+ * Decodes a CBOR channel bootstrap reply.
+ *
+ * @param item                CBOR array to decode
+ * @param topic_id            Output buffer for topic ID
+ * @param topic_buf_size      Size of topic_id buffer
+ * @param responder_node_id   Output buffer for responder node ID
+ * @param node_id_buf_size    Size of responder_node_id buffer
+ * @param responder_addr      Output responder address
+ * @param responder_port      Output responder port
+ * @param timestamp_us        Output timestamp
+ * @param seed_addrs          Output seed addresses array
+ * @param seed_ports          Output seed ports array
+ * @param num_seeds           Output number of seeds read
+ * @param max_seeds           Maximum seeds that fit in output arrays
+ * @return                    0 on success, -1 on failure
+ */
+int meridian_channel_bootstrap_reply_decode(const cbor_item_t* item,
+                                             char* topic_id, size_t topic_buf_size,
+                                             char* responder_node_id, size_t node_id_buf_size,
+                                             uint32_t* responder_addr,
+                                             uint16_t* responder_port,
+                                             uint64_t* timestamp_us,
+                                             uint32_t* seed_addrs,
+                                             uint16_t* seed_ports,
+                                             size_t* num_seeds,
+                                             size_t max_seeds);
+
 /** Quasar gossip: Routing filter propagation between peers */
 #define MERIDIAN_PACKET_TYPE_QUASAR_GOSSIP           50
 
@@ -106,7 +235,7 @@ extern "C" {
 // ============================================================================
 
 /** Quasar route message: forwarded pub/sub payload */
-#define MERIDIAN_PACKET_TYPE_QUASAR_ROUTE    40
+#define MERIDIAN_PACKET_TYPE_QUASAR_ROUTE    42
 
 // ============================================================================
 // PROTOCOL CONSTANTS

@@ -192,3 +192,4 @@ add_meridian_test(pki_test tests/pki_test.cpp)
 
 # Channel Tests
 add_meridian_test(channel_test tests/channel_test.cpp)
+add_meridian_test(channel_bootstrap_test tests/channel_bootstrap_test.cpp)

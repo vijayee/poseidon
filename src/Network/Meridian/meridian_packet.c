@@ -803,3 +803,231 @@ meridian_punch_sync_t* meridian_punch_sync_decode(cbor_item_t* item) {
 
     return pkt;
 }
+
+// ============================================================================
+// CHANNEL BOOTSTRAP PACKET OPERATIONS
+// ============================================================================
+
+/**
+ * Encodes a channel bootstrap request into CBOR.
+ *
+ * CBOR structure:
+ * [type(40), string(topic_id), string(sender_node_id), uint64(timestamp_us)]
+ *
+ * @param topic_id         Topic ID string
+ * @param sender_node_id   Sender node ID string
+ * @param timestamp_us     Timestamp in microseconds
+ * @return                 CBOR array item, or NULL on failure
+ */
+cbor_item_t* meridian_channel_bootstrap_encode(const char* topic_id,
+                                                const char* sender_node_id,
+                                                uint64_t timestamp_us) {
+    if (topic_id == NULL || sender_node_id == NULL) return NULL;
+
+    cbor_item_t* array = cbor_new_definite_array(4);
+    if (array == NULL) return NULL;
+
+    if (!cbor_array_push(array, cbor_build_uint8(MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP)) ||
+        !cbor_array_push(array, cbor_build_string(topic_id)) ||
+        !cbor_array_push(array, cbor_build_string(sender_node_id)) ||
+        !cbor_array_push(array, cbor_build_uint64(timestamp_us))) {
+        cbor_decref(&array);
+        return NULL;
+    }
+
+    return array;
+}
+
+/**
+ * Decodes a CBOR channel bootstrap request.
+ *
+ * @param item               CBOR array to decode
+ * @param topic_id           Output buffer for topic ID
+ * @param topic_buf_size     Size of topic_id buffer
+ * @param sender_node_id     Output buffer for sender node ID
+ * @param node_id_buf_size   Size of sender_node_id buffer
+ * @param timestamp_us       Output timestamp
+ * @return                   0 on success, -1 on failure
+ */
+int meridian_channel_bootstrap_decode(const cbor_item_t* item,
+                                       char* topic_id, size_t topic_buf_size,
+                                       char* sender_node_id, size_t node_id_buf_size,
+                                       uint64_t* timestamp_us) {
+    if (item == NULL || topic_id == NULL || sender_node_id == NULL || timestamp_us == NULL)
+        return -1;
+    if (!cbor_array_is_definite((cbor_item_t*)item)) return -1;
+
+    size_t arr_size = cbor_array_size((cbor_item_t*)item);
+    if (arr_size < 4) return -1;
+
+    cbor_item_t** items = cbor_array_handle((cbor_item_t*)item);
+
+    if (!cbor_isa_uint(items[0]) || cbor_get_uint8(items[0]) != MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP)
+        return -1;
+
+    if (!cbor_isa_string(items[1])) return -1;
+    size_t topic_len = cbor_string_length(items[1]);
+    if (topic_len >= topic_buf_size) return -1;
+    memcpy(topic_id, cbor_string_handle(items[1]), topic_len);
+    topic_id[topic_len] = '\0';
+
+    if (!cbor_isa_string(items[2])) return -1;
+    size_t node_id_len = cbor_string_length(items[2]);
+    if (node_id_len >= node_id_buf_size) return -1;
+    memcpy(sender_node_id, cbor_string_handle(items[2]), node_id_len);
+    sender_node_id[node_id_len] = '\0';
+
+    if (!cbor_isa_uint(items[3])) return -1;
+    *timestamp_us = cbor_get_uint64(items[3]);
+
+    return 0;
+}
+
+/**
+ * Encodes a channel bootstrap reply into CBOR.
+ *
+ * CBOR structure:
+ * [type(41), string(topic_id), string(responder_node_id),
+ *  uint32(responder_addr), uint16(responder_port), uint64(timestamp_us),
+ *  array([uint32, uint16], ...)]
+ *
+ * @param topic_id            Topic ID string
+ * @param responder_node_id   Responder node ID string
+ * @param responder_addr      Responder IPv4 address
+ * @param responder_port      Responder port
+ * @param timestamp_us        Timestamp in microseconds
+ * @param seed_addrs          Seed node addresses
+ * @param seed_ports          Seed node ports
+ * @param num_seeds           Number of seed nodes
+ * @return                    CBOR array item, or NULL on failure
+ */
+cbor_item_t* meridian_channel_bootstrap_reply_encode(const char* topic_id,
+                                                      const char* responder_node_id,
+                                                      uint32_t responder_addr,
+                                                      uint16_t responder_port,
+                                                      uint64_t timestamp_us,
+                                                      const uint32_t* seed_addrs,
+                                                      const uint16_t* seed_ports,
+                                                      size_t num_seeds) {
+    if (topic_id == NULL || responder_node_id == NULL) return NULL;
+    if (num_seeds > 0 && (seed_addrs == NULL || seed_ports == NULL)) return NULL;
+
+    cbor_item_t* array = cbor_new_definite_array(7);
+    if (array == NULL) return NULL;
+
+    if (!cbor_array_push(array, cbor_build_uint8(MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP_REPLY)) ||
+        !cbor_array_push(array, cbor_build_string(topic_id)) ||
+        !cbor_array_push(array, cbor_build_string(responder_node_id)) ||
+        !cbor_array_push(array, cbor_build_uint32(responder_addr)) ||
+        !cbor_array_push(array, cbor_build_uint16(responder_port)) ||
+        !cbor_array_push(array, cbor_build_uint64(timestamp_us))) {
+        cbor_decref(&array);
+        return NULL;
+    }
+
+    cbor_item_t* seeds = cbor_new_definite_array(num_seeds);
+    if (seeds == NULL) {
+        cbor_decref(&array);
+        return NULL;
+    }
+
+    for (size_t i = 0; i < num_seeds; i++) {
+        cbor_item_t* seed = cbor_new_definite_array(2);
+        if (seed == NULL ||
+            !cbor_array_push(seed, cbor_build_uint32(seed_addrs[i])) ||
+            !cbor_array_push(seed, cbor_build_uint16(seed_ports[i])) ||
+            !cbor_array_push(seeds, seed)) {
+            cbor_decref(&seed);
+            cbor_decref(&seeds);
+            cbor_decref(&array);
+            return NULL;
+        }
+    }
+
+    if (!cbor_array_push(array, seeds)) {
+        cbor_decref(&seeds);
+        cbor_decref(&array);
+        return NULL;
+    }
+
+    return array;
+}
+
+/**
+ * Decodes a CBOR channel bootstrap reply.
+ *
+ * @param item                CBOR array to decode
+ * @param topic_id            Output buffer for topic ID
+ * @param topic_buf_size      Size of topic_id buffer
+ * @param responder_node_id   Output buffer for responder node ID
+ * @param node_id_buf_size    Size of responder_node_id buffer
+ * @param responder_addr      Output responder address
+ * @param responder_port      Output responder port
+ * @param timestamp_us        Output timestamp
+ * @param seed_addrs          Output seed addresses array
+ * @param seed_ports          Output seed ports array
+ * @param num_seeds           Output number of seeds read
+ * @param max_seeds           Maximum seeds that fit in output arrays
+ * @return                    0 on success, -1 on failure
+ */
+int meridian_channel_bootstrap_reply_decode(const cbor_item_t* item,
+                                             char* topic_id, size_t topic_buf_size,
+                                             char* responder_node_id, size_t node_id_buf_size,
+                                             uint32_t* responder_addr,
+                                             uint16_t* responder_port,
+                                             uint64_t* timestamp_us,
+                                             uint32_t* seed_addrs,
+                                             uint16_t* seed_ports,
+                                             size_t* num_seeds,
+                                             size_t max_seeds) {
+    if (item == NULL || topic_id == NULL || responder_node_id == NULL) return -1;
+    if (responder_addr == NULL || responder_port == NULL || timestamp_us == NULL) return -1;
+    if (seed_addrs == NULL || seed_ports == NULL || num_seeds == NULL) return -1;
+    if (!cbor_array_is_definite((cbor_item_t*)item)) return -1;
+
+    size_t arr_size = cbor_array_size((cbor_item_t*)item);
+    if (arr_size < 7) return -1;
+
+    cbor_item_t** items = cbor_array_handle((cbor_item_t*)item);
+
+    if (!cbor_isa_uint(items[0]) || cbor_get_uint8(items[0]) != MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP_REPLY)
+        return -1;
+
+    if (!cbor_isa_string(items[1])) return -1;
+    size_t topic_len = cbor_string_length(items[1]);
+    if (topic_len >= topic_buf_size) return -1;
+    memcpy(topic_id, cbor_string_handle(items[1]), topic_len);
+    topic_id[topic_len] = '\0';
+
+    if (!cbor_isa_string(items[2])) return -1;
+    size_t node_id_len = cbor_string_length(items[2]);
+    if (node_id_len >= node_id_buf_size) return -1;
+    memcpy(responder_node_id, cbor_string_handle(items[2]), node_id_len);
+    responder_node_id[node_id_len] = '\0';
+
+    if (!cbor_isa_uint(items[3])) return -1;
+    *responder_addr = (uint32_t)cbor_get_uint32(items[3]);
+
+    if (!cbor_isa_uint(items[4])) return -1;
+    *responder_port = (uint16_t)cbor_get_uint16(items[4]);
+
+    if (!cbor_isa_uint(items[5])) return -1;
+    *timestamp_us = cbor_get_uint64(items[5]);
+
+    *num_seeds = 0;
+    if (cbor_isa_array(items[6])) {
+        size_t seed_count = cbor_array_size(items[6]);
+        size_t to_read = seed_count < max_seeds ? seed_count : max_seeds;
+        cbor_item_t** seed_items = cbor_array_handle(items[6]);
+        for (size_t i = 0; i < to_read; i++) {
+            if (!cbor_array_is_definite(seed_items[i])) break;
+            if (cbor_array_size(seed_items[i]) < 2) break;
+            cbor_item_t** pair = cbor_array_handle(seed_items[i]);
+            seed_addrs[i] = (uint32_t)cbor_get_uint32(pair[0]);
+            seed_ports[i] = (uint16_t)cbor_get_uint16(pair[1]);
+            (*num_seeds)++;
+        }
+    }
+
+    return 0;
+}
