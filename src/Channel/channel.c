@@ -397,6 +397,17 @@ const char* poseidon_channel_resolve_alias(const poseidon_channel_t* channel,
 }
 
 // ============================================================================
+// PATH RESOLUTION
+// ============================================================================
+
+int poseidon_channel_resolve_path(const poseidon_channel_t* channel,
+                                   const char* path,
+                                   poseidon_path_resolve_result_t* out) {
+    if (channel == NULL || path == NULL || out == NULL) return -1;
+    return poseidon_resolve_path(channel, path, out);
+}
+
+// ============================================================================
 // CONFIGURATION
 // ============================================================================
 

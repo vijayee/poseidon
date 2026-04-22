@@ -166,6 +166,25 @@ const char* poseidon_channel_resolve_alias(const poseidon_channel_t* channel,
                                             const char* name);
 
 // ============================================================================
+// PATH RESOLUTION
+// ============================================================================
+
+#include "topic_id.h"
+
+/**
+ * Resolves a path string into a topic ID and optional subtopic.
+ * Uses the channel's alias registry for name resolution.
+ *
+ * @param channel  Channel whose alias registry to use
+ * @param path     Path string like "Alice/Feeds/friend-only"
+ * @param out      Output resolution result
+ * @return         0 on success, -1 on error
+ */
+int poseidon_channel_resolve_path(const poseidon_channel_t* channel,
+                                   const char* path,
+                                   poseidon_path_resolve_result_t* out);
+
+// ============================================================================
 // PERIODIC OPERATIONS
 // ============================================================================
 

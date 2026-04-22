@@ -287,3 +287,38 @@ int poseidon_key_pair_generate_tls_files(poseidon_key_pair_t* kp, const char* no
     X509_free(cert);
     return 0;
 }
+
+int poseidon_key_pair_sign(poseidon_key_pair_t* kp,
+                            const uint8_t* data, size_t data_len,
+                            uint8_t* sig_out, size_t* sig_len) {
+    if (kp == NULL || data == NULL || sig_out == NULL || sig_len == NULL)
+        return -1;
+
+    if (EVP_PKEY_base_id(kp->pkey) != EVP_PKEY_ED25519) return -1;
+
+    size_t sig_sz = EVP_PKEY_size(kp->pkey);
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (ctx == NULL) return -1;
+
+    int rc = -1;
+    if (EVP_DigestSignInit(ctx, NULL, NULL, NULL, kp->pkey) != 1) goto cleanup;
+    if (EVP_DigestSign(ctx, sig_out, &sig_sz, data, data_len) != 1) goto cleanup;
+
+    *sig_len = sig_sz;
+    rc = 0;
+
+cleanup:
+    EVP_MD_CTX_free(ctx);
+    return rc;
+}
+
+int poseidon_verify_signature(const char* topic_id_str,
+                               const uint8_t* data, size_t data_len,
+                               const uint8_t* signature, size_t sig_len) {
+    (void)topic_id_str;
+    (void)data;
+    (void)data_len;
+    (void)signature;
+    (void)sig_len;
+    return -1;
+}

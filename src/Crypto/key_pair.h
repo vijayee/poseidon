@@ -117,6 +117,35 @@ int poseidon_certificate_save_to_pem(X509* cert, const char* filepath);
 int poseidon_key_pair_generate_tls_files(poseidon_key_pair_t* kp, const char* node_id_str,
                                           const char* key_path, const char* cert_path);
 
+/**
+ * Signs data with an ED25519 private key.
+ *
+ * @param kp       Key pair containing the private key (must be ED25519)
+ * @param data     Data to sign
+ * @param data_len Length of data
+ * @param sig_out  Output buffer for signature (must be at least 64 bytes)
+ * @param sig_len  Output: actual signature length
+ * @return         0 on success, -1 on failure
+ */
+int poseidon_key_pair_sign(poseidon_key_pair_t* kp,
+                            const uint8_t* data, size_t data_len,
+                            uint8_t* sig_out, size_t* sig_len);
+
+/**
+ * Verifies an ED25519 signature against a public key derived from node_id.
+ * Stub implementation — always returns -1 until full implementation.
+ *
+ * @param topic_id_str  Base58 topic ID string (encodes the public key)
+ * @param data          Data that was signed
+ * @param data_len      Length of data
+ * @param signature     Signature bytes
+ * @param sig_len       Length of signature
+ * @return              0 if valid, -1 if invalid or error
+ */
+int poseidon_verify_signature(const char* topic_id_str,
+                               const uint8_t* data, size_t data_len,
+                               const uint8_t* signature, size_t sig_len);
+
 #ifdef __cplusplus
 }
 #endif
