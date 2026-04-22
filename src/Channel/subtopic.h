@@ -20,11 +20,10 @@ extern "C" {
  * @param path       Subtopic path string (null-terminated)
  * @param parts      Output array of part buffers
  * @param max_parts  Maximum number of parts to extract
- * @param part_size  Size of each part buffer
  * @return           Number of parts parsed, 0 for empty path, -1 on error
  */
 int subtopic_parse(const char* path, char parts[][SUBTOPIC_MAX_PART_LEN],
-                   int max_parts, int part_size);
+                   int max_parts);
 
 /**
  * Checks if a message's subtopic matches a subscription pattern.

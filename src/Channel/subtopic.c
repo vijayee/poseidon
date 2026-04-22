@@ -2,8 +2,8 @@
 #include <string.h>
 
 int subtopic_parse(const char* path, char parts[][SUBTOPIC_MAX_PART_LEN],
-                   int max_parts, int part_size) {
-    if (parts == NULL || max_parts <= 0 || part_size <= 0) return -1;
+                   int max_parts) {
+    if (parts == NULL || max_parts <= 0) return -1;
     if (path == NULL) return -1;
     if (path[0] == '\0') return 0;
 
@@ -14,7 +14,10 @@ int subtopic_parse(const char* path, char parts[][SUBTOPIC_MAX_PART_LEN],
     while (*p != '\0' && count < max_parts) {
         if (*p == SUBTOPIC_SEPARATOR) {
             size_t len = (size_t)(p - start);
-            if (len > 0 && len < (size_t)part_size) {
+            if (len >= SUBTOPIC_MAX_PART_LEN) {
+                return -1; // Part exceeds buffer
+            }
+            if (len > 0) {
                 memcpy(parts[count], start, len);
                 parts[count][len] = '\0';
                 count++;
@@ -27,7 +30,10 @@ int subtopic_parse(const char* path, char parts[][SUBTOPIC_MAX_PART_LEN],
     // Last segment
     if (*start != '\0' && count < max_parts) {
         size_t len = strlen(start);
-        if (len > 0 && len < (size_t)part_size) {
+        if (len >= SUBTOPIC_MAX_PART_LEN) {
+            return -1; // Part exceeds buffer
+        }
+        if (len > 0) {
             memcpy(parts[count], start, len);
             parts[count][len] = '\0';
             count++;
@@ -44,6 +50,10 @@ bool subtopic_matches(const char* message_subtopic, const char* subscription) {
     if (subscription[0] == '\0') return true;
 
     size_t sub_len = strlen(subscription);
+    while (sub_len > 0 && subscription[sub_len - 1] == SUBTOPIC_SEPARATOR) {
+        sub_len--;
+    }
+
     size_t msg_len = strlen(message_subtopic);
 
     // Message must be at least as long as subscription

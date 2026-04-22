@@ -19,7 +19,7 @@
 
 TEST(SubtopicTest, ParseSimplePath) {
     char parts[8][64];
-    int count = subtopic_parse("Feeds/friend-only", parts, 8, 64);
+    int count = subtopic_parse("Feeds/friend-only", parts, 8);
     EXPECT_EQ(2, count);
     EXPECT_STREQ("Feeds", parts[0]);
     EXPECT_STREQ("friend-only", parts[1]);
@@ -27,21 +27,42 @@ TEST(SubtopicTest, ParseSimplePath) {
 
 TEST(SubtopicTest, ParseSinglePart) {
     char parts[8][64];
-    int count = subtopic_parse("Feeds", parts, 8, 64);
+    int count = subtopic_parse("Feeds", parts, 8);
     EXPECT_EQ(1, count);
     EXPECT_STREQ("Feeds", parts[0]);
 }
 
 TEST(SubtopicTest, ParseEmptyReturnsZero) {
     char parts[8][64];
-    int count = subtopic_parse("", parts, 8, 64);
+    int count = subtopic_parse("", parts, 8);
     EXPECT_EQ(0, count);
 }
 
 TEST(SubtopicTest, ParseNullReturnsError) {
     char parts[8][64];
-    int count = subtopic_parse(NULL, parts, 8, 64);
+    int count = subtopic_parse(NULL, parts, 8);
     EXPECT_EQ(-1, count);
+}
+
+TEST(SubtopicTest, ParseNullPartsReturnsError) {
+    int count = subtopic_parse("Feeds", NULL, 8);
+    EXPECT_EQ(-1, count);
+}
+
+TEST(SubtopicTest, ParseLeadingSlash) {
+    char parts[8][64];
+    int count = subtopic_parse("/Feeds/friend-only", parts, 8);
+    EXPECT_EQ(2, count);
+    EXPECT_STREQ("Feeds", parts[0]);
+    EXPECT_STREQ("friend-only", parts[1]);
+}
+
+TEST(SubtopicTest, ParseTrailingSlash) {
+    char parts[8][64];
+    int count = subtopic_parse("Feeds/friend-only/", parts, 8);
+    EXPECT_EQ(2, count);
+    EXPECT_STREQ("Feeds", parts[0]);
+    EXPECT_STREQ("friend-only", parts[1]);
 }
 
 TEST(SubtopicTest, MatchExact) {
@@ -62,6 +83,26 @@ TEST(SubtopicTest, NoMatchDifferentRoot) {
 
 TEST(SubtopicTest, MatchRootSubscription) {
     EXPECT_TRUE(subtopic_matches("Feeds/friend-only", ""));
+}
+
+TEST(SubtopicTest, MatchTrailingSlashSubscription) {
+    // "Feeds/" should match "Feeds/friend-only" after normalization
+    EXPECT_TRUE(subtopic_matches("Feeds/friend-only", "Feeds/"));
+}
+
+TEST(SubtopicTest, NoMatchStringPrefix) {
+    // "FeedsOnly" should NOT match subscription "Feeds"
+    EXPECT_FALSE(subtopic_matches("FeedsOnly", "Feeds"));
+}
+
+TEST(SubtopicTest, MatchNullInputs) {
+    EXPECT_FALSE(subtopic_matches(NULL, "Feeds"));
+    EXPECT_FALSE(subtopic_matches("Feeds", NULL));
+}
+
+TEST(SubtopicTest, EmptyMessageNoMatch) {
+    // Empty message should not match non-empty subscription
+    EXPECT_FALSE(subtopic_matches("", "Feeds"));
 }
 
 // ============================================================================
