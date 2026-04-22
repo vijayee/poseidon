@@ -6,9 +6,11 @@
 #include "../Util/allocator.h"
 #include "../Util/threadding.h"
 #include "../Crypto/key_pair.h"
+#include "channel_message.h"
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <cbor.h>
 
 // ============================================================================
 // DEFAULT CONFIGURATION
@@ -107,6 +109,23 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
         return NULL;
     }
 
+    channel->subtopic_subs = subtopic_table_create(64);
+    if (channel->subtopic_subs == NULL) {
+        quasar_destroy(channel->quasar);
+        meridian_protocol_destroy(channel->protocol);
+        free(channel);
+        return NULL;
+    }
+
+    channel->aliases = topic_alias_registry_create(32);
+    if (channel->aliases == NULL) {
+        subtopic_table_destroy(channel->subtopic_subs);
+        quasar_destroy(channel->quasar);
+        meridian_protocol_destroy(channel->protocol);
+        free(channel);
+        return NULL;
+    }
+
     // Take a reference on the key pair
     channel->key_pair = REFERENCE(key_pair, poseidon_key_pair_t);
 
@@ -132,6 +151,8 @@ void poseidon_channel_destroy(poseidon_channel_t* channel) {
         if (channel->quasar != NULL) quasar_destroy(channel->quasar);
         if (channel->protocol != NULL) meridian_protocol_destroy(channel->protocol);
         if (channel->key_pair != NULL) poseidon_key_pair_destroy(channel->key_pair);
+        if (channel->subtopic_subs != NULL) subtopic_table_destroy(channel->subtopic_subs);
+        if (channel->aliases != NULL) topic_alias_registry_destroy(channel->aliases);
 
         // Clean up TLS files
         char key_path[256];
@@ -185,6 +206,42 @@ const char* poseidon_channel_get_topic(const poseidon_channel_t* channel) {
 }
 
 // ============================================================================
+// INTERNAL DELIVERY WRAPPER
+// ============================================================================
+
+static void channel_quasar_delivery_handler(void* ctx, const uint8_t* topic, size_t topic_len,
+                                              const uint8_t* data, size_t data_len) {
+    poseidon_channel_t* channel = (poseidon_channel_t*)ctx;
+    if (channel->delivery_cb == NULL) return;
+
+    // Decode the channel message envelope to extract subtopic
+    struct cbor_load_result result;
+    cbor_item_t* item = cbor_load(data, data_len, &result);
+    if (item == NULL) {
+        // Not a channel message envelope — deliver raw
+        channel->delivery_cb(channel->delivery_cb_ctx, topic, topic_len, "", data, data_len);
+        return;
+    }
+
+    char subtopic[256] = {0};
+    uint8_t payload[4096] = {0};
+    size_t payload_len = 0;
+    if (channel_message_decode(item, subtopic, sizeof(subtopic),
+                                payload, sizeof(payload), &payload_len) == 0) {
+        // Check subtopic filter
+        if (subtopic_table_should_deliver(channel->subtopic_subs, subtopic)) {
+            channel->delivery_cb(channel->delivery_cb_ctx, topic, topic_len,
+                                     subtopic, payload, payload_len);
+        }
+    } else {
+        // Failed to decode — deliver raw
+        channel->delivery_cb(channel->delivery_cb_ctx, topic, topic_len, "", data, data_len);
+    }
+
+    cbor_decref(&item);
+}
+
+// ============================================================================
 // QUASAR OPERATIONS
 // ============================================================================
 
@@ -209,10 +266,10 @@ int poseidon_channel_publish(poseidon_channel_t* channel,
 
 int poseidon_channel_set_delivery_callback(poseidon_channel_t* channel,
                                             poseidon_channel_delivery_cb_t cb, void* ctx) {
-    // Quasar doesn't yet have a delivery callback API — reserved for future wiring
-    (void)channel;
-    (void)cb;
-    (void)ctx;
+    if (channel == NULL || channel->quasar == NULL) return -1;
+    channel->delivery_cb = cb;
+    channel->delivery_cb_ctx = ctx;
+    quasar_set_delivery_callback(channel->quasar, channel_quasar_delivery_handler, channel);
     return 0;
 }
 
@@ -222,7 +279,9 @@ int poseidon_channel_set_delivery_callback(poseidon_channel_t* channel,
 
 int poseidon_channel_tick(poseidon_channel_t* channel) {
     if (channel == NULL) return -1;
-    return quasar_tick(channel->quasar);
+    int rc = quasar_tick(channel->quasar);
+    subtopic_table_tick(channel->subtopic_subs);
+    return rc;
 }
 
 int poseidon_channel_gossip(poseidon_channel_t* channel) {
@@ -230,6 +289,44 @@ int poseidon_channel_gossip(poseidon_channel_t* channel) {
     int rc = meridian_protocol_gossip(channel->protocol);
     quasar_propagate(channel->quasar);
     return rc;
+}
+
+// ============================================================================
+// SUBTOPIC OPERATIONS
+// ============================================================================
+
+int poseidon_channel_subscribe_subtopic(poseidon_channel_t* channel,
+                                         const char* subtopic, uint32_t ttl) {
+    if (channel == NULL || subtopic == NULL) return -1;
+    return subtopic_table_subscribe(channel->subtopic_subs, subtopic, ttl);
+}
+
+int poseidon_channel_unsubscribe_subtopic(poseidon_channel_t* channel,
+                                            const char* subtopic) {
+    if (channel == NULL || subtopic == NULL) return -1;
+    return subtopic_table_unsubscribe(channel->subtopic_subs, subtopic);
+}
+
+// ============================================================================
+// TOPIC ALIASES
+// ============================================================================
+
+int poseidon_channel_register_alias(poseidon_channel_t* channel,
+                                     const char* name, const char* topic) {
+    if (channel == NULL) return -1;
+    return topic_alias_register(channel->aliases, name, topic);
+}
+
+int poseidon_channel_unregister_alias(poseidon_channel_t* channel,
+                                       const char* name) {
+    if (channel == NULL) return -1;
+    return topic_alias_unregister(channel->aliases, name);
+}
+
+const char* poseidon_channel_resolve_alias(const poseidon_channel_t* channel,
+                                            const char* name) {
+    if (channel == NULL) return NULL;
+    return topic_alias_resolve(channel->aliases, name);
 }
 
 // ============================================================================

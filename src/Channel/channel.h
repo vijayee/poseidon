@@ -14,6 +14,8 @@
 #include "../Network/Quasar/quasar.h"
 #include "../Workers/pool.h"
 #include "../Time/wheel.h"
+#include "subtopic.h"
+#include "topic_alias.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,6 +56,13 @@ poseidon_channel_config_t poseidon_channel_config_defaults(void);
 // CHANNEL
 // ============================================================================
 
+typedef struct poseidon_channel_t poseidon_channel_t;
+
+typedef void (*poseidon_channel_delivery_cb_t)(void* ctx, const uint8_t* topic,
+                                                size_t topic_len,
+                                                const char* subtopic,
+                                                const uint8_t* data, size_t data_len);
+
 typedef struct poseidon_channel_t {
     refcounter_t refcounter;
     poseidon_channel_state_t state;
@@ -65,6 +74,10 @@ typedef struct poseidon_channel_t {
     quasar_t* quasar;                        /**< Quasar pub/sub overlay */
     uint16_t listen_port;
     bool is_dial;
+    subtopic_table_t* subtopic_subs;    /**< Per-granularity subtopic subscriptions */
+    topic_alias_registry_t* aliases;     /**< Human-readable name → Base58 ID map */
+    poseidon_channel_delivery_cb_t delivery_cb;
+    void* delivery_cb_ctx;
     PLATFORMLOCKTYPE(lock);
 } poseidon_channel_t;
 
@@ -116,12 +129,28 @@ int poseidon_channel_publish(poseidon_channel_t* channel,
                               const uint8_t* topic, size_t topic_len,
                               const uint8_t* data, size_t data_len);
 
-typedef void (*poseidon_channel_delivery_cb_t)(void* ctx, const uint8_t* topic,
-                                                size_t topic_len,
-                                                const uint8_t* data, size_t data_len);
-
 int poseidon_channel_set_delivery_callback(poseidon_channel_t* channel,
                                             poseidon_channel_delivery_cb_t cb, void* ctx);
+
+// ============================================================================
+// SUBTOPIC OPERATIONS
+// ============================================================================
+
+int poseidon_channel_subscribe_subtopic(poseidon_channel_t* channel,
+                                         const char* subtopic, uint32_t ttl);
+int poseidon_channel_unsubscribe_subtopic(poseidon_channel_t* channel,
+                                            const char* subtopic);
+
+// ============================================================================
+// TOPIC ALIASES
+// ============================================================================
+
+int poseidon_channel_register_alias(poseidon_channel_t* channel,
+                                     const char* name, const char* topic);
+int poseidon_channel_unregister_alias(poseidon_channel_t* channel,
+                                       const char* name);
+const char* poseidon_channel_resolve_alias(const poseidon_channel_t* channel,
+                                            const char* name);
 
 // ============================================================================
 // PERIODIC OPERATIONS

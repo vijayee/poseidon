@@ -469,3 +469,35 @@ TEST(ChannelMessageTest, NullInputsRejected) {
     EXPECT_EQ(NULL, channel_message_encode(NULL, 5, (const uint8_t*)"x", 1));
     EXPECT_EQ(-1, channel_message_decode(NULL, NULL, 0, NULL, 0, NULL));
 }
+
+// ============================================================================
+// CHANNEL SUBTOPIC TESTS
+// ============================================================================
+
+TEST(ChannelSubtopicTest, ChannelSubscribeUnsubscribe) {
+    // We can't create a full channel without real key pair + protocol, so test the table directly
+    subtopic_table_t* table = subtopic_table_create(16);
+    ASSERT_NE(nullptr, table);
+
+    EXPECT_EQ(0, subtopic_table_subscribe(table, "Feeds", 100));
+    EXPECT_TRUE(subtopic_table_is_subscribed(table, "Feeds"));
+    EXPECT_TRUE(subtopic_table_should_deliver(table, "Feeds/public"));
+    EXPECT_TRUE(subtopic_table_should_deliver(table, "Feeds/private"));
+
+    EXPECT_EQ(0, subtopic_table_unsubscribe(table, "Feeds"));
+    EXPECT_FALSE(subtopic_table_is_subscribed(table, "Feeds"));
+
+    subtopic_table_destroy(table);
+}
+
+TEST(ChannelAliasTest, ChannelAliasRoundTrip) {
+    topic_alias_registry_t* reg = topic_alias_registry_create(16);
+    ASSERT_NE(nullptr, reg);
+
+    EXPECT_EQ(0, topic_alias_register(reg, "Alice", "X4jKL9abc"));
+    const char* resolved = topic_alias_resolve(reg, "Alice");
+    ASSERT_NE(nullptr, resolved);
+    EXPECT_STREQ("X4jKL9abc", resolved);
+
+    topic_alias_registry_destroy(reg);
+}
