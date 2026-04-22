@@ -41,6 +41,7 @@ void platform_barrier_destroy(SYNCHRONIZATION_BARRIER* barrier);
 int platform_join(HANDLE thread);
 int platform_core_count();
 uint64_t platform_self();
+void platform_usleep(uint32_t microseconds);
 #else
 #include <pthread.h>
 #include <sched.h>
@@ -72,6 +73,7 @@ void platform_barrier_destroy(pthread_barrier_t* barrier);
 int platform_join(pthread_t thread);
 int platform_core_count();
 uint64_t platform_self();
+void platform_usleep(uint32_t microseconds);
 #endif
 
 // Spin-loop hint: reduces power consumption and improves performance

@@ -4,10 +4,10 @@
 
 #include <gtest/gtest.h>
 #include <string.h>
-#include <arpa/inet.h>
 #include <cbor.h>
 #include "Network/Quasar/quasar.h"
 #include "Network/Quasar/quasar_message_id.h"
+#include "Util/portable_endian.h"
 #include "Network/Quasar/quasar_route.h"
 #include "Bloom/elastic_bloom_filter.h"
 #include "Bloom/attenuated_bloom_filter.h"
@@ -87,7 +87,7 @@ TEST_F(QuasarTest, NeighborFilterCreateAndLookup) {
     quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     ASSERT_NE(nullptr, q);
 
-    meridian_node_t* neighbor = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* neighbor = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
     ASSERT_NE(nullptr, neighbor);
 
     // Initially no neighbor filters
@@ -150,7 +150,7 @@ TEST_F(RouteMessageTest, AddVisitedAndCheck) {
     );
     ASSERT_NE(nullptr, msg);
 
-    meridian_node_t* node = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* node = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
     ASSERT_NE(nullptr, node);
 
     // Node should not be visited initially
@@ -174,9 +174,9 @@ TEST_F(RouteMessageTest, MultipleVisitedNodes) {
     );
     ASSERT_NE(nullptr, msg);
 
-    meridian_node_t* node1 = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
-    meridian_node_t* node2 = meridian_node_create_unidentified(htonl(0x0A000002), htons(8081));
-    meridian_node_t* node3 = meridian_node_create_unidentified(htonl(0x0A000003), htons(8082));
+    meridian_node_t* node1 = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
+    meridian_node_t* node2 = meridian_node_create_unidentified(htobe32(0x0A000002), htobe16(8081));
+    meridian_node_t* node3 = meridian_node_create_unidentified(htobe32(0x0A000003), htobe16(8082));
 
     EXPECT_EQ(0, quasar_route_message_add_visited(msg, node1));
     EXPECT_EQ(0, quasar_route_message_add_visited(msg, node2));
@@ -206,7 +206,7 @@ TEST_F(RouteMessageTest, NullNodeHandling) {
 }
 
 TEST_F(RouteMessageTest, NullMessageHandling) {
-    meridian_node_t* node = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* node = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
     EXPECT_EQ(-1, quasar_route_message_add_visited(NULL, node));
     EXPECT_FALSE(quasar_route_message_has_visited(NULL, node));
     meridian_node_destroy(node);
@@ -236,12 +236,12 @@ TEST_F(RouteMessageTest, PublishersList) {
     EXPECT_EQ(0, msg->pub_count);
 
     // Add a publisher
-    meridian_node_t* pub1 = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* pub1 = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
     EXPECT_EQ(0, quasar_route_message_add_publisher(msg, pub1));
     EXPECT_EQ(1, msg->pub_count);
 
     // Add another publisher
-    meridian_node_t* pub2 = meridian_node_create_unidentified(htonl(0x0A000002), htons(8081));
+    meridian_node_t* pub2 = meridian_node_create_unidentified(htobe32(0x0A000002), htobe16(8081));
     EXPECT_EQ(0, quasar_route_message_add_publisher(msg, pub2));
     EXPECT_EQ(2, msg->pub_count);
 
@@ -250,7 +250,7 @@ TEST_F(RouteMessageTest, PublishersList) {
     EXPECT_TRUE(quasar_route_message_has_publisher(msg, pub2));
 
     // Unknown node should not be in publisher list
-    meridian_node_t* unknown = meridian_node_create_unidentified(htonl(0x0A000003), htons(8082));
+    meridian_node_t* unknown = meridian_node_create_unidentified(htobe32(0x0A000003), htobe16(8082));
     EXPECT_FALSE(quasar_route_message_has_publisher(msg, unknown));
 
     // NULL args should be safe
@@ -356,7 +356,7 @@ TEST_F(GossipTest, GossipStoresInNeighborFilter) {
     quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     ASSERT_NE(nullptr, q);
 
-    meridian_node_t* neighbor = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* neighbor = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
     ASSERT_NE(nullptr, neighbor);
 
     // Build a CBOR-encoded gossip packet with a topic in level 0
@@ -417,7 +417,7 @@ protected:
 
 TEST_F(OnRouteMessageTest, NullMessageRejected) {
     quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
-    meridian_node_t* from = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* from = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
     EXPECT_EQ(-1, quasar_on_route_message(q, NULL, from));
     quasar_destroy(q);
     meridian_node_destroy(from);
@@ -429,7 +429,7 @@ TEST_F(OnRouteMessageTest, NullQuasarRejected) {
     quasar_route_message_t* msg = quasar_route_message_create(
         topic, 6, data, 5, 10, 256, 3
     );
-    meridian_node_t* from = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* from = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
     EXPECT_EQ(-1, quasar_on_route_message(NULL, msg, from));
     quasar_route_message_destroy(msg);
     meridian_node_destroy(from);
@@ -452,7 +452,7 @@ TEST_F(OnRouteMessageTest, LocalDeliveryViaRouteMessage) {
     quasar_route_message_t* msg = quasar_route_message_create(
         topic, 6, data, 5, 10, 256, 3
     );
-    meridian_node_t* from = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* from = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
 
     EXPECT_EQ(0, quasar_on_route_message(q, msg, from));
     EXPECT_EQ(1, call_count);
@@ -471,7 +471,7 @@ TEST_F(OnRouteMessageTest, ZeroHopsRemainingStopsForwarding) {
     quasar_route_message_t* msg = quasar_route_message_create(
         topic, 6, data, 5, 0, 256, 3
     );
-    meridian_node_t* from = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* from = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
 
     // Should return 0 without crashing (message has expired)
     EXPECT_EQ(0, quasar_on_route_message(q, msg, from));
@@ -565,7 +565,7 @@ TEST_F(DedupFilterTest, DuplicateRouteMessageDiscarded) {
 
     // Create a route message and deliver it — should trigger callback
     quasar_route_message_t* msg = quasar_route_message_create(topic, 6, data, 5, 10, 256, 3);
-    meridian_node_t* from = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* from = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
     EXPECT_EQ(0, quasar_on_route_message(q, msg, from));
     EXPECT_EQ(1, call_count);
 
@@ -595,7 +595,7 @@ TEST_F(DedupFilterTest, DifferentMessagesNotDiscarded) {
     // Two different route messages — different IDs — should both be delivered
     quasar_route_message_t* msg1 = quasar_route_message_create(topic, 6, data, 5, 10, 256, 3);
     quasar_route_message_t* msg2 = quasar_route_message_create(topic, 6, data, 5, 10, 256, 3);
-    meridian_node_t* from = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* from = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
 
     EXPECT_EQ(0, quasar_on_route_message(q, msg1, from));
     EXPECT_EQ(1, call_count);
@@ -636,7 +636,7 @@ TEST_F(QuasarTest, Algorithm2DirectedWalk) {
 
     // Node B publishes to "sports" — has node A as a neighbor with "sports" in its filter
     quasar_t* node_b = quasar_create(NULL, 5, 3, 4096, 3);
-    meridian_node_t* node_a_endpoint = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* node_a_endpoint = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
 
     // Set up node B's neighbor filter for node A
     attenuated_bloom_filter_t* nf = quasar_get_or_create_neighbor_filter(node_b, node_a_endpoint);
@@ -678,7 +678,7 @@ TEST_F(QuasarTest, NegativeInformationPreventsSelfLoop) {
     quasar_subscribe(q, topic, 6, 100);
 
     // Set up a neighbor filter for our own address (self-loop scenario)
-    meridian_node_t* self_node = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* self_node = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
     attenuated_bloom_filter_t* nf = quasar_get_or_create_neighbor_filter(q, self_node);
     ASSERT_NE(nullptr, nf);
     attenuated_bloom_filter_subscribe(nf, topic, 6);
@@ -716,10 +716,10 @@ TEST_F(RouteSerializeTest, RoundTrip) {
     );
     ASSERT_NE(nullptr, msg);
 
-    meridian_node_t* pub1 = meridian_node_create_unidentified(htonl(0x0A000001), htons(8080));
+    meridian_node_t* pub1 = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
     quasar_route_message_add_publisher(msg, pub1);
 
-    meridian_node_t* visited1 = meridian_node_create_unidentified(htonl(0x0A000002), htons(8081));
+    meridian_node_t* visited1 = meridian_node_create_unidentified(htobe32(0x0A000002), htobe16(8081));
     quasar_route_message_add_visited(msg, visited1);
 
     // Serialize

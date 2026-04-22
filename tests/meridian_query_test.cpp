@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include <string.h>
 #include "Network/Meridian/meridian_query.h"
+#include "Util/threadding.h"
 
 class MeridianQueryTest : public ::testing::Test {
 protected:
@@ -110,7 +111,7 @@ TEST_F(MeridianQueryTest, QueryExpiry) {
     ASSERT_NE(nullptr, query);
     EXPECT_FALSE(meridian_query_is_expired(query));
 
-    usleep(60000); // 60ms
+    platform_usleep(60000); // 60ms
 
     EXPECT_TRUE(meridian_query_is_expired(query));
 
@@ -158,7 +159,7 @@ TEST_F(MeridianQueryTest, TickWithExpired) {
     EXPECT_EQ(0, meridian_query_table_insert(table, query1));
     EXPECT_EQ(0, meridian_query_table_insert(table, query2));
 
-    usleep(10000); // 10ms
+    platform_usleep(10000); // 10ms
 
     meridian_query_t** expired = NULL;
     size_t num_expired = 0;

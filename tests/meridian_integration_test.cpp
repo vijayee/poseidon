@@ -4,17 +4,14 @@
 //
 
 #include <gtest/gtest.h>
-#include <pthread.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <stdint.h>
 #include <string.h>
-#include <errno.h>
 #include <stdlib.h>
 #include "Network/Meridian/meridian_protocol.h"
 #include "Crypto/key_pair.h"
 #include "Crypto/node_id.h"
+#include "Util/threadding.h"
+#include "Util/portable_endian.h"
 
 #define TEST_NODE_COUNT 3
 #define TEST_TIMEOUT_MS 1000
@@ -25,9 +22,8 @@ typedef struct test_node_context_s {
     char key_path[256];
     char cert_path[256];
     uint16_t port;
-    pthread_t thread;
+    PLATFORMLOCKTYPE(mutex);
     int thread_ready;
-    pthread_mutex_t mutex;
 } test_node_context_t;
 
 static int setup_node_tls(test_node_context_t* node, int index) {
@@ -105,7 +101,7 @@ protected:
                 nodes[i].protocol = NULL;
             }
             cleanup_node_tls(&nodes[i]);
-            pthread_mutex_destroy(&nodes[i].mutex);
+            platform_lock_destroy(&nodes[i].mutex);
         }
     }
 
@@ -118,7 +114,7 @@ int MeridianIntegrationTest::next_base_port = 12000;
 TEST_F(MeridianIntegrationTest, CreateMultipleNodes) {
     for (int i = 0; i < TEST_NODE_COUNT; i++) {
         uint16_t port = base_port + i;
-        pthread_mutex_init(&nodes[i].mutex, NULL);
+        platform_lock_init(&nodes[i].mutex);
         nodes[i].port = port;
 
         ASSERT_EQ(0, setup_node_tls(&nodes[i], i));
@@ -136,7 +132,7 @@ static bool quic_available(meridian_protocol_t* protocol) {
 TEST_F(MeridianIntegrationTest, StartNodes) {
     for (int i = 0; i < TEST_NODE_COUNT; i++) {
         uint16_t port = base_port + i;
-        pthread_mutex_init(&nodes[i].mutex, NULL);
+        platform_lock_init(&nodes[i].mutex);
         nodes[i].port = port;
 
         ASSERT_EQ(0, setup_node_tls(&nodes[i], i));
@@ -151,24 +147,18 @@ TEST_F(MeridianIntegrationTest, StartNodes) {
     }
 
     // Give nodes time to bind to ports
-    usleep(100000); // 100ms
+    platform_usleep(100000); // 100ms
 
     for (int i = 0; i < TEST_NODE_COUNT; i++) {
         EXPECT_EQ(MERIDIAN_PROTOCOL_STATE_BOOTSTRAPPING, nodes[i].protocol->state);
     }
 }
 
-// NOTE: QUIC connection tests are disabled because msquic global state is not
-// properly cleaned up between test fixtures. Multiple MsQuicOpen2/MsQuicClose
-// cycles within a single process corrupt the QUIC API table. These tests pass
-// in isolation but crash when run after other tests that started protocols.
-// Re-enable when msquic lifecycle is fixed or tests are forked.
-
-TEST_F(MeridianIntegrationTest, DISABLED_ConnectNodesInRing) {
+TEST_F(MeridianIntegrationTest, ConnectNodesInRing) {
     // Create and start all nodes first
     for (int i = 0; i < TEST_NODE_COUNT; i++) {
         uint16_t port = base_port + i;
-        pthread_mutex_init(&nodes[i].mutex, NULL);
+        platform_lock_init(&nodes[i].mutex);
         nodes[i].port = port;
 
         ASSERT_EQ(0, setup_node_tls(&nodes[i], i));
@@ -181,10 +171,10 @@ TEST_F(MeridianIntegrationTest, DISABLED_ConnectNodesInRing) {
         }
     }
 
-    usleep(100000); // 100ms
+    platform_usleep(100000); // 100ms
 
     // Connect nodes in a ring: 0 -> 1 -> 2 -> 0
-    in_addr_t addr = htonl(0x7F000001); // 127.0.0.1
+    uint32_t addr = htobe32(0x7F000001); // 127.0.0.1
 
     for (int i = 0; i < TEST_NODE_COUNT; i++) {
         uint16_t target_port = base_port + ((i + 1) % TEST_NODE_COUNT);
@@ -193,7 +183,7 @@ TEST_F(MeridianIntegrationTest, DISABLED_ConnectNodesInRing) {
     }
 
     // Give connections time to complete
-    usleep(200000); // 200ms
+    platform_usleep(200000); // 200ms
 
     // Verify peer counts (non-fatal — QUIC handshake may not have completed)
     for (int i = 0; i < TEST_NODE_COUNT; i++) {
@@ -204,11 +194,11 @@ TEST_F(MeridianIntegrationTest, DISABLED_ConnectNodesInRing) {
     }
 }
 
-TEST_F(MeridianIntegrationTest, DISABLED_FindClosestNode) {
+TEST_F(MeridianIntegrationTest, FindClosestNode) {
     // Create a simple network and verify closest node lookup
     for (int i = 0; i < TEST_NODE_COUNT; i++) {
         uint16_t port = base_port + i;
-        pthread_mutex_init(&nodes[i].mutex, NULL);
+        platform_lock_init(&nodes[i].mutex);
         nodes[i].port = port;
 
         ASSERT_EQ(0, setup_node_tls(&nodes[i], i));
@@ -221,24 +211,24 @@ TEST_F(MeridianIntegrationTest, DISABLED_FindClosestNode) {
         }
     }
 
-    usleep(100000);
+    platform_usleep(100000);
 
     // Add peers to node 0
-    in_addr_t addr = htonl(0x7F000001);
+    uint32_t addr = htobe32(0x7F000001);
     meridian_protocol_connect(nodes[0].protocol, addr, base_port + 1);
     meridian_protocol_connect(nodes[0].protocol, addr, base_port + 2);
 
     // Find closest should return one of the connected peers
     meridian_node_t* closest = meridian_protocol_find_closest(
-        nodes[0].protocol, htonl(0x7F000002), base_port + 1);
+        nodes[0].protocol, htobe32(0x7F000002), base_port + 1);
     (void)closest;
 }
 
-TEST_F(MeridianIntegrationTest, DISABLED_SendPacketBetweenNodes) {
+TEST_F(MeridianIntegrationTest, SendPacketBetweenNodes) {
     // Create two connected nodes
     for (int i = 0; i < 2; i++) {
         uint16_t port = base_port + i;
-        pthread_mutex_init(&nodes[i].mutex, NULL);
+        platform_lock_init(&nodes[i].mutex);
         nodes[i].port = port;
 
         ASSERT_EQ(0, setup_node_tls(&nodes[i], i));
@@ -251,13 +241,13 @@ TEST_F(MeridianIntegrationTest, DISABLED_SendPacketBetweenNodes) {
         }
     }
 
-    usleep(100000);
+    platform_usleep(100000);
 
     // Connect node 0 to node 1
-    in_addr_t addr = htonl(0x7F000001);
+    uint32_t addr = htobe32(0x7F000001);
     meridian_protocol_connect(nodes[0].protocol, addr, base_port + 1);
 
-    usleep(200000); // Wait for handshake
+    platform_usleep(200000); // Wait for handshake
 
     // Get peer and send a packet
     size_t num_peers = 0;
@@ -273,7 +263,7 @@ TEST_F(MeridianIntegrationTest, DISABLED_SendPacketBetweenNodes) {
 TEST_F(MeridianIntegrationTest, StopAndRestart) {
     // Create and start a node
     uint16_t port = base_port;
-    pthread_mutex_init(&nodes[0].mutex, NULL);
+    platform_lock_init(&nodes[0].mutex);
     nodes[0].port = port;
 
     ASSERT_EQ(0, setup_node_tls(&nodes[0], 0));
@@ -285,7 +275,7 @@ TEST_F(MeridianIntegrationTest, StopAndRestart) {
         GTEST_SKIP() << "QUIC stack unavailable";
     }
 
-    usleep(100000);
+    platform_usleep(100000);
     EXPECT_TRUE(nodes[0].protocol->running);
 
     // Stop the node
@@ -295,7 +285,7 @@ TEST_F(MeridianIntegrationTest, StopAndRestart) {
 
 TEST_F(MeridianIntegrationTest, AddSeedNodes) {
     uint16_t port = base_port;
-    pthread_mutex_init(&nodes[0].mutex, NULL);
+    platform_lock_init(&nodes[0].mutex);
     nodes[0].port = port;
 
     // No TLS needed for just adding seed nodes (no protocol start)
@@ -304,17 +294,17 @@ TEST_F(MeridianIntegrationTest, AddSeedNodes) {
     ASSERT_NE(nullptr, nodes[0].protocol);
 
     // Add seed nodes
-    EXPECT_EQ(0, meridian_protocol_add_seed_node(nodes[0].protocol, htonl(0xC0A80001), 8080));
-    EXPECT_EQ(0, meridian_protocol_add_seed_node(nodes[0].protocol, htonl(0xC0A80002), 8081));
+    EXPECT_EQ(0, meridian_protocol_add_seed_node(nodes[0].protocol, htobe32(0xC0A80001), 8080));
+    EXPECT_EQ(0, meridian_protocol_add_seed_node(nodes[0].protocol, htobe32(0xC0A80002), 8081));
 
     // Verify seed nodes are stored
     EXPECT_EQ(2, nodes[0].protocol->num_seed_nodes);
 }
 
-TEST_F(MeridianIntegrationTest, DISABLED_DisconnectNode) {
+TEST_F(MeridianIntegrationTest, DisconnectNode) {
     for (int i = 0; i < 2; i++) {
         uint16_t port = base_port + i;
-        pthread_mutex_init(&nodes[i].mutex, NULL);
+        platform_lock_init(&nodes[i].mutex);
         nodes[i].port = port;
 
         ASSERT_EQ(0, setup_node_tls(&nodes[i], i));
@@ -327,13 +317,13 @@ TEST_F(MeridianIntegrationTest, DISABLED_DisconnectNode) {
         }
     }
 
-    usleep(100000);
+    platform_usleep(100000);
 
     // Connect
-    in_addr_t addr = htonl(0x7F000001);
+    uint32_t addr = htobe32(0x7F000001);
     meridian_protocol_connect(nodes[0].protocol, addr, base_port + 1);
 
-    usleep(200000);
+    platform_usleep(200000);
 
     // Disconnect — may fail if connect didn't complete
     meridian_protocol_disconnect(nodes[0].protocol, addr, base_port + 1);
@@ -344,9 +334,9 @@ TEST_F(MeridianIntegrationTest, DISABLED_DisconnectNode) {
     // Peer count may not be 0 if disconnect didn't complete
 }
 
-TEST_F(MeridianIntegrationTest, DISABLED_GetLocalNodeInfo) {
+TEST_F(MeridianIntegrationTest, GetLocalNodeInfo) {
     uint16_t port = base_port;
-    pthread_mutex_init(&nodes[0].mutex, NULL);
+    platform_lock_init(&nodes[0].mutex);
     nodes[0].port = port;
 
     ASSERT_EQ(0, setup_node_tls(&nodes[0], 0));
@@ -358,7 +348,7 @@ TEST_F(MeridianIntegrationTest, DISABLED_GetLocalNodeInfo) {
         GTEST_SKIP() << "QUIC stack unavailable";
     }
 
-    usleep(100000);
+    platform_usleep(100000);
 
     uint32_t local_addr = 0;
     uint16_t local_port = 0;

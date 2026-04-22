@@ -3,6 +3,7 @@
 //
 
 #include "Network/Meridian/meridian_relay_server.h"
+#include "Network/Meridian/msquic_singleton.h"
 #include "Util/log.h"
 #include "Util/allocator.h"
 #include <stdio.h>
@@ -142,9 +143,9 @@ static int parse_options(int argc, char* argv[], relay_options_t* opts) {
 static int start_relay_server(const relay_options_t* opts) {
     if (opts == NULL) return -1;
 
-    // Initialize msquic
-    const struct QUIC_API_TABLE* msquic = NULL;
-    if (QUIC_FAILED(MsQuicOpen2(&msquic))) {
+    // Initialize msquic (process-wide singleton)
+    const struct QUIC_API_TABLE* msquic = poseidon_msquic_open();
+    if (msquic == NULL) {
         log_error("Failed to open msquic library");
         return -1;
     }
@@ -162,7 +163,7 @@ static int start_relay_server(const relay_options_t* opts) {
     g_server = meridian_relay_server_create(msquic, &config);
     if (g_server == NULL) {
         log_error("Failed to create relay server");
-        MsQuicClose(msquic);
+        poseidon_msquic_close();
         return -1;
     }
 
@@ -171,7 +172,7 @@ static int start_relay_server(const relay_options_t* opts) {
         log_error("Failed to start relay server on port %u", opts->port);
         meridian_relay_server_destroy(g_server);
         g_server = NULL;
-        MsQuicClose(msquic);
+        poseidon_msquic_close();
         return -1;
     }
 
@@ -253,6 +254,8 @@ int main(int argc, char* argv[]) {
         meridian_relay_server_destroy(g_server);
         g_server = NULL;
     }
+
+    poseidon_msquic_close();
 
     return EXIT_SUCCESS;
 }

@@ -96,6 +96,9 @@ int platform_core_count() {
 int platform_self() {
   return GetCurrentThreadId();
 }
+void platform_usleep(uint32_t microseconds) {
+  Sleep((microseconds + 999) / 1000);
+}
 #else
 void platform_lock(pthread_mutex_t* lock) {
   int result = pthread_mutex_lock(lock);
@@ -240,5 +243,8 @@ int platform_core_count() {
 }
 uint64_t platform_self() {
   return pthread_self();
+}
+void platform_usleep(uint32_t microseconds) {
+  usleep(microseconds);
 }
 #endif

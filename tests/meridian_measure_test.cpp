@@ -5,6 +5,7 @@
 #include <gtest/gtest.h>
 #include <string.h>
 #include "Network/Meridian/meridian_measure.h"
+#include "Util/threadding.h"
 
 class MeridianMeasureTest : public ::testing::Test {
 protected:
@@ -91,7 +92,7 @@ TEST_F(MeridianMeasureTest, MeasureRequestExpiry) {
     EXPECT_FALSE(meridian_measure_request_is_expired(req));
 
     // Simulate time passing - small timeout should expire quickly
-    usleep(20000); // 20ms
+    platform_usleep(20000); // 20ms
 
     EXPECT_TRUE(meridian_measure_request_is_expired(req));
 

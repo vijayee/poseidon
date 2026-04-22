@@ -206,23 +206,19 @@ void meridian_rendv_handle_destroy(meridian_rendv_handle_t* handle) {
         // Close and free all connections
         for (size_t i = 0; i < handle->connections.length; i++) {
             if (handle->connections.data[i]) {
-                if (handle->connections.data[i]->connection) {
-                    if (handle->msquic) {
-                        handle->msquic->ConnectionClose(handle->connections.data[i]->connection);
-                    }
+                if (handle->connections.data[i]->connection && handle->msquic) {
+                    handle->msquic->ConnectionShutdown(
+                        handle->connections.data[i]->connection,
+                        QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, 0);
+                    handle->msquic->ConnectionClose(handle->connections.data[i]->connection);
                 }
                 free(handle->connections.data[i]);
             }
         }
         vec_deinit(&handle->connections);
 
-        if (handle->configuration && handle->msquic) {
-            handle->msquic->ConfigurationClose(handle->configuration);
-        }
-
-        if (handle->registration && handle->msquic) {
-            handle->msquic->RegistrationClose(handle->registration);
-        }
+        // Do NOT close configuration/registration here — they are borrowed from
+        // the protocol. The protocol owns and closes them in stop/destroy.
 
         platform_lock_destroy(&handle->lock);
         free(handle);

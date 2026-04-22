@@ -4,6 +4,7 @@
 
 #include "../../Util/threadding.h"
 #include "meridian_protocol.h"
+#include "msquic_singleton.h"
 #include "../Quasar/quasar_route.h"
 #include "../../Util/allocator.h"
 #include "../../Util/vec.h"
@@ -113,6 +114,26 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol) {
             meridian_protocol_stop(protocol);
         }
 
+        // Safety: close any remaining connections not cleaned up by stop
+        if (protocol->msquic) {
+            for (size_t i = 0; i < protocol->num_connected_peers; i++) {
+                if (protocol->connected_peers[i]) {
+                    protocol->msquic->ConnectionShutdown(
+                        protocol->connected_peers[i],
+                        QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, 0);
+                    protocol->msquic->ConnectionClose(protocol->connected_peers[i]);
+                    protocol->connected_peers[i] = NULL;
+                }
+                if (protocol->peer_nodes[i]) {
+                    refcounter_dereference(&protocol->peer_nodes[i]->refcounter);
+                    if (refcounter_count(&protocol->peer_nodes[i]->refcounter) == 0) {
+                        free(protocol->peer_nodes[i]);
+                    }
+                }
+            }
+            protocol->num_connected_peers = 0;
+        }
+
         if (protocol->configuration) {
             protocol->msquic->ConfigurationClose(protocol->configuration);
             protocol->configuration = NULL;
@@ -124,7 +145,7 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol) {
         }
 
         if (protocol->msquic) {
-            MsQuicClose(protocol->msquic);
+            poseidon_msquic_close();
             protocol->msquic = NULL;
         }
 
@@ -154,18 +175,6 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol) {
             }
         }
 
-        for (size_t i = 0; i < protocol->num_connected_peers; i++) {
-            if (protocol->peer_nodes[i]) {
-                refcounter_dereference(&protocol->peer_nodes[i]->refcounter);
-                if (refcounter_count(&protocol->peer_nodes[i]->refcounter) == 0) {
-                    free(protocol->peer_nodes[i]);
-                }
-            }
-            if (protocol->connected_peers[i]) {
-                protocol->msquic->ConnectionClose(protocol->connected_peers[i]);
-            }
-        }
-
         if (protocol->gossip_handle) {
             meridian_gossip_handle_destroy(protocol->gossip_handle);
             protocol->gossip_handle = NULL;
@@ -186,9 +195,10 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
         return 0;
     }
 
-    // Open msquic library
+    // Open msquic library (process-wide singleton, reference-counted)
     QUIC_STATUS Status;
-    if (QUIC_FAILED(Status = MsQuicOpen2(&protocol->msquic))) {
+    protocol->msquic = poseidon_msquic_open();
+    if (protocol->msquic == NULL) {
         platform_unlock(&protocol->lock);
         return -1;
     }
@@ -200,7 +210,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
     };
 
     if (QUIC_FAILED(Status = protocol->msquic->RegistrationOpen(&RegConfig, &protocol->registration))) {
-        MsQuicClose(protocol->msquic);
+        poseidon_msquic_close();
         protocol->msquic = NULL;
         platform_unlock(&protocol->lock);
         return -1;
@@ -223,7 +233,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
             NULL,
             &protocol->configuration))) {
         protocol->msquic->RegistrationClose(protocol->registration);
-        MsQuicClose(protocol->msquic);
+        poseidon_msquic_close();
         protocol->msquic = NULL;
         protocol->registration = NULL;
         platform_unlock(&protocol->lock);
@@ -248,7 +258,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
             &CredConfig))) {
         protocol->msquic->ConfigurationClose(protocol->configuration);
         protocol->msquic->RegistrationClose(protocol->registration);
-        MsQuicClose(protocol->msquic);
+        poseidon_msquic_close();
         protocol->msquic = NULL;
         protocol->registration = NULL;
         protocol->configuration = NULL;
@@ -264,7 +274,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
             &protocol->listener))) {
         protocol->msquic->ConfigurationClose(protocol->configuration);
         protocol->msquic->RegistrationClose(protocol->registration);
-        MsQuicClose(protocol->msquic);
+        poseidon_msquic_close();
         protocol->msquic = NULL;
         protocol->registration = NULL;
         protocol->configuration = NULL;
@@ -291,7 +301,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
         protocol->msquic->ListenerClose(protocol->listener);
         protocol->msquic->ConfigurationClose(protocol->configuration);
         protocol->msquic->RegistrationClose(protocol->registration);
-        MsQuicClose(protocol->msquic);
+        poseidon_msquic_close();
         protocol->msquic = NULL;
         protocol->registration = NULL;
         protocol->configuration = NULL;
@@ -329,7 +339,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
         protocol->msquic->ListenerClose(protocol->listener);
         protocol->msquic->ConfigurationClose(protocol->configuration);
         protocol->msquic->RegistrationClose(protocol->registration);
-        MsQuicClose(protocol->msquic);
+        poseidon_msquic_close();
         protocol->msquic = NULL;
         protocol->registration = NULL;
         protocol->configuration = NULL;
@@ -362,21 +372,43 @@ int meridian_protocol_stop(meridian_protocol_t* protocol) {
         meridian_gossip_handle_stop(protocol->gossip_handle);
     }
 
-    // Shutdown all peer connections
+    // Shutdown and close all peer connections
     for (size_t i = 0; i < protocol->num_connected_peers; i++) {
         if (protocol->connected_peers[i]) {
             protocol->msquic->ConnectionShutdown(
                 protocol->connected_peers[i],
-                QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
+                QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT,
                 0);
+            protocol->msquic->ConnectionClose(protocol->connected_peers[i]);
+            protocol->connected_peers[i] = NULL;
+        }
+        if (protocol->peer_nodes[i]) {
+            refcounter_dereference(&protocol->peer_nodes[i]->refcounter);
+            if (refcounter_count(&protocol->peer_nodes[i]->refcounter) == 0) {
+                free(protocol->peer_nodes[i]);
+            }
+            protocol->peer_nodes[i] = NULL;
         }
     }
+    protocol->num_connected_peers = 0;
 
     // Stop and close listener
     if (protocol->listener) {
         protocol->msquic->ListenerStop(protocol->listener);
         protocol->msquic->ListenerClose(protocol->listener);
         protocol->listener = NULL;
+    }
+
+    // Close configuration and registration so msquic stops
+    // delivering callbacks for this protocol's handles
+    if (protocol->configuration) {
+        protocol->msquic->ConfigurationClose(protocol->configuration);
+        protocol->configuration = NULL;
+    }
+
+    if (protocol->registration) {
+        protocol->msquic->RegistrationClose(protocol->registration);
+        protocol->registration = NULL;
     }
 
     platform_unlock(&protocol->lock);
