@@ -112,6 +112,14 @@ set(POSEIDON_SOURCES
     ${CLIENT_LIBS_SRC_DIR}/poseidon_client.c
 )
 
+# Platform-specific transport stubs
+if(ANDROID)
+    list(APPEND POSEIDON_SOURCES ${CLIENT_APIS_SRC_DIR}/transport_binder.c)
+endif()
+if(APPLE)
+    list(APPEND POSEIDON_SOURCES ${CLIENT_APIS_SRC_DIR}/transport_xpc.c)
+endif()
+
 add_library(poseidon STATIC ${POSEIDON_SOURCES})
 
 target_include_directories(poseidon PUBLIC

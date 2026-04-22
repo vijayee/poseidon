@@ -128,6 +128,30 @@ poseidon_transport_t* poseidon_transport_ws_create(uint16_t port,
 poseidon_transport_t* poseidon_transport_quic_create(uint16_t port,
                                                       poseidon_channel_manager_t* manager);
 
+#ifdef __ANDROID__
+/**
+ * Creates an Android Binder transport.
+ *
+ * @param service_name  Binder service name
+ * @param manager       Shared channel manager
+ * @return              New transport, or NULL on failure
+ */
+poseidon_transport_t* poseidon_transport_binder_create(const char* service_name,
+                                                      poseidon_channel_manager_t* manager);
+#endif
+
+#ifdef __APPLE__
+/**
+ * Creates an iOS/macOS XPC transport.
+ *
+ * @param service_name  XPC service name
+ * @param manager       Shared channel manager
+ * @return              New transport, or NULL on failure
+ */
+poseidon_transport_t* poseidon_transport_xpc_create(const char* service_name,
+                                                    poseidon_channel_manager_t* manager);
+#endif
+
 /**
  * Destroys a transport. Stops the transport thread if running.
  *
