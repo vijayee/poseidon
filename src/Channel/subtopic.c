@@ -127,20 +127,32 @@ int subtopic_table_unsubscribe(subtopic_table_t* table, const char* path) {
 
 bool subtopic_table_is_subscribed(const subtopic_table_t* table, const char* path) {
     if (table == NULL || path == NULL) return false;
+    subtopic_table_t* mut = (subtopic_table_t*)table;
+    platform_lock(&mut->lock);
+    bool found = false;
     for (size_t i = 0; i < table->count; i++) {
-        if (strcmp(table->entries[i].path, path) == 0) return true;
+        if (strcmp(table->entries[i].path, path) == 0) {
+            found = true;
+            break;
+        }
     }
-    return false;
+    platform_unlock(&mut->lock);
+    return found;
 }
 
 bool subtopic_table_should_deliver(const subtopic_table_t* table, const char* message_subtopic) {
     if (table == NULL || message_subtopic == NULL) return false;
+    subtopic_table_t* mut = (subtopic_table_t*)table;
+    platform_lock(&mut->lock);
+    bool deliver = false;
     for (size_t i = 0; i < table->count; i++) {
         if (subtopic_matches(message_subtopic, table->entries[i].path)) {
-            return true;
+            deliver = true;
+            break;
         }
     }
-    return false;
+    platform_unlock(&mut->lock);
+    return deliver;
 }
 
 void subtopic_table_tick(subtopic_table_t* table) {
