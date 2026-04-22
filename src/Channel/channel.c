@@ -52,16 +52,21 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
     }
 
     poseidon_channel_t* channel = get_clear_memory(sizeof(poseidon_channel_t));
-    if (channel == NULL) return NULL;
+    if (channel == NULL) {
+        if (created_key_pair) poseidon_key_pair_destroy(key_pair);
+        return NULL;
+    }
 
     // Derive node_id from public key
     uint8_t* pub_key = NULL;
     size_t pub_key_len = 0;
     if (poseidon_key_pair_get_public_key(key_pair, &pub_key, &pub_key_len) != 0) {
+        if (created_key_pair) poseidon_key_pair_destroy(key_pair);
         free(channel);
         return NULL;
     }
     if (poseidon_node_id_from_public_key(pub_key, pub_key_len, &channel->node_id) != 0) {
+        if (created_key_pair) poseidon_key_pair_destroy(key_pair);
         free(pub_key);
         free(channel);
         return NULL;
@@ -75,6 +80,7 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
     snprintf(cert_path, sizeof(cert_path), "/tmp/poseidon_%s_cert.pem", channel->node_id.str);
     if (poseidon_key_pair_generate_tls_files(key_pair, channel->node_id.str,
                                               key_path, cert_path) != 0) {
+        if (created_key_pair) poseidon_key_pair_destroy(key_pair);
         free(channel);
         return NULL;
     }
@@ -101,6 +107,7 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
 
     channel->protocol = meridian_protocol_create(&proto_config);
     if (channel->protocol == NULL) {
+        if (created_key_pair) poseidon_key_pair_destroy(key_pair);
         unlink(key_path);
         unlink(cert_path);
         free(channel);
@@ -113,6 +120,7 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
                                      config->quasar_alpha,
                                      4096, 3);
     if (channel->quasar == NULL) {
+        if (created_key_pair) poseidon_key_pair_destroy(key_pair);
         meridian_protocol_destroy(channel->protocol);
         unlink(key_path);
         unlink(cert_path);
@@ -122,6 +130,7 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
 
     channel->subtopic_subs = subtopic_table_create(64);
     if (channel->subtopic_subs == NULL) {
+        if (created_key_pair) poseidon_key_pair_destroy(key_pair);
         quasar_destroy(channel->quasar);
         meridian_protocol_destroy(channel->protocol);
         unlink(key_path);
@@ -132,6 +141,7 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
 
     channel->aliases = topic_alias_registry_create(32);
     if (channel->aliases == NULL) {
+        if (created_key_pair) poseidon_key_pair_destroy(key_pair);
         subtopic_table_destroy(channel->subtopic_subs);
         quasar_destroy(channel->quasar);
         meridian_protocol_destroy(channel->protocol);
@@ -141,8 +151,12 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
         return NULL;
     }
 
-    // Take a reference on the key pair
-    channel->key_pair = REFERENCE(key_pair, poseidon_key_pair_t);
+    // Take a reference on the key pair (skip REFERENCE when we own it to avoid count=2 leak)
+    if (created_key_pair) {
+        channel->key_pair = key_pair;
+    } else {
+        channel->key_pair = REFERENCE(key_pair, poseidon_key_pair_t);
+    }
 
     channel->state = POSEIDON_CHANNEL_STATE_INIT;
     channel->listen_port = listen_port;
@@ -166,7 +180,7 @@ void poseidon_channel_destroy(poseidon_channel_t* channel) {
     if (refcounter_count((refcounter_t*)channel) == 0) {
         if (channel->quasar != NULL) quasar_destroy(channel->quasar);
         if (channel->protocol != NULL) meridian_protocol_destroy(channel->protocol);
-        if (channel->owns_key_pair && channel->key_pair != NULL) poseidon_key_pair_destroy(channel->key_pair);
+        if (channel->key_pair != NULL) poseidon_key_pair_destroy(channel->key_pair);
         if (channel->subtopic_subs != NULL) subtopic_table_destroy(channel->subtopic_subs);
         if (channel->aliases != NULL) topic_alias_registry_destroy(channel->aliases);
 
@@ -228,6 +242,14 @@ const char* poseidon_channel_get_topic(const poseidon_channel_t* channel) {
 static void channel_quasar_delivery_handler(void* ctx, const uint8_t* topic, size_t topic_len,
                                               const uint8_t* data, size_t data_len) {
     poseidon_channel_t* channel = (poseidon_channel_t*)ctx;
+
+    // Intercept callback handles protocol-level packets (e.g. bootstrap)
+    if (channel->intercept_cb != NULL) {
+        if (channel->intercept_cb(channel->intercept_ctx, data, data_len)) {
+            return;
+        }
+    }
+
     if (channel->delivery_cb == NULL) return;
 
     // Decode the channel message envelope to extract subtopic
@@ -308,6 +330,12 @@ int poseidon_channel_set_delivery_callback(poseidon_channel_t* channel,
     if (channel == NULL || channel->quasar == NULL) return -1;
     channel->delivery_cb = cb;
     channel->delivery_cb_ctx = ctx;
+    quasar_set_delivery_callback(channel->quasar, channel_quasar_delivery_handler, channel);
+    return 0;
+}
+
+int poseidon_channel_enable_quasar_delivery(poseidon_channel_t* channel) {
+    if (channel == NULL || channel->quasar == NULL) return -1;
     quasar_set_delivery_callback(channel->quasar, channel_quasar_delivery_handler, channel);
     return 0;
 }

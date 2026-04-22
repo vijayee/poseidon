@@ -63,6 +63,9 @@ typedef void (*poseidon_channel_delivery_cb_t)(void* ctx, const uint8_t* topic,
                                                 const char* subtopic,
                                                 const uint8_t* data, size_t data_len);
 
+/** Intercept callback: return true if packet was handled (skip normal delivery) */
+typedef bool (*poseidon_channel_intercept_cb_t)(void* ctx, const uint8_t* data, size_t data_len);
+
 typedef struct poseidon_channel_t {
     refcounter_t refcounter;
     poseidon_channel_state_t state;
@@ -79,6 +82,8 @@ typedef struct poseidon_channel_t {
     topic_alias_registry_t* aliases;     /**< Human-readable name → Base58 ID map */
     poseidon_channel_delivery_cb_t delivery_cb;
     void* delivery_cb_ctx;
+    poseidon_channel_intercept_cb_t intercept_cb;  /**< Intercepts Quasar deliveries (e.g. bootstrap) */
+    void* intercept_ctx;
     PLATFORMLOCKTYPE(lock);
 } poseidon_channel_t;
 
@@ -136,6 +141,9 @@ int poseidon_channel_publish_subtopic(poseidon_channel_t* channel,
 
 int poseidon_channel_set_delivery_callback(poseidon_channel_t* channel,
                                             poseidon_channel_delivery_cb_t cb, void* ctx);
+
+/** Enables Quasar delivery on a channel without setting an application callback. */
+int poseidon_channel_enable_quasar_delivery(poseidon_channel_t* channel);
 
 // ============================================================================
 // SUBTOPIC OPERATIONS

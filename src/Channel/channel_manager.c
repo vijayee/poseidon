@@ -7,9 +7,59 @@
 #include "../Util/threadding.h"
 #include "../Crypto/key_pair.h"
 #include "../Network/Meridian/meridian_packet.h"
+#include "../Network/Meridian/meridian_protocol.h"
 #include <string.h>
 #include <cbor.h>
 #include <time.h>
+
+// ============================================================================
+// BOOTSTRAP INTERCEPT
+// ============================================================================
+
+static bool channel_manager_bootstrap_intercept(void* ctx, const uint8_t* data, size_t data_len) {
+    poseidon_channel_manager_t* mgr = (poseidon_channel_manager_t*)ctx;
+
+    struct cbor_load_result result;
+    cbor_item_t* item = cbor_load(data, data_len, &result);
+    if (item == NULL || !cbor_array_is_definite(item) || cbor_array_size(item) < 1) {
+        if (item != NULL) cbor_decref(&item);
+        return false;
+    }
+
+    cbor_item_t** items = cbor_array_handle(item);
+    if (!cbor_isa_uint(items[0])) {
+        cbor_decref(&item);
+        return false;
+    }
+
+    uint8_t pkt_type = cbor_get_uint8(items[0]);
+    bool handled = false;
+
+    if (pkt_type == MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP) {
+        char topic_id[64], sender_node_id[64];
+        uint64_t ts;
+        if (meridian_channel_bootstrap_decode(item, topic_id, sizeof(topic_id),
+                                               sender_node_id, sizeof(sender_node_id), &ts) == 0) {
+            poseidon_channel_manager_handle_bootstrap_request(mgr, topic_id, sender_node_id);
+            handled = true;
+        }
+    } else if (pkt_type == MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP_REPLY) {
+        char topic_id[64], responder_node_id[64];
+        uint32_t addr; uint16_t port; uint64_t ts;
+        uint32_t seed_addrs[16]; uint16_t seed_ports[16]; size_t num_seeds;
+        if (meridian_channel_bootstrap_reply_decode(item, topic_id, sizeof(topic_id),
+                                                      responder_node_id, sizeof(responder_node_id),
+                                                      &addr, &port, &ts,
+                                                      seed_addrs, seed_ports, &num_seeds, 16) == 0) {
+            poseidon_channel_manager_handle_bootstrap_reply(
+                mgr, topic_id, addr, port, ts, seed_addrs, seed_ports, num_seeds);
+            handled = true;
+        }
+    }
+
+    cbor_decref(&item);
+    return handled;
+}
 
 // ============================================================================
 // LIFECYCLE
@@ -44,6 +94,11 @@ poseidon_channel_manager_t* poseidon_channel_manager_create(
         return NULL;
     }
     mgr->dial_channel->is_dial = true;
+
+    // Wire intercept + delivery so bootstrap packets delivered via Quasar are dispatched
+    mgr->dial_channel->intercept_cb = channel_manager_bootstrap_intercept;
+    mgr->dial_channel->intercept_ctx = mgr;
+    poseidon_channel_enable_quasar_delivery(mgr->dial_channel);
 
     platform_lock_init(&mgr->lock);
     refcounter_init((refcounter_t*)mgr);
@@ -163,11 +218,13 @@ poseidon_channel_t* poseidon_channel_manager_join_channel(
     pending->num_replies = 0;
     mgr->num_pending_bootstraps++;
 
-    // Subscribe to the topic on the dial channel
+    mgr->channels[mgr->num_channels++] = channel;
+    platform_unlock(&mgr->lock);
+
+    // I/O operations outside lock to avoid deadlock with Quasar delivery callbacks
     poseidon_channel_subscribe(mgr->dial_channel,
                                 (const uint8_t*)topic_str, strlen(topic_str), 300);
 
-    // Publish a CHANNEL_BOOTSTRAP packet via Quasar on the dial channel
     const char* sender_node_id = poseidon_channel_get_topic(mgr->dial_channel);
     cbor_item_t* bootstrap = meridian_channel_bootstrap_encode(topic_str, sender_node_id, timestamp_us);
     if (bootstrap != NULL) {
@@ -183,8 +240,6 @@ poseidon_channel_t* poseidon_channel_manager_join_channel(
         }
     }
 
-    mgr->channels[mgr->num_channels++] = channel;
-    platform_unlock(&mgr->lock);
     return channel;
 }
 
@@ -239,6 +294,9 @@ int poseidon_channel_manager_handle_bootstrap_reply(
     size_t num_seeds) {
     if (mgr == NULL || topic_id == NULL) return -1;
 
+    meridian_protocol_t* protocol = NULL;
+    bool first_reply = false;
+
     platform_lock(&mgr->lock);
 
     pending_bootstrap_t* pending = NULL;
@@ -264,17 +322,11 @@ int poseidon_channel_manager_handle_bootstrap_reply(
         pending->num_replies++;
     }
 
-    // On first reply: connect, add seeds, transition to RUNNING, remove pending
+    // On first reply: transition to RUNNING, remove pending, defer I/O
     if (pending->num_replies == 1) {
-        meridian_protocol_connect(pending->channel->protocol, responder_addr, responder_port);
-
-        size_t seeds_to_add = num_seeds;
-        if (seeds_to_add > 16) seeds_to_add = 16;
-        for (size_t i = 0; i < seeds_to_add; i++) {
-            meridian_protocol_add_seed_node(pending->channel->protocol, seed_addrs[i], seed_ports[i]);
-        }
-
+        protocol = pending->channel->protocol;
         pending->channel->state = POSEIDON_CHANNEL_STATE_RUNNING;
+        first_reply = true;
 
         // Remove pending entry by shifting array
         for (size_t i = pending_index; i + 1 < mgr->num_pending_bootstraps; i++) {
@@ -285,6 +337,18 @@ int poseidon_channel_manager_handle_bootstrap_reply(
     }
 
     platform_unlock(&mgr->lock);
+
+    // I/O operations outside lock
+    if (first_reply && protocol != NULL) {
+        meridian_protocol_connect(protocol, responder_addr, responder_port);
+
+        size_t seeds_to_add = num_seeds;
+        if (seeds_to_add > 16) seeds_to_add = 16;
+        for (size_t i = 0; i < seeds_to_add; i++) {
+            meridian_protocol_add_seed_node(protocol, seed_addrs[i], seed_ports[i]);
+        }
+    }
+
     return 0;
 }
 
@@ -313,12 +377,16 @@ int poseidon_channel_manager_handle_bootstrap_request(
         return -1;
     }
 
-    // Build and publish a BOOTSTRAP_REPLY
+    // Collect info needed for reply while locked
     const char* responder_node_id = poseidon_channel_get_topic(mgr->dial_channel);
     uint32_t responder_addr = 0;
     uint16_t responder_port = 0;
     meridian_protocol_get_local_node(mgr->dial_channel->protocol, &responder_addr, &responder_port);
+    poseidon_channel_t* dial_channel = mgr->dial_channel;
 
+    platform_unlock(&mgr->lock);
+
+    // Build and publish a BOOTSTRAP_REPLY outside lock
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     uint64_t timestamp_us = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
@@ -334,7 +402,7 @@ int poseidon_channel_manager_handle_bootstrap_request(
         size_t written = cbor_serialize_alloc(reply, &buf, &buf_len);
         cbor_decref(&reply);
         if (written > 0 && buf != NULL) {
-            rc = poseidon_channel_publish(mgr->dial_channel,
+            rc = poseidon_channel_publish(dial_channel,
                                            (const uint8_t*)topic_id, strlen(topic_id),
                                            buf, written);
             free(buf);
@@ -345,7 +413,6 @@ int poseidon_channel_manager_handle_bootstrap_request(
         rc = -1;
     }
 
-    platform_unlock(&mgr->lock);
     return rc;
 }
 
