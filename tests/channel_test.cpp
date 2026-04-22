@@ -283,6 +283,69 @@ TEST_F(ChannelGossipTest, GossipCallsPropagate) {
     quasar_destroy(q);
 }
 
+// ============================================================================
+// SUBTOPIC TABLE TESTS
+// ============================================================================
+
+TEST(SubtopicTableTest, CreateDestroy) {
+    subtopic_table_t* table = subtopic_table_create(16);
+    ASSERT_NE(nullptr, table);
+    subtopic_table_destroy(table);
+}
+
+TEST(SubtopicTableTest, AddAndCheckSubscription) {
+    subtopic_table_t* table = subtopic_table_create(16);
+    ASSERT_NE(nullptr, table);
+
+    EXPECT_EQ(0, subtopic_table_subscribe(table, "Feeds/friend-only", 1));
+    EXPECT_TRUE(subtopic_table_is_subscribed(table, "Feeds/friend-only"));
+    EXPECT_FALSE(subtopic_table_is_subscribed(table, "Feeds/public"));
+
+    subtopic_table_destroy(table);
+}
+
+TEST(SubtopicTableTest, UnsubscribeRemovesEntry) {
+    subtopic_table_t* table = subtopic_table_create(16);
+    ASSERT_NE(nullptr, table);
+
+    subtopic_table_subscribe(table, "Feeds", 100);
+    EXPECT_TRUE(subtopic_table_is_subscribed(table, "Feeds"));
+    EXPECT_EQ(0, subtopic_table_unsubscribe(table, "Feeds"));
+    EXPECT_FALSE(subtopic_table_is_subscribed(table, "Feeds"));
+
+    subtopic_table_destroy(table);
+}
+
+TEST(SubtopicTableTest, ShouldDeliverMatchesPrefix) {
+    subtopic_table_t* table = subtopic_table_create(16);
+    ASSERT_NE(nullptr, table);
+
+    // Subscribe to "Feeds" (prefix) and "Posts/private" (exact)
+    subtopic_table_subscribe(table, "Feeds", 100);
+    subtopic_table_subscribe(table, "Posts/private", 100);
+
+    // "Feeds" subscription matches any "Feeds/*" message
+    EXPECT_TRUE(subtopic_table_should_deliver(table, "Feeds/friend-only"));
+    EXPECT_TRUE(subtopic_table_should_deliver(table, "Feeds"));
+    EXPECT_TRUE(subtopic_table_should_deliver(table, "Posts/private"));
+    EXPECT_FALSE(subtopic_table_should_deliver(table, "Posts/public"));
+
+    subtopic_table_destroy(table);
+}
+
+TEST(SubtopicTableTest, TickExpiresSubscriptions) {
+    subtopic_table_t* table = subtopic_table_create(16);
+    ASSERT_NE(nullptr, table);
+
+    subtopic_table_subscribe(table, "Feeds", 1);
+    EXPECT_TRUE(subtopic_table_is_subscribed(table, "Feeds"));
+
+    subtopic_table_tick(table);
+    EXPECT_FALSE(subtopic_table_is_subscribed(table, "Feeds"));
+
+    subtopic_table_destroy(table);
+}
+
 TEST_F(ChannelGossipTest, TickExpiresSubscriptions) {
     // Create a quasar directly (channel creation requires msquic work pool),
     // subscribe with TTL=1, tick once, verify the subscription expires.
