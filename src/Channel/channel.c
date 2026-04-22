@@ -94,6 +94,8 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
 
     channel->protocol = meridian_protocol_create(&proto_config);
     if (channel->protocol == NULL) {
+        unlink(key_path);
+        unlink(cert_path);
         free(channel);
         return NULL;
     }
@@ -105,6 +107,8 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
                                      4096, 3);
     if (channel->quasar == NULL) {
         meridian_protocol_destroy(channel->protocol);
+        unlink(key_path);
+        unlink(cert_path);
         free(channel);
         return NULL;
     }
@@ -113,6 +117,8 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
     if (channel->subtopic_subs == NULL) {
         quasar_destroy(channel->quasar);
         meridian_protocol_destroy(channel->protocol);
+        unlink(key_path);
+        unlink(cert_path);
         free(channel);
         return NULL;
     }
@@ -122,6 +128,8 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
         subtopic_table_destroy(channel->subtopic_subs);
         quasar_destroy(channel->quasar);
         meridian_protocol_destroy(channel->protocol);
+        unlink(key_path);
+        unlink(cert_path);
         free(channel);
         return NULL;
     }

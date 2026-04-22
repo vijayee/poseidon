@@ -55,14 +55,14 @@ int channel_message_decode(const cbor_item_t* item,
     if (!cbor_isa_string(items[0])) return -1;
     size_t st_len = cbor_string_length(items[0]);
     if (st_len >= subtopic_buf_size) return -1;
-    memcpy(out_subtopic, cbor_string_handle(items[0]), st_len);
+    if (st_len > 0) memcpy(out_subtopic, cbor_string_handle(items[0]), st_len);
     out_subtopic[st_len] = '\0';
 
     // items[1]: data bytestring
     if (!cbor_isa_bytestring(items[1])) return -1;
     size_t d_len = cbor_bytestring_length(items[1]);
     if (d_len > data_buf_size) return -1;
-    memcpy(out_data, cbor_bytestring_handle(items[1]), d_len);
+    if (d_len > 0) memcpy(out_data, cbor_bytestring_handle(items[1]), d_len);
     *out_data_len = d_len;
 
     return 0;

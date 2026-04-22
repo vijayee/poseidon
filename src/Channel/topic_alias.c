@@ -72,10 +72,15 @@ int topic_alias_unregister(topic_alias_registry_t* reg, const char* name) {
 const char* topic_alias_resolve(const topic_alias_registry_t* reg, const char* name) {
     if (reg == NULL || name == NULL) return NULL;
 
+    topic_alias_registry_t* mut = (topic_alias_registry_t*)reg;
+    platform_lock(&mut->lock);
+    const char* result = NULL;
     for (size_t i = 0; i < reg->count; i++) {
         if (strcmp(reg->entries[i].name, name) == 0) {
-            return reg->entries[i].topic;
+            result = reg->entries[i].topic;
+            break;
         }
     }
-    return NULL;
+    platform_unlock(&mut->lock);
+    return result;
 }
