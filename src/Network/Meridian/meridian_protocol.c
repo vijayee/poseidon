@@ -402,6 +402,7 @@ int meridian_protocol_add_seed_node(meridian_protocol_t* protocol,
 int meridian_protocol_connect(meridian_protocol_t* protocol,
                                uint32_t addr, uint16_t port) {
     if (protocol == NULL) return -1;
+    if (!protocol->running) return -1;
     if (protocol->num_connected_peers >= 64) return -1;
 
     // Check if already connected
@@ -472,6 +473,7 @@ int meridian_protocol_connect(meridian_protocol_t* protocol,
 int meridian_protocol_disconnect(meridian_protocol_t* protocol,
                                   uint32_t addr, uint16_t port) {
     if (protocol == NULL) return -1;
+    if (!protocol->running) return -1;
 
     platform_lock(&protocol->lock);
     for (size_t i = 0; i < protocol->num_connected_peers; i++) {
@@ -516,6 +518,7 @@ int meridian_protocol_send_packet(meridian_protocol_t* protocol,
                                    const uint8_t* data, size_t len,
                                    const meridian_node_t* target) {
     if (protocol == NULL || data == NULL || target == NULL) return -1;
+    if (!protocol->running) return -1;
 
     // Find connection for target
     HQUIC Connection = NULL;
@@ -805,6 +808,7 @@ int meridian_protocol_set_callbacks(meridian_protocol_t* protocol,
 int meridian_protocol_get_local_node(meridian_protocol_t* protocol,
                                       uint32_t* addr, uint16_t* port) {
     if (protocol == NULL) return -1;
+    if (!protocol->running) return -1;
 
     if (addr) *addr = protocol->local_addr.sin_addr.s_addr;
     if (port) *port = ntohs(protocol->local_addr.sin_port);
