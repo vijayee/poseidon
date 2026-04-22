@@ -43,6 +43,7 @@ set(BLOOM_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Bloom)
 set(QUASAR_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Network/Quasar)
 set(CRYPTO_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Crypto)
 set(CHANNEL_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Channel)
+set(CLIENT_APIS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/ClientAPIs)
 
 # Poseidon Library
 set(POSEIDON_SOURCES
@@ -96,6 +97,8 @@ set(POSEIDON_SOURCES
     ${CHANNEL_SRC_DIR}/channel_message.c
     ${CHANNEL_SRC_DIR}/topic_alias.c
     ${CHANNEL_SRC_DIR}/topic_id.c
+    ${CLIENT_APIS_SRC_DIR}/client_protocol.c
+    ${CLIENT_APIS_SRC_DIR}/client_session.c
 )
 
 add_library(poseidon STATIC ${POSEIDON_SOURCES})
@@ -195,3 +198,7 @@ add_meridian_test(pki_test tests/pki_test.cpp)
 add_meridian_test(channel_test tests/channel_test.cpp)
 add_meridian_test(channel_bootstrap_test tests/channel_bootstrap_test.cpp)
 add_meridian_test(topic_id_test tests/topic_id_test.cpp)
+
+# ClientAPI Tests
+add_meridian_test(client_protocol_test tests/client_protocol_test.cpp)
+add_meridian_test(client_session_test tests/client_session_test.cpp)
