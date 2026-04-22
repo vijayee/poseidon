@@ -128,6 +128,10 @@ int poseidon_channel_unsubscribe(poseidon_channel_t* channel,
 int poseidon_channel_publish(poseidon_channel_t* channel,
                               const uint8_t* topic, size_t topic_len,
                               const uint8_t* data, size_t data_len);
+int poseidon_channel_publish_subtopic(poseidon_channel_t* channel,
+                                       const uint8_t* topic, size_t topic_len,
+                                       const char* subtopic,
+                                       const uint8_t* data, size_t data_len);
 
 int poseidon_channel_set_delivery_callback(poseidon_channel_t* channel,
                                             poseidon_channel_delivery_cb_t cb, void* ctx);

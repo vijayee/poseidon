@@ -264,6 +264,29 @@ int poseidon_channel_publish(poseidon_channel_t* channel,
     return quasar_publish(channel->quasar, topic, topic_len, data, data_len);
 }
 
+int poseidon_channel_publish_subtopic(poseidon_channel_t* channel,
+                                       const uint8_t* topic, size_t topic_len,
+                                       const char* subtopic,
+                                       const uint8_t* data, size_t data_len) {
+    if (channel == NULL || channel->quasar == NULL || subtopic == NULL) return -1;
+
+    // Wrap data in channel message envelope
+    cbor_item_t* msg = channel_message_encode(
+        (const uint8_t*)subtopic, strlen(subtopic), data, data_len);
+    if (msg == NULL) return -1;
+
+    unsigned char* buf = NULL;
+    size_t buf_len = 0;
+    size_t written = cbor_serialize_alloc(msg, &buf, &buf_len);
+    cbor_decref(&msg);
+
+    if (written == 0 || buf == NULL) return -1;
+
+    int rc = quasar_publish(channel->quasar, topic, topic_len, buf, written);
+    free(buf);
+    return rc;
+}
+
 int poseidon_channel_set_delivery_callback(poseidon_channel_t* channel,
                                             poseidon_channel_delivery_cb_t cb, void* ctx) {
     if (channel == NULL || channel->quasar == NULL) return -1;

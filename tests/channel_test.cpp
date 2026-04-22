@@ -470,6 +470,46 @@ TEST(ChannelMessageTest, NullInputsRejected) {
     EXPECT_EQ(-1, channel_message_decode(NULL, NULL, 0, NULL, 0, NULL));
 }
 
+TEST(ChannelPublishTest, PublishWrapsInSubtopicEnvelope) {
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    ASSERT_NE(nullptr, q);
+
+    const uint8_t* topic = (const uint8_t*)"chan_topic";
+    EXPECT_EQ(0, quasar_subscribe(q, topic, strlen("chan_topic"), 100));
+
+    // Create a channel message envelope manually and verify round-trip
+    const char* subtopic = "Feeds/public";
+    const uint8_t payload[] = {0xDE, 0xAD, 0xBE, 0xEF};
+
+    cbor_item_t* msg = channel_message_encode(
+        (const uint8_t*)subtopic, strlen(subtopic), payload, sizeof(payload));
+    ASSERT_NE(nullptr, msg);
+
+    // Serialize
+    unsigned char* buf = NULL;
+    size_t buf_len = 0;
+    size_t written = cbor_serialize_alloc(msg, &buf, &buf_len);
+    cbor_decref(&msg);
+    ASSERT_GT(written, 0u);
+
+    // Verify round-trip
+    struct cbor_load_result result;
+    cbor_item_t* loaded = cbor_load(buf, written, &result);
+    ASSERT_NE(nullptr, loaded);
+
+    char out_subtopic[256] = {0};
+    uint8_t out_data[256] = {0};
+    size_t out_data_len = 0;
+    EXPECT_EQ(0, channel_message_decode(loaded, out_subtopic, sizeof(out_subtopic),
+                                        out_data, sizeof(out_data), &out_data_len));
+    EXPECT_STREQ("Feeds/public", out_subtopic);
+    EXPECT_EQ(sizeof(payload), out_data_len);
+
+    cbor_decref(&loaded);
+    free(buf);
+    quasar_destroy(q);
+}
+
 // ============================================================================
 // CHANNEL SUBTOPIC TESTS
 // ============================================================================
