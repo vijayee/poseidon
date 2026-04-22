@@ -32,14 +32,6 @@ int topic_alias_register(topic_alias_registry_t* reg, const char* name, const ch
 
     platform_lock(&reg->lock);
 
-    // Check for duplicate
-    for (size_t i = 0; i < reg->count; i++) {
-        if (strcmp(reg->entries[i].name, name) == 0) {
-            platform_unlock(&reg->lock);
-            return -1;
-        }
-    }
-
     if (reg->count >= reg->capacity) {
         platform_unlock(&reg->lock);
         return -1;
@@ -83,4 +75,39 @@ const char* topic_alias_resolve(const topic_alias_registry_t* reg, const char* n
     }
     platform_unlock(&mut->lock);
     return result;
+}
+
+int topic_alias_resolve_ex(topic_alias_registry_t* reg, const char* name,
+                            topic_alias_resolve_out_t* out) {
+    if (reg == NULL || name == NULL || out == NULL) return -1;
+    memset(out, 0, sizeof(*out));
+
+    platform_lock(&reg->lock);
+
+    size_t match_count = 0;
+    for (size_t i = 0; i < reg->count; i++) {
+        if (strcmp(reg->entries[i].name, name) == 0) {
+            if (match_count == 0) {
+                strncpy(out->topic, reg->entries[i].topic, TOPIC_ALIAS_MAX_TOPIC - 1);
+                out->topic[TOPIC_ALIAS_MAX_TOPIC - 1] = '\0';
+            }
+            if (match_count < TOPIC_ALIAS_MAX_CANDIDATES) {
+                out->candidates[match_count] = reg->entries[i].topic;
+            }
+            match_count++;
+        }
+    }
+
+    platform_unlock(&reg->lock);
+
+    out->num_candidates = match_count;
+    if (match_count == 0) {
+        out->status = TOPIC_ALIAS_RESOLVE_NOT_FOUND;
+    } else if (match_count == 1) {
+        out->status = TOPIC_ALIAS_RESOLVE_OK;
+    } else {
+        out->status = TOPIC_ALIAS_RESOLVE_AMBIGUOUS;
+    }
+
+    return 0;
 }

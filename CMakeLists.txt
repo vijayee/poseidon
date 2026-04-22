@@ -95,6 +95,7 @@ set(POSEIDON_SOURCES
     ${CHANNEL_SRC_DIR}/subtopic.c
     ${CHANNEL_SRC_DIR}/channel_message.c
     ${CHANNEL_SRC_DIR}/topic_alias.c
+    ${CHANNEL_SRC_DIR}/topic_id.c
 )
 
 add_library(poseidon STATIC ${POSEIDON_SOURCES})
@@ -193,3 +194,4 @@ add_meridian_test(pki_test tests/pki_test.cpp)
 # Channel Tests
 add_meridian_test(channel_test tests/channel_test.cpp)
 add_meridian_test(channel_bootstrap_test tests/channel_bootstrap_test.cpp)
+add_meridian_test(topic_id_test tests/topic_id_test.cpp)

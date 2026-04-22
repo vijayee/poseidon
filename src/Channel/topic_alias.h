@@ -30,6 +30,24 @@ int topic_alias_register(topic_alias_registry_t* reg, const char* name, const ch
 int topic_alias_unregister(topic_alias_registry_t* reg, const char* name);
 const char* topic_alias_resolve(const topic_alias_registry_t* reg, const char* name);
 
+typedef enum {
+    TOPIC_ALIAS_RESOLVE_OK,
+    TOPIC_ALIAS_RESOLVE_AMBIGUOUS,
+    TOPIC_ALIAS_RESOLVE_NOT_FOUND
+} topic_alias_resolve_result_t;
+
+#define TOPIC_ALIAS_MAX_CANDIDATES 8
+
+typedef struct topic_alias_resolve_out_t {
+    topic_alias_resolve_result_t status;
+    char topic[TOPIC_ALIAS_MAX_TOPIC];             // Valid if OK
+    char* candidates[TOPIC_ALIAS_MAX_CANDIDATES];   // Valid if AMBIGUOUS
+    size_t num_candidates;
+} topic_alias_resolve_out_t;
+
+int topic_alias_resolve_ex(topic_alias_registry_t* reg, const char* name,
+                            topic_alias_resolve_out_t* out);
+
 #ifdef __cplusplus
 }
 #endif

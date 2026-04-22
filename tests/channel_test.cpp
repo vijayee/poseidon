@@ -45,15 +45,15 @@ TEST(TopicAliasTest, UnknownAliasReturnsNull) {
     topic_alias_registry_destroy(reg);
 }
 
-TEST(TopicAliasTest, DuplicateAliasRejected) {
+TEST(TopicAliasTest, DuplicateAliasAllowed) {
     topic_alias_registry_t* reg = topic_alias_registry_create(16);
     ASSERT_NE(nullptr, reg);
 
     EXPECT_EQ(0, topic_alias_register(reg, "Alice", "X4jKL9abc"));
-    // Duplicate alias with different target should fail
-    EXPECT_EQ(-1, topic_alias_register(reg, "Alice", "Y7mNP2def"));
+    // Duplicate alias with different target is now allowed
+    EXPECT_EQ(0, topic_alias_register(reg, "Alice", "Y7mNP2def"));
 
-    // Original should still resolve
+    // Original should still resolve via legacy resolve
     const char* resolved = topic_alias_resolve(reg, "Alice");
     EXPECT_STREQ("X4jKL9abc", resolved);
 
