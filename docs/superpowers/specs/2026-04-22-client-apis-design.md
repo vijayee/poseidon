@@ -422,14 +422,17 @@ void poseidon_client_on_event(poseidon_client_t* client,
 
 Transport URL format: `"unix:///var/run/poseidond.sock"`, `"tcp://127.0.0.1:9090"`, `"ws://127.0.0.1:9091"`, `"quic://127.0.0.1:9092"`, `"binder:poseidon"`, `"xpc:poseidon"`.
 
-### Android client library (Kotlin)
+### Android client library (Kotlin + Java interop)
 
 ```
 src/client_libs/android/
     PoseidonClient.kt
+    PoseidonConnection.kt
 ```
 
-Uses Android Binder for IPC. Connects to the daemon's Binder service. Wraps the same method surface as the C library in idiomatic Kotlin:
+Uses Android Binder for IPC. Connects to the daemon's Binder service. Provides two API styles:
+
+**Kotlin-native API** — coroutine-based, idiomatic for Kotlin apps:
 
 ```kotlin
 class PoseidonClient(private val connection: PoseidonConnection) {
@@ -448,14 +451,37 @@ class PoseidonClient(private val connection: PoseidonConnection) {
 }
 ```
 
-### iOS client library (Swift)
+**Java-compatible API** — blocking wrappers that Java code can call without coroutines. These are generated alongside the Kotlin API and delegate to the coroutine versions via `runBlocking`:
+
+```kotlin
+// Java-friendly blocking wrappers (also callable from Kotlin)
+class PoseidonClientJava(private val client: PoseidonClient) {
+    fun createChannelBlocking(name: String): String
+    fun joinChannelBlocking(topicOrAlias: String): String
+    fun leaveChannelBlocking(topicId: String)
+    fun destroyChannelBlocking(topicId: String, ownerKey: PrivateKey)
+    fun modifyChannelBlocking(topicId: String, config: ChannelConfig, ownerKey: PrivateKey)
+    fun subscribeBlocking(topicPath: String)
+    fun unsubscribeBlocking(topicPath: String)
+    fun publishBlocking(topicPath: String, data: ByteArray)
+    fun registerAliasBlocking(name: String, topicId: String)
+    fun unregisterAliasBlocking(name: String)
+}
+```
+
+Both APIs share the same underlying `PoseidonConnection` and CBOR protocol. The `PoseidonClientJava` class is a thin wrapper — it simply calls the suspend functions inside `runBlocking { }`. Java developers use `PoseidonClientJava` directly; Kotlin developers use `PoseidonClient`.
+
+### iOS client library (Swift + Objective-C interop)
 
 ```
 src/client_libs/swift/
     PoseidonClient.swift
+    PoseidonConnection.swift
 ```
 
-Uses XPC for IPC. Same method surface, idiomatic Swift:
+Uses XPC for IPC. Provides two API styles:
+
+**Swift-native API** — async/await, idiomatic for Swift apps:
 
 ```swift
 class PoseidonClient {
@@ -473,6 +499,28 @@ class PoseidonClient {
     func onDelivery(_ handler: @escaping (String, String, Data) -> Void)
 }
 ```
+
+**Objective-C-compatible API** — completion-handler wrappers marked `@objc` for Objective-C callers. Swift's `async throws` functions cannot cross the ObjC bridge directly, so these wrappers translate to/from completion handlers:
+
+```swift
+@objcMembers
+class PoseidonClientObjC: NSObject {
+    private let client: PoseidonClient
+
+    func createChannel(name: String, completion: @escaping (String?, Error?) -> Void)
+    func joinChannel(topicOrAlias: String, completion: @escaping (String?, Error?) -> Void)
+    func leaveChannel(topicId: String, completion: @escaping (Error?) -> Void)
+    func destroyChannel(topicId: String, ownerKey: PrivateKey, completion: @escaping (Error?) -> Void)
+    func modifyChannel(topicId: String, config: ChannelConfig, ownerKey: PrivateKey, completion: @escaping (Error?) -> Void)
+    func subscribe(topicPath: String, completion: @escaping (Error?) -> Void)
+    func unsubscribe(topicPath: String, completion: @escaping (Error?) -> Void)
+    func publish(topicPath: String, data: Data, completion: @escaping (Error?) -> Void)
+    func registerAlias(name: String, topicId: String, completion: @escaping (Error?) -> Void)
+    func unregisterAlias(name: String, completion: @escaping (Error?) -> Void)
+}
+```
+
+Both APIs share the same `PoseidonConnection` and XPC protocol. The `PoseidonClientObjC` class wraps each async call with `Task { }` and dispatches results to the completion handler on the main queue. Objective-C developers use `PoseidonClientObjC`; Swift developers use `PoseidonClient`.
 
 ## 8. Directory Structure
 
@@ -495,10 +543,12 @@ src/
       poseidon_client.h
       poseidon_client.c
     android/
-      PoseidonClient.kt
+      PoseidonClient.kt         # Kotlin coroutine API
+      PoseidonClientJava.kt      # Java-compatible blocking wrappers
       PoseidonConnection.kt
     swift/
-      PoseidonClient.swift
+      PoseidonClient.swift       # Swift async/await API
+      PoseidonClientObjC.swift   # Objective-C completion-handler wrappers
       PoseidonConnection.swift
   poseidond.c                # Daemon main
 ```
