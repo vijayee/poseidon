@@ -6,7 +6,10 @@
 #include "../Util/allocator.h"
 #include "../Util/threadding.h"
 #include "../Crypto/key_pair.h"
+#include "../Network/Meridian/meridian_packet.h"
 #include <string.h>
+#include <cbor.h>
+#include <time.h>
 
 // ============================================================================
 // LIFECYCLE
@@ -119,13 +122,70 @@ poseidon_channel_t* poseidon_channel_manager_join_channel(
     const char* topic_str) {
     if (mgr == NULL || topic_str == NULL) return NULL;
 
-    // Subscribe to the topic on the dial channel to discover peers
+    platform_lock(&mgr->lock);
+
+    if (mgr->num_channels >= POSEIDON_CHANNEL_MANAGER_MAX_CHANNELS) {
+        platform_unlock(&mgr->lock);
+        return NULL;
+    }
+
+    if (mgr->num_pending_bootstraps >= POSEIDON_MAX_PENDING_BOOTSTRAPS) {
+        platform_unlock(&mgr->lock);
+        return NULL;
+    }
+
+    uint16_t port = allocate_port(mgr);
+    if (port == 0) {
+        platform_unlock(&mgr->lock);
+        return NULL;
+    }
+
+    poseidon_channel_config_t config = poseidon_channel_config_defaults();
+    poseidon_channel_t* channel = poseidon_channel_create(NULL, topic_str, port,
+                                                          &config, mgr->pool, mgr->wheel);
+    if (channel == NULL) {
+        platform_unlock(&mgr->lock);
+        return NULL;
+    }
+
+    channel->state = POSEIDON_CHANNEL_STATE_BOOTSTRAPPING;
+
+    // Register pending bootstrap entry
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    uint64_t timestamp_us = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+
+    pending_bootstrap_t* pending = &mgr->pending_bootstraps[mgr->num_pending_bootstraps];
+    strncpy(pending->topic_id, topic_str, sizeof(pending->topic_id) - 1);
+    pending->topic_id[sizeof(pending->topic_id) - 1] = '\0';
+    pending->timestamp_us = timestamp_us;
+    pending->channel = channel;
+    pending->num_replies = 0;
+    mgr->num_pending_bootstraps++;
+
+    // Subscribe to the topic on the dial channel
     poseidon_channel_subscribe(mgr->dial_channel,
                                 (const uint8_t*)topic_str, strlen(topic_str), 300);
 
-    // Create a new channel for the topic
-    poseidon_channel_config_t config = poseidon_channel_config_defaults();
-    return poseidon_channel_manager_create_channel(mgr, "ED25519", topic_str, &config);
+    // Publish a CHANNEL_BOOTSTRAP packet via Quasar on the dial channel
+    const char* sender_node_id = poseidon_channel_get_topic(mgr->dial_channel);
+    cbor_item_t* bootstrap = meridian_channel_bootstrap_encode(topic_str, sender_node_id, timestamp_us);
+    if (bootstrap != NULL) {
+        unsigned char* buf = NULL;
+        size_t buf_len = 0;
+        size_t written = cbor_serialize_alloc(bootstrap, &buf, &buf_len);
+        cbor_decref(&bootstrap);
+        if (written > 0 && buf != NULL) {
+            poseidon_channel_publish(mgr->dial_channel,
+                                      (const uint8_t*)topic_str, strlen(topic_str),
+                                      buf, written);
+            free(buf);
+        }
+    }
+
+    mgr->channels[mgr->num_channels++] = channel;
+    platform_unlock(&mgr->lock);
+    return channel;
 }
 
 int poseidon_channel_manager_destroy_channel(poseidon_channel_manager_t* mgr,
@@ -166,6 +226,127 @@ poseidon_channel_t* poseidon_channel_manager_get_dial(
     const poseidon_channel_manager_t* mgr) {
     if (mgr == NULL) return NULL;
     return mgr->dial_channel;
+}
+
+int poseidon_channel_manager_handle_bootstrap_reply(
+    poseidon_channel_manager_t* mgr,
+    const char* topic_id,
+    uint32_t responder_addr,
+    uint16_t responder_port,
+    uint64_t timestamp_us,
+    const uint32_t* seed_addrs,
+    const uint16_t* seed_ports,
+    size_t num_seeds) {
+    if (mgr == NULL || topic_id == NULL) return -1;
+
+    platform_lock(&mgr->lock);
+
+    pending_bootstrap_t* pending = NULL;
+    size_t pending_index = 0;
+    for (size_t i = 0; i < mgr->num_pending_bootstraps; i++) {
+        if (strcmp(mgr->pending_bootstraps[i].topic_id, topic_id) == 0 &&
+            mgr->pending_bootstraps[i].timestamp_us == timestamp_us) {
+            pending = &mgr->pending_bootstraps[i];
+            pending_index = i;
+            break;
+        }
+    }
+
+    if (pending == NULL) {
+        platform_unlock(&mgr->lock);
+        return -1;
+    }
+
+    // Store reply address/port
+    if (pending->num_replies < POSEIDON_BOOTSTRAP_REPLY_ADDRS_MAX) {
+        pending->reply_addrs[pending->num_replies] = responder_addr;
+        pending->reply_ports[pending->num_replies] = responder_port;
+        pending->num_replies++;
+    }
+
+    // On first reply: connect, add seeds, transition to RUNNING, remove pending
+    if (pending->num_replies == 1) {
+        meridian_protocol_connect(pending->channel->protocol, responder_addr, responder_port);
+
+        size_t seeds_to_add = num_seeds;
+        if (seeds_to_add > 16) seeds_to_add = 16;
+        for (size_t i = 0; i < seeds_to_add; i++) {
+            meridian_protocol_add_seed_node(pending->channel->protocol, seed_addrs[i], seed_ports[i]);
+        }
+
+        pending->channel->state = POSEIDON_CHANNEL_STATE_RUNNING;
+
+        // Remove pending entry by shifting array
+        for (size_t i = pending_index; i + 1 < mgr->num_pending_bootstraps; i++) {
+            mgr->pending_bootstraps[i] = mgr->pending_bootstraps[i + 1];
+        }
+        memset(&mgr->pending_bootstraps[mgr->num_pending_bootstraps - 1], 0, sizeof(pending_bootstrap_t));
+        mgr->num_pending_bootstraps--;
+    }
+
+    platform_unlock(&mgr->lock);
+    return 0;
+}
+
+int poseidon_channel_manager_handle_bootstrap_request(
+    poseidon_channel_manager_t* mgr,
+    const char* topic_id,
+    const char* sender_node_id) {
+    if (mgr == NULL || topic_id == NULL || sender_node_id == NULL) return -1;
+
+    platform_lock(&mgr->lock);
+
+    // Check if we're a member of the requested channel
+    bool is_member = false;
+    for (size_t i = 0; i < mgr->num_channels; i++) {
+        if (mgr->channels[i] != NULL) {
+            const char* channel_topic = poseidon_channel_get_topic(mgr->channels[i]);
+            if (channel_topic != NULL && strcmp(channel_topic, topic_id) == 0) {
+                is_member = true;
+                break;
+            }
+        }
+    }
+
+    if (!is_member) {
+        platform_unlock(&mgr->lock);
+        return -1;
+    }
+
+    // Build and publish a BOOTSTRAP_REPLY
+    const char* responder_node_id = poseidon_channel_get_topic(mgr->dial_channel);
+    uint32_t responder_addr = 0;
+    uint16_t responder_port = 0;
+    meridian_protocol_get_local_node(mgr->dial_channel->protocol, &responder_addr, &responder_port);
+
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    uint64_t timestamp_us = (uint64_t)ts.tv_sec * 1000000ULL + (uint64_t)ts.tv_nsec / 1000ULL;
+
+    cbor_item_t* reply = meridian_channel_bootstrap_reply_encode(
+        topic_id, responder_node_id, responder_addr, responder_port, timestamp_us,
+        NULL, NULL, 0);
+
+    int rc = 0;
+    if (reply != NULL) {
+        unsigned char* buf = NULL;
+        size_t buf_len = 0;
+        size_t written = cbor_serialize_alloc(reply, &buf, &buf_len);
+        cbor_decref(&reply);
+        if (written > 0 && buf != NULL) {
+            rc = poseidon_channel_publish(mgr->dial_channel,
+                                           (const uint8_t*)topic_id, strlen(topic_id),
+                                           buf, written);
+            free(buf);
+        } else {
+            rc = -1;
+        }
+    } else {
+        rc = -1;
+    }
+
+    platform_unlock(&mgr->lock);
+    return rc;
 }
 
 // ============================================================================

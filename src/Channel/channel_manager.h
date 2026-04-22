@@ -20,6 +20,17 @@ extern "C" {
 #endif
 
 #define POSEIDON_CHANNEL_MANAGER_MAX_CHANNELS 32
+#define POSEIDON_MAX_PENDING_BOOTSTRAPS 16
+#define POSEIDON_BOOTSTRAP_REPLY_ADDRS_MAX 16
+
+typedef struct pending_bootstrap_t {
+    char topic_id[64];
+    uint64_t timestamp_us;
+    poseidon_channel_t* channel;
+    uint32_t reply_addrs[POSEIDON_BOOTSTRAP_REPLY_ADDRS_MAX];
+    uint16_t reply_ports[POSEIDON_BOOTSTRAP_REPLY_ADDRS_MAX];
+    size_t num_replies;
+} pending_bootstrap_t;
 
 typedef struct poseidon_channel_manager_t {
     refcounter_t refcounter;
@@ -32,6 +43,8 @@ typedef struct poseidon_channel_manager_t {
     work_pool_t* pool;
     hierarchical_timing_wheel_t* wheel;
     PLATFORMLOCKTYPE(lock);
+    pending_bootstrap_t pending_bootstraps[POSEIDON_MAX_PENDING_BOOTSTRAPS];
+    size_t num_pending_bootstraps;
 } poseidon_channel_manager_t;
 
 // ============================================================================
@@ -100,6 +113,46 @@ poseidon_channel_t* poseidon_channel_manager_find_channel(
 
 poseidon_channel_t* poseidon_channel_manager_get_dial(
     const poseidon_channel_manager_t* mgr);
+
+/**
+ * Handles a bootstrap reply from a peer.
+ * Finds the matching pending bootstrap, stores the reply info, and on first
+ * reply connects to the responder and transitions the channel to RUNNING.
+ *
+ * @param mgr            Channel manager
+ * @param topic_id       Topic ID string
+ * @param responder_addr Responder IPv4 address
+ * @param responder_port Responder port
+ * @param timestamp_us   Timestamp from the bootstrap request
+ * @param seed_addrs     Seed node addresses
+ * @param seed_ports     Seed node ports
+ * @param num_seeds      Number of seed nodes
+ * @return               0 on success, -1 if pending bootstrap not found
+ */
+int poseidon_channel_manager_handle_bootstrap_reply(
+    poseidon_channel_manager_t* mgr,
+    const char* topic_id,
+    uint32_t responder_addr,
+    uint16_t responder_port,
+    uint64_t timestamp_us,
+    const uint32_t* seed_addrs,
+    const uint16_t* seed_ports,
+    size_t num_seeds);
+
+/**
+ * Handles a bootstrap request from a peer.
+ * If this node is a member of the requested channel, publishes a bootstrap
+ * reply on the dial channel with local connection info.
+ *
+ * @param mgr             Channel manager
+ * @param topic_id        Topic ID string
+ * @param sender_node_id  Sender node ID string
+ * @return                0 on success, -1 if not a member or publish failed
+ */
+int poseidon_channel_manager_handle_bootstrap_request(
+    poseidon_channel_manager_t* mgr,
+    const char* topic_id,
+    const char* sender_node_id);
 
 // ============================================================================
 // PERIODIC OPERATIONS

@@ -74,6 +74,7 @@ typedef struct poseidon_channel_t {
     quasar_t* quasar;                        /**< Quasar pub/sub overlay */
     uint16_t listen_port;
     bool is_dial;
+    bool owns_key_pair;
     subtopic_table_t* subtopic_subs;    /**< Per-granularity subtopic subscriptions */
     topic_alias_registry_t* aliases;     /**< Human-readable name → Base58 ID map */
     poseidon_channel_delivery_cb_t delivery_cb;

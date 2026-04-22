@@ -42,7 +42,14 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
                                              const poseidon_channel_config_t* config,
                                              work_pool_t* pool,
                                              hierarchical_timing_wheel_t* wheel) {
-    if (key_pair == NULL || config == NULL || pool == NULL || wheel == NULL) return NULL;
+    if (config == NULL || pool == NULL || wheel == NULL) return NULL;
+
+    bool created_key_pair = false;
+    if (key_pair == NULL) {
+        key_pair = poseidon_key_pair_create("ED25519");
+        if (key_pair == NULL) return NULL;
+        created_key_pair = true;
+    }
 
     poseidon_channel_t* channel = get_clear_memory(sizeof(poseidon_channel_t));
     if (channel == NULL) return NULL;
@@ -140,6 +147,7 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
     channel->state = POSEIDON_CHANNEL_STATE_INIT;
     channel->listen_port = listen_port;
     channel->is_dial = false;
+    channel->owns_key_pair = created_key_pair;
     channel->config = *config;
 
     if (name != NULL) {
@@ -158,7 +166,7 @@ void poseidon_channel_destroy(poseidon_channel_t* channel) {
     if (refcounter_count((refcounter_t*)channel) == 0) {
         if (channel->quasar != NULL) quasar_destroy(channel->quasar);
         if (channel->protocol != NULL) meridian_protocol_destroy(channel->protocol);
-        if (channel->key_pair != NULL) poseidon_key_pair_destroy(channel->key_pair);
+        if (channel->owns_key_pair && channel->key_pair != NULL) poseidon_key_pair_destroy(channel->key_pair);
         if (channel->subtopic_subs != NULL) subtopic_table_destroy(channel->subtopic_subs);
         if (channel->aliases != NULL) topic_alias_registry_destroy(channel->aliases);
 

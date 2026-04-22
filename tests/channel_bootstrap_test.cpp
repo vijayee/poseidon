@@ -6,6 +6,11 @@
 #include <cbor.h>
 #include <string.h>
 #include "Network/Meridian/meridian_packet.h"
+#include "Channel/channel_manager.h"
+#include "Channel/channel.h"
+#include "Crypto/key_pair.h"
+#include "Workers/pool.h"
+#include "Time/wheel.h"
 
 TEST(BootstrapPacketTest, EncodeDecodeBootstrap) {
     const char* topic_id = "X4jKL2mNpQrStUvWxYz";
@@ -107,6 +112,120 @@ TEST(BootstrapPacketTest, EncodeDecodeReplyWithNoSeeds) {
     EXPECT_EQ(out_ts, ts);
 
     cbor_decref(&encoded);
+}
+
+// ============================================================================
+// CHANNEL MANAGER BOOTSTRAP TESTS
+// ============================================================================
+
+class ChannelManagerBootstrapTest : public ::testing::Test {
+protected:
+    void SetUp() override {
+        pool = work_pool_create(2);
+        ASSERT_NE(pool, nullptr);
+        work_pool_launch(pool);
+
+        wheel = hierarchical_timing_wheel_create(8, pool);
+        ASSERT_NE(wheel, nullptr);
+        hierarchical_timing_wheel_run(wheel);
+
+        dial_key_pair = poseidon_key_pair_create("ED25519");
+        ASSERT_NE(dial_key_pair, nullptr);
+    }
+
+    void TearDown() override {
+        if (mgr != nullptr) {
+            poseidon_channel_manager_destroy(mgr);
+            mgr = nullptr;
+        }
+
+        if (dial_key_pair != nullptr) {
+            poseidon_key_pair_destroy(dial_key_pair);
+            dial_key_pair = nullptr;
+        }
+
+        if (wheel != nullptr) {
+            hierarchical_timing_wheel_wait_for_idle_signal(wheel);
+            hierarchical_timing_wheel_stop(wheel);
+        }
+
+        if (pool != nullptr) {
+            work_pool_shutdown(pool);
+            work_pool_join_all(pool);
+        }
+
+        if (pool != nullptr) {
+            work_pool_destroy(pool);
+            pool = nullptr;
+        }
+
+        if (wheel != nullptr) {
+            hierarchical_timing_wheel_destroy(wheel);
+            wheel = nullptr;
+        }
+    }
+
+    work_pool_t* pool = nullptr;
+    hierarchical_timing_wheel_t* wheel = nullptr;
+    poseidon_key_pair_t* dial_key_pair = nullptr;
+    poseidon_channel_manager_t* mgr = nullptr;
+};
+
+TEST_F(ChannelManagerBootstrapTest, JoinChannelCreatesPendingBootstrap) {
+    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel);
+    ASSERT_NE(mgr, nullptr);
+
+    const char* topic = "TestTopic123";
+    poseidon_channel_t* channel = poseidon_channel_manager_join_channel(mgr, topic);
+    ASSERT_NE(channel, nullptr);
+
+    // Channel should be in BOOTSTRAPPING state
+    EXPECT_EQ(POSEIDON_CHANNEL_STATE_BOOTSTRAPPING, channel->state);
+
+    // Manager should have a pending bootstrap entry
+    EXPECT_EQ(1u, mgr->num_pending_bootstraps);
+    EXPECT_STREQ(topic, mgr->pending_bootstraps[0].topic_id);
+    EXPECT_EQ(channel, mgr->pending_bootstraps[0].channel);
+    EXPECT_GT(mgr->pending_bootstraps[0].timestamp_us, 0u);
+}
+
+TEST_F(ChannelManagerBootstrapTest, HandleBootstrapRequestRejectsUnknownTopic) {
+    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel);
+    ASSERT_NE(mgr, nullptr);
+
+    // No channels joined yet, so request for any topic should fail
+    EXPECT_EQ(-1, poseidon_channel_manager_handle_bootstrap_request(mgr, "UnknownTopic", "SomeNode"));
+}
+
+TEST_F(ChannelManagerBootstrapTest, HandleBootstrapReplyFindsPending) {
+    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel);
+    ASSERT_NE(mgr, nullptr);
+
+    const char* topic = "TestTopic456";
+    poseidon_channel_t* channel = poseidon_channel_manager_join_channel(mgr, topic);
+    ASSERT_NE(channel, nullptr);
+    ASSERT_EQ(1u, mgr->num_pending_bootstraps);
+
+    uint64_t timestamp_us = mgr->pending_bootstraps[0].timestamp_us;
+
+    // Simulate a bootstrap reply
+    uint32_t seed_addrs[] = {0x7F000001};
+    uint16_t seed_ports[] = {9000};
+    EXPECT_EQ(0, poseidon_channel_manager_handle_bootstrap_reply(
+        mgr, topic, 0x7F000001, 9000, timestamp_us, seed_addrs, seed_ports, 1));
+
+    // Pending bootstrap should be removed and channel transitioned to RUNNING
+    EXPECT_EQ(0u, mgr->num_pending_bootstraps);
+    EXPECT_EQ(POSEIDON_CHANNEL_STATE_RUNNING, channel->state);
+}
+
+TEST_F(ChannelManagerBootstrapTest, HandleBootstrapReplyNotFound) {
+    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel);
+    ASSERT_NE(mgr, nullptr);
+
+    // No pending bootstrap for this topic/timestamp
+    EXPECT_EQ(-1, poseidon_channel_manager_handle_bootstrap_reply(
+        mgr, "NoSuchTopic", 0x7F000001, 9000, 12345, NULL, NULL, 0));
 }
 
 int main(int argc, char** argv) {
