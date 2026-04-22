@@ -67,7 +67,7 @@ cbor_item_t* meridian_gossip_encode(const meridian_gossip_packet_t* pkt) {
     if (array == NULL) return NULL;
 
     // Encode fixed header fields
-    if (!cbor_array_push(array, cbor_build_uint8(pkt->base.type))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint8(pkt->base.type)))) {
         cbor_decref(&array);
         return NULL;
     }
@@ -75,17 +75,17 @@ cbor_item_t* meridian_gossip_encode(const meridian_gossip_packet_t* pkt) {
     // Split 64-bit query_id into two 32-bit values for CBOR encoding
     uint64_t qid_1 = pkt->base.query_id >> 32;
     uint64_t qid_2 = pkt->base.query_id & 0xFFFFFFFF;
-    if (!cbor_array_push(array, cbor_build_uint64(qid_1)) ||
-        !cbor_array_push(array, cbor_build_uint64(qid_2)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->base.magic)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->base.rendv_addr)) ||
-        !cbor_array_push(array, cbor_build_uint16(pkt->base.rendv_port))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint64(qid_1))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint64(qid_2))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->base.magic))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->base.rendv_addr))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint16(pkt->base.rendv_port)))) {
         cbor_decref(&array);
         return NULL;
     }
 
     // Encode number of targets
-    if (!cbor_array_push(array, cbor_build_uint8(pkt->targets.length))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint8(pkt->targets.length)))) {
         cbor_decref(&array);
         return NULL;
     }
@@ -94,15 +94,16 @@ cbor_item_t* meridian_gossip_encode(const meridian_gossip_packet_t* pkt) {
     for (int i = 0; i < pkt->targets.length; i++) {
         cbor_item_t* target_array = cbor_new_definite_array(4);
         if (target_array == NULL ||
-            !cbor_array_push(target_array, cbor_build_uint32(pkt->targets.data[i]->addr)) ||
-            !cbor_array_push(target_array, cbor_build_uint16(pkt->targets.data[i]->port)) ||
-            !cbor_array_push(target_array, cbor_build_uint32(pkt->targets.data[i]->rendv_addr)) ||
-            !cbor_array_push(target_array, cbor_build_uint16(pkt->targets.data[i]->rendv_port)) ||
+            !cbor_array_push(target_array, cbor_move(cbor_build_uint32(pkt->targets.data[i]->addr))) ||
+            !cbor_array_push(target_array, cbor_move(cbor_build_uint16(pkt->targets.data[i]->port))) ||
+            !cbor_array_push(target_array, cbor_move(cbor_build_uint32(pkt->targets.data[i]->rendv_addr))) ||
+            !cbor_array_push(target_array, cbor_move(cbor_build_uint16(pkt->targets.data[i]->rendv_port))) ||
             !cbor_array_push(array, target_array)) {
             cbor_decref(&target_array);
             cbor_decref(&array);
             return NULL;
         }
+        cbor_decref(&target_array);
     }
 
     return array;
@@ -244,23 +245,23 @@ cbor_item_t* meridian_ping_encode(const meridian_ping_packet_t* pkt) {
     cbor_item_t* array = cbor_new_definite_array(6 + pkt->nodes.length);
     if (array == NULL) return NULL;
 
-    if (!cbor_array_push(array, cbor_build_uint8(pkt->base.type))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint8(pkt->base.type)))) {
         cbor_decref(&array);
         return NULL;
     }
 
     uint64_t qid_1 = pkt->base.query_id >> 32;
     uint64_t qid_2 = pkt->base.query_id & 0xFFFFFFFF;
-    if (!cbor_array_push(array, cbor_build_uint64(qid_1)) ||
-        !cbor_array_push(array, cbor_build_uint64(qid_2)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->base.magic)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->base.rendv_addr)) ||
-        !cbor_array_push(array, cbor_build_uint16(pkt->base.rendv_port))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint64(qid_1))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint64(qid_2))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->base.magic))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->base.rendv_addr))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint16(pkt->base.rendv_port)))) {
         cbor_decref(&array);
         return NULL;
     }
 
-    if (!cbor_array_push(array, cbor_build_uint8(pkt->nodes.length))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint8(pkt->nodes.length)))) {
         cbor_decref(&array);
         return NULL;
     }
@@ -268,14 +269,15 @@ cbor_item_t* meridian_ping_encode(const meridian_ping_packet_t* pkt) {
     for (int i = 0; i < pkt->nodes.length; i++) {
         cbor_item_t* node_array = cbor_new_definite_array(3);
         if (node_array == NULL ||
-            !cbor_array_push(node_array, cbor_build_uint32(pkt->nodes.data[i]->addr)) ||
-            !cbor_array_push(node_array, cbor_build_uint16(pkt->nodes.data[i]->port)) ||
-            !cbor_array_push(node_array, cbor_build_uint32(pkt->latencies.data[i])) ||
+            !cbor_array_push(node_array, cbor_move(cbor_build_uint32(pkt->nodes.data[i]->addr))) ||
+            !cbor_array_push(node_array, cbor_move(cbor_build_uint16(pkt->nodes.data[i]->port))) ||
+            !cbor_array_push(node_array, cbor_move(cbor_build_uint32(pkt->latencies.data[i]))) ||
             !cbor_array_push(array, node_array)) {
             cbor_decref(&node_array);
             cbor_decref(&array);
             return NULL;
         }
+        cbor_decref(&node_array);
     }
 
     return array;
@@ -360,18 +362,18 @@ cbor_item_t* meridian_packet_encode(const meridian_packet_t* pkt) {
     cbor_item_t* array = cbor_new_definite_array(5);
     if (array == NULL) return NULL;
 
-    if (!cbor_array_push(array, cbor_build_uint8(pkt->type))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint8(pkt->type)))) {
         cbor_decref(&array);
         return NULL;
     }
 
     uint64_t qid_1 = pkt->query_id >> 32;
     uint64_t qid_2 = pkt->query_id & 0xFFFFFFFF;
-    if (!cbor_array_push(array, cbor_build_uint64(qid_1)) ||
-        !cbor_array_push(array, cbor_build_uint64(qid_2)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->magic)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->rendv_addr)) ||
-        !cbor_array_push(array, cbor_build_uint16(pkt->rendv_port))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint64(qid_1))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint64(qid_2))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->magic))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->rendv_addr))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint16(pkt->rendv_port)))) {
         cbor_decref(&array);
         return NULL;
     }
@@ -467,29 +469,29 @@ cbor_item_t* meridian_ret_response_encode(const meridian_ret_response_t* pkt) {
     cbor_item_t* array = cbor_new_definite_array(9 + pkt->targets.length);
     if (array == NULL) return NULL;
 
-    if (!cbor_array_push(array, cbor_build_uint8(pkt->type))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint8(pkt->type)))) {
         cbor_decref(&array);
         return NULL;
     }
 
     uint64_t qid_1 = pkt->query_id >> 32;
     uint64_t qid_2 = pkt->query_id & 0xFFFFFFFF;
-    if (!cbor_array_push(array, cbor_build_uint64(qid_1)) ||
-        !cbor_array_push(array, cbor_build_uint64(qid_2)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->magic)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->rendv_addr)) ||
-        !cbor_array_push(array, cbor_build_uint16(pkt->rendv_port))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint64(qid_1))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint64(qid_2))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->magic))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->rendv_addr))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint16(pkt->rendv_port)))) {
         cbor_decref(&array);
         return NULL;
     }
 
-    if (!cbor_array_push(array, cbor_build_uint32(pkt->closest_addr)) ||
-        !cbor_array_push(array, cbor_build_uint16(pkt->closest_port))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->closest_addr))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint16(pkt->closest_port)))) {
         cbor_decref(&array);
         return NULL;
     }
 
-    if (!cbor_array_push(array, cbor_build_uint8(pkt->targets.length))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint8(pkt->targets.length)))) {
         cbor_decref(&array);
         return NULL;
     }
@@ -497,14 +499,15 @@ cbor_item_t* meridian_ret_response_encode(const meridian_ret_response_t* pkt) {
     for (int i = 0; i < pkt->targets.length; i++) {
         cbor_item_t* target_array = cbor_new_definite_array(3);
         if (target_array == NULL ||
-            !cbor_array_push(target_array, cbor_build_uint32(pkt->targets.data[i].addr)) ||
-            !cbor_array_push(target_array, cbor_build_uint16(pkt->targets.data[i].port)) ||
-            !cbor_array_push(target_array, cbor_build_uint32(pkt->targets.data[i].latency_us)) ||
+            !cbor_array_push(target_array, cbor_move(cbor_build_uint32(pkt->targets.data[i].addr))) ||
+            !cbor_array_push(target_array, cbor_move(cbor_build_uint16(pkt->targets.data[i].port))) ||
+            !cbor_array_push(target_array, cbor_move(cbor_build_uint32(pkt->targets.data[i].latency_us))) ||
             !cbor_array_push(array, target_array)) {
             cbor_decref(&target_array);
             cbor_decref(&array);
             return NULL;
         }
+        cbor_decref(&target_array);
     }
 
     return array;
@@ -618,12 +621,12 @@ cbor_item_t* meridian_addr_response_encode(const meridian_addr_response_t* pkt) 
     uint64_t qid_1 = pkt->query_id >> 32;
     uint64_t qid_2 = pkt->query_id & 0xFFFFFFFF;
 
-    if (!cbor_array_push(array, cbor_build_uint8(pkt->type)) ||
-        !cbor_array_push(array, cbor_build_uint64(qid_1)) ||
-        !cbor_array_push(array, cbor_build_uint64(qid_2)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->reflexive_addr)) ||
-        !cbor_array_push(array, cbor_build_uint16(pkt->reflexive_port)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->endpoint_id))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint8(pkt->type))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint64(qid_1))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint64(qid_2))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->reflexive_addr))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint16(pkt->reflexive_port))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->endpoint_id)))) {
         cbor_decref(&array);
         return NULL;
     }
@@ -691,12 +694,12 @@ cbor_item_t* meridian_punch_request_encode(const meridian_punch_request_t* pkt) 
     uint64_t qid_1 = pkt->query_id >> 32;
     uint64_t qid_2 = pkt->query_id & 0xFFFFFFFF;
 
-    if (!cbor_array_push(array, cbor_build_uint8(pkt->type)) ||
-        !cbor_array_push(array, cbor_build_uint64(qid_1)) ||
-        !cbor_array_push(array, cbor_build_uint64(qid_2)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->from_endpoint_id)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->target_addr)) ||
-        !cbor_array_push(array, cbor_build_uint16(pkt->target_port))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint8(pkt->type))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint64(qid_1))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint64(qid_2))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->from_endpoint_id))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->target_addr))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint16(pkt->target_port)))) {
         cbor_decref(&array);
         return NULL;
     }
@@ -764,12 +767,12 @@ cbor_item_t* meridian_punch_sync_encode(const meridian_punch_sync_t* pkt) {
     uint64_t qid_1 = pkt->query_id >> 32;
     uint64_t qid_2 = pkt->query_id & 0xFFFFFFFF;
 
-    if (!cbor_array_push(array, cbor_build_uint8(pkt->type)) ||
-        !cbor_array_push(array, cbor_build_uint64(qid_1)) ||
-        !cbor_array_push(array, cbor_build_uint64(qid_2)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->from_endpoint_id)) ||
-        !cbor_array_push(array, cbor_build_uint32(pkt->from_addr)) ||
-        !cbor_array_push(array, cbor_build_uint16(pkt->from_port))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint8(pkt->type))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint64(qid_1))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint64(qid_2))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->from_endpoint_id))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(pkt->from_addr))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint16(pkt->from_port)))) {
         cbor_decref(&array);
         return NULL;
     }
@@ -827,10 +830,10 @@ cbor_item_t* meridian_channel_bootstrap_encode(const char* topic_id,
     cbor_item_t* array = cbor_new_definite_array(4);
     if (array == NULL) return NULL;
 
-    if (!cbor_array_push(array, cbor_build_uint8(MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP)) ||
-        !cbor_array_push(array, cbor_build_string(topic_id)) ||
-        !cbor_array_push(array, cbor_build_string(sender_node_id)) ||
-        !cbor_array_push(array, cbor_build_uint64(timestamp_us))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint8(MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_string(topic_id))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_string(sender_node_id))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint64(timestamp_us)))) {
         cbor_decref(&array);
         return NULL;
     }
@@ -855,12 +858,12 @@ int meridian_channel_bootstrap_decode(const cbor_item_t* item,
                                        uint64_t* timestamp_us) {
     if (item == NULL || topic_id == NULL || sender_node_id == NULL || timestamp_us == NULL)
         return -1;
-    if (!cbor_array_is_definite((cbor_item_t*)item)) return -1;
+    if (!cbor_array_is_definite(item)) return -1;
 
-    size_t arr_size = cbor_array_size((cbor_item_t*)item);
+    size_t arr_size = cbor_array_size(item);
     if (arr_size < 4) return -1;
 
-    cbor_item_t** items = cbor_array_handle((cbor_item_t*)item);
+    cbor_item_t** items = cbor_array_handle(item);
 
     if (!cbor_isa_uint(items[0]) || cbor_get_uint8(items[0]) != MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP)
         return -1;
@@ -915,12 +918,12 @@ cbor_item_t* meridian_channel_bootstrap_reply_encode(const char* topic_id,
     cbor_item_t* array = cbor_new_definite_array(7);
     if (array == NULL) return NULL;
 
-    if (!cbor_array_push(array, cbor_build_uint8(MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP_REPLY)) ||
-        !cbor_array_push(array, cbor_build_string(topic_id)) ||
-        !cbor_array_push(array, cbor_build_string(responder_node_id)) ||
-        !cbor_array_push(array, cbor_build_uint32(responder_addr)) ||
-        !cbor_array_push(array, cbor_build_uint16(responder_port)) ||
-        !cbor_array_push(array, cbor_build_uint64(timestamp_us))) {
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint8(MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP_REPLY))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_string(topic_id))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_string(responder_node_id))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint32(responder_addr))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint16(responder_port))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint64(timestamp_us)))) {
         cbor_decref(&array);
         return NULL;
     }
@@ -934,14 +937,15 @@ cbor_item_t* meridian_channel_bootstrap_reply_encode(const char* topic_id,
     for (size_t i = 0; i < num_seeds; i++) {
         cbor_item_t* seed = cbor_new_definite_array(2);
         if (seed == NULL ||
-            !cbor_array_push(seed, cbor_build_uint32(seed_addrs[i])) ||
-            !cbor_array_push(seed, cbor_build_uint16(seed_ports[i])) ||
+            !cbor_array_push(seed, cbor_move(cbor_build_uint32(seed_addrs[i]))) ||
+            !cbor_array_push(seed, cbor_move(cbor_build_uint16(seed_ports[i]))) ||
             !cbor_array_push(seeds, seed)) {
             cbor_decref(&seed);
             cbor_decref(&seeds);
             cbor_decref(&array);
             return NULL;
         }
+        cbor_decref(&seed);
     }
 
     if (!cbor_array_push(array, seeds)) {
@@ -949,6 +953,7 @@ cbor_item_t* meridian_channel_bootstrap_reply_encode(const char* topic_id,
         cbor_decref(&array);
         return NULL;
     }
+    cbor_decref(&seeds);
 
     return array;
 }
@@ -983,12 +988,12 @@ int meridian_channel_bootstrap_reply_decode(const cbor_item_t* item,
     if (item == NULL || topic_id == NULL || responder_node_id == NULL) return -1;
     if (responder_addr == NULL || responder_port == NULL || timestamp_us == NULL) return -1;
     if (seed_addrs == NULL || seed_ports == NULL || num_seeds == NULL) return -1;
-    if (!cbor_array_is_definite((cbor_item_t*)item)) return -1;
+    if (!cbor_array_is_definite(item)) return -1;
 
-    size_t arr_size = cbor_array_size((cbor_item_t*)item);
+    size_t arr_size = cbor_array_size(item);
     if (arr_size < 7) return -1;
 
-    cbor_item_t** items = cbor_array_handle((cbor_item_t*)item);
+    cbor_item_t** items = cbor_array_handle(item);
 
     if (!cbor_isa_uint(items[0]) || cbor_get_uint8(items[0]) != MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP_REPLY)
         return -1;
@@ -1020,9 +1025,10 @@ int meridian_channel_bootstrap_reply_decode(const cbor_item_t* item,
         size_t to_read = seed_count < max_seeds ? seed_count : max_seeds;
         cbor_item_t** seed_items = cbor_array_handle(items[6]);
         for (size_t i = 0; i < to_read; i++) {
-            if (!cbor_array_is_definite(seed_items[i])) break;
-            if (cbor_array_size(seed_items[i]) < 2) break;
+            if (!cbor_array_is_definite(seed_items[i])) return -1;
+            if (cbor_array_size(seed_items[i]) < 2) return -1;
             cbor_item_t** pair = cbor_array_handle(seed_items[i]);
+            if (!cbor_isa_uint(pair[0]) || !cbor_isa_uint(pair[1])) return -1;
             seed_addrs[i] = (uint32_t)cbor_get_uint32(pair[0]);
             seed_ports[i] = (uint16_t)cbor_get_uint16(pair[1]);
             (*num_seeds)++;
