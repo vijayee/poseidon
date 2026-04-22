@@ -49,6 +49,7 @@ set(QUASAR_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Network/Quasar)
 set(CRYPTO_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Crypto)
 set(CHANNEL_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Channel)
 set(CLIENT_APIS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/ClientAPIs)
+set(CLIENT_LIBS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/client_libs/c)
 
 # Poseidon Library
 set(POSEIDON_SOURCES
@@ -108,6 +109,7 @@ set(POSEIDON_SOURCES
     ${CLIENT_APIS_SRC_DIR}/transport_tcp.c
     ${CLIENT_APIS_SRC_DIR}/transport_ws.c
     ${CLIENT_APIS_SRC_DIR}/transport_quic.c
+    ${CLIENT_LIBS_SRC_DIR}/poseidon_client.c
 )
 
 add_library(poseidon STATIC ${POSEIDON_SOURCES})
@@ -236,3 +238,4 @@ add_meridian_test(topic_id_test tests/topic_id_test.cpp)
 # ClientAPI Tests
 add_meridian_test(client_protocol_test tests/client_protocol_test.cpp)
 add_meridian_test(client_session_test tests/client_session_test.cpp)
+add_meridian_test(poseidon_client_test tests/poseidon_client_test.cpp)
