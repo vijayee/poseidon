@@ -32,6 +32,11 @@ find_package(OpenSSL REQUIRED)
 set(QUIC_DISABLE_WERROR ON CACHE BOOL "" FORCE)
 add_subdirectory(deps/msquic)
 
+# Build poll-dancer (event loop library)
+set(POLL_DANCER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(POLL_DANCER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+add_subdirectory(deps/poll-dancer)
+
 # Source directories
 set(MERIDIAN_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Network/Meridian)
 set(UTIL_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Util)
@@ -99,6 +104,7 @@ set(POSEIDON_SOURCES
     ${CHANNEL_SRC_DIR}/topic_id.c
     ${CLIENT_APIS_SRC_DIR}/client_protocol.c
     ${CLIENT_APIS_SRC_DIR}/client_session.c
+    ${CLIENT_APIS_SRC_DIR}/transport_unix.c
 )
 
 add_library(poseidon STATIC ${POSEIDON_SOURCES})
@@ -119,6 +125,7 @@ target_link_libraries(poseidon PRIVATE
     msquic::platform
     OpenSSL::SSL
     OpenSSL::Crypto
+    poll_dancer
 )
 
 # Meridian Relay Server
@@ -144,6 +151,30 @@ target_link_libraries(meridian_relay PRIVATE
     pthread
     OpenSSL::SSL
     OpenSSL::Crypto
+)
+
+# Poseidon Daemon
+add_executable(poseidond src/poseidond.c)
+
+target_include_directories(poseidond PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/src/inc
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/xxhash
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/blake3/c
+)
+
+target_link_libraries(poseidond PRIVATE
+    poseidon
+    cbor
+    hashmap
+    blake3
+    msquic::msquic
+    msquic::platform
+    pthread
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    poll_dancer
+    m
 )
 
 # Test include paths for transitive dependencies
