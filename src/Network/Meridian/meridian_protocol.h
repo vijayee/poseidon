@@ -153,6 +153,8 @@ typedef struct meridian_protocol_t {
     size_t num_connections;                     /**< Number of managed connections */
     struct meridian_relay_t* default_relay;    /**< Default relay server client */
 
+    struct poseidon_channel_manager_t* channel_manager; /**< Set by daemon for bootstrap dispatch */
+
     meridian_protocol_callbacks_t callbacks;   /**< Protocol event callbacks */
 
     PLATFORMLOCKTYPE(lock);                    /**< Thread-safe state access */

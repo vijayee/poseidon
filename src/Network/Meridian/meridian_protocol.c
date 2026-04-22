@@ -6,6 +6,7 @@
 #include "meridian_protocol.h"
 #include "msquic_singleton.h"
 #include "../Quasar/quasar_route.h"
+#include "../../Channel/channel_manager.h"
 #include "../../Util/allocator.h"
 #include "../../Util/vec.h"
 #include <stdlib.h>
@@ -748,6 +749,34 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
             protocol->callbacks.on_quasar_gossip(protocol->callbacks.quasar_ctx, protocol, data, len);
         }
         break;
+    case MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP: {
+        if (protocol->channel_manager != NULL) {
+            char topic_id[64], sender_node_id[64];
+            uint64_t ts;
+            if (meridian_channel_bootstrap_decode(item, topic_id, sizeof(topic_id),
+                                                   sender_node_id, sizeof(sender_node_id), &ts) == 0) {
+                poseidon_channel_manager_handle_bootstrap_request(
+                    protocol->channel_manager, topic_id, sender_node_id);
+            }
+        }
+        break;
+    }
+    case MERIDIAN_PACKET_TYPE_CHANNEL_BOOTSTRAP_REPLY: {
+        if (protocol->channel_manager != NULL) {
+            char topic_id[64], responder_node_id[64];
+            uint32_t addr; uint16_t port; uint64_t ts;
+            uint32_t seed_addrs[16]; uint16_t seed_ports[16]; size_t num_seeds;
+            if (meridian_channel_bootstrap_reply_decode(item, topic_id, sizeof(topic_id),
+                                                        responder_node_id, sizeof(responder_node_id),
+                                                        &addr, &port, &ts,
+                                                        seed_addrs, seed_ports, &num_seeds, 16) == 0) {
+                poseidon_channel_manager_handle_bootstrap_reply(
+                    protocol->channel_manager, topic_id, addr, port, ts,
+                    seed_addrs, seed_ports, num_seeds);
+            }
+        }
+        break;
+    }
     default:
         if (protocol->callbacks.on_packet != NULL) {
             protocol->callbacks.on_packet(protocol->callbacks.user_ctx, protocol, data, len);
