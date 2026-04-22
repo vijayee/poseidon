@@ -105,6 +105,9 @@ set(POSEIDON_SOURCES
     ${CLIENT_APIS_SRC_DIR}/client_protocol.c
     ${CLIENT_APIS_SRC_DIR}/client_session.c
     ${CLIENT_APIS_SRC_DIR}/transport_unix.c
+    ${CLIENT_APIS_SRC_DIR}/transport_tcp.c
+    ${CLIENT_APIS_SRC_DIR}/transport_ws.c
+    ${CLIENT_APIS_SRC_DIR}/transport_quic.c
 )
 
 add_library(poseidon STATIC ${POSEIDON_SOURCES})

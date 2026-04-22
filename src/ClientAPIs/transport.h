@@ -91,6 +91,44 @@ poseidon_transport_t* poseidon_transport_unix_create(const char* socket_path,
                                                       poseidon_channel_manager_t* manager);
 
 /**
+ * Creates a TCP+TLS transport.
+ *
+ * @param port       Listen port
+ * @param cert_path  TLS certificate PEM file (NULL for no TLS)
+ * @param key_path   TLS private key PEM file (NULL for no TLS)
+ * @param manager    Shared channel manager
+ * @return           New transport, or NULL on failure
+ */
+poseidon_transport_t* poseidon_transport_tcp_create(uint16_t port,
+                                                      const char* cert_path,
+                                                      const char* key_path,
+                                                      poseidon_channel_manager_t* manager);
+
+/**
+ * Creates a WebSocket+TLS transport.
+ *
+ * @param port       Listen port
+ * @param cert_path  TLS certificate PEM file (NULL for no TLS)
+ * @param key_path   TLS private key PEM file (NULL for no TLS)
+ * @param manager    Shared channel manager
+ * @return           New transport, or NULL on failure
+ */
+poseidon_transport_t* poseidon_transport_ws_create(uint16_t port,
+                                                    const char* cert_path,
+                                                    const char* key_path,
+                                                    poseidon_channel_manager_t* manager);
+
+/**
+ * Creates a QUIC transport (stub — returns a transport that fails to start).
+ *
+ * @param port       Listen port
+ * @param manager    Shared channel manager
+ * @return           New transport, or NULL on failure
+ */
+poseidon_transport_t* poseidon_transport_quic_create(uint16_t port,
+                                                      poseidon_channel_manager_t* manager);
+
+/**
  * Destroys a transport. Stops the transport thread if running.
  *
  * @param transport  Transport to destroy

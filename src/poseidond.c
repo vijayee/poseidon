@@ -151,6 +151,10 @@ int main(int argc, char* argv[]) {
     }
 
     // Start enabled transports
+    poseidon_transport_t* g_tcp_transport = NULL;
+    poseidon_transport_t* g_ws_transport = NULL;
+    poseidon_transport_t* g_quic_transport = NULL;
+
     if (config.enable_unix) {
         g_unix_transport = poseidon_transport_unix_create(config.unix_socket_path, mgr);
         if (g_unix_transport != NULL) {
@@ -166,7 +170,58 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // TODO: TCP, WebSocket, QUIC transports (Phase 5)
+    if (config.enable_tcp) {
+        if (config.tls_cert_path == NULL || config.tls_key_path == NULL) {
+            log_error("poseidond: TCP transport requires --tls-cert and --tls-key");
+        } else {
+            g_tcp_transport = poseidon_transport_tcp_create(
+                config.tcp_port, config.tls_cert_path, config.tls_key_path, mgr);
+            if (g_tcp_transport != NULL) {
+                if (g_tcp_transport->start(g_tcp_transport) == 0) {
+                    log_info("poseidond: TCP transport listening on port %u", config.tcp_port);
+                } else {
+                    log_error("poseidond: failed to start TCP transport");
+                    poseidon_transport_destroy(g_tcp_transport);
+                    g_tcp_transport = NULL;
+                }
+            } else {
+                log_error("poseidond: failed to create TCP transport");
+            }
+        }
+    }
+
+    if (config.enable_ws) {
+        if (config.tls_cert_path == NULL || config.tls_key_path == NULL) {
+            log_error("poseidond: WebSocket transport requires --tls-cert and --tls-key");
+        } else {
+            g_ws_transport = poseidon_transport_ws_create(
+                config.ws_port, config.tls_cert_path, config.tls_key_path, mgr);
+            if (g_ws_transport != NULL) {
+                if (g_ws_transport->start(g_ws_transport) == 0) {
+                    log_info("poseidond: WebSocket transport listening on port %u", config.ws_port);
+                } else {
+                    log_error("poseidond: failed to start WebSocket transport");
+                    poseidon_transport_destroy(g_ws_transport);
+                    g_ws_transport = NULL;
+                }
+            } else {
+                log_error("poseidond: failed to create WebSocket transport");
+            }
+        }
+    }
+
+    if (config.enable_quic) {
+        g_quic_transport = poseidon_transport_quic_create(config.quic_port, mgr);
+        if (g_quic_transport != NULL) {
+            if (g_quic_transport->start(g_quic_transport) == 0) {
+                log_info("poseidond: QUIC transport listening on port %u", config.quic_port);
+            } else {
+                log_warn("poseidond: QUIC transport not yet implemented");
+                poseidon_transport_destroy(g_quic_transport);
+                g_quic_transport = NULL;
+            }
+        }
+    }
 
     log_info("poseidond: running (press Ctrl+C to stop)");
 
@@ -183,6 +238,18 @@ int main(int argc, char* argv[]) {
     if (g_unix_transport != NULL) {
         g_unix_transport->stop(g_unix_transport);
         poseidon_transport_destroy(g_unix_transport);
+    }
+    if (g_tcp_transport != NULL) {
+        g_tcp_transport->stop(g_tcp_transport);
+        poseidon_transport_destroy(g_tcp_transport);
+    }
+    if (g_ws_transport != NULL) {
+        g_ws_transport->stop(g_ws_transport);
+        poseidon_transport_destroy(g_ws_transport);
+    }
+    if (g_quic_transport != NULL) {
+        g_quic_transport->stop(g_quic_transport);
+        poseidon_transport_destroy(g_quic_transport);
     }
 
     // Cleanup
