@@ -39,7 +39,7 @@ typedef void (*poseidon_response_cb_t)(void* ctx, uint32_t request_id,
 
 /**
  * Connects to a Poseidon daemon via transport URL.
- * Supported formats: "unix:///path/to/socket", "tcp://host:port"
+ * Supported formats: "unix:///path/to/socket", "tcp://host:port", "quic://host:port"
  *
  * @param transport_url  Connection URL
  * @return              Connected client, or NULL on failure

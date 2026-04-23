@@ -19,3 +19,6 @@
 [submodule "deps/blake3"]
 	path = deps/blake3
 	url = https://github.com/BLAKE3-team/BLAKE3.git
+[submodule "deps/libwtf"]
+	path = deps/libwtf
+	url = https://github.com/andrewmd5/libwtf.git

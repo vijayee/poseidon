@@ -432,6 +432,7 @@ poseidon_transport_config_t poseidon_transport_config_defaults(void) {
     config.tcp_port = 9090;
     config.ws_port = 9091;
     config.quic_port = 9092;
+    config.wt_port = 9093;
     return config;
 }
 
@@ -470,6 +471,11 @@ poseidon_transport_t* poseidon_transport_unix_create(const char* socket_path,
 
 void poseidon_transport_destroy(poseidon_transport_t* transport) {
     if (transport == NULL) return;
+
+    if (transport->destroy != NULL) {
+        transport->destroy(transport);
+        return;
+    }
 
     if (transport->running) {
         transport->stop(transport);

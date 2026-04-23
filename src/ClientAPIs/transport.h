@@ -24,6 +24,7 @@ typedef enum {
     POSEIDON_TRANSPORT_TCP,
     POSEIDON_TRANSPORT_WEBSOCKET,
     POSEIDON_TRANSPORT_QUIC,
+    POSEIDON_TRANSPORT_WEBTRANSPORT,
     POSEIDON_TRANSPORT_BINDER,
     POSEIDON_TRANSPORT_XPC
 } poseidon_transport_type_t;
@@ -37,12 +38,14 @@ typedef struct poseidon_transport_config_t {
     bool enable_tcp;
     bool enable_ws;
     bool enable_quic;
+    bool enable_wt;
     bool enable_binder;
     bool enable_xpc;
     const char* unix_socket_path;
     uint16_t tcp_port;
     uint16_t ws_port;
     uint16_t quic_port;
+    uint16_t wt_port;
     const char* tls_cert_path;
     const char* tls_key_path;
 } poseidon_transport_config_t;
@@ -74,6 +77,7 @@ struct poseidon_transport_t {
     int (*stop)(poseidon_transport_t* self);
     int (*send)(poseidon_transport_t* self, int client_id,
                 const uint8_t* data, size_t len);
+    void (*destroy)(poseidon_transport_t* self);
 };
 
 // ============================================================================
@@ -119,14 +123,35 @@ poseidon_transport_t* poseidon_transport_ws_create(uint16_t port,
                                                     poseidon_channel_manager_t* manager);
 
 /**
- * Creates a QUIC transport (stub — returns a transport that fails to start).
+ * Creates a QUIC transport.
  *
  * @param port       Listen port
+ * @param cert_path  TLS certificate PEM file (required for QUIC)
+ * @param key_path   TLS private key PEM file (required for QUIC)
  * @param manager    Shared channel manager
  * @return           New transport, or NULL on failure
  */
 poseidon_transport_t* poseidon_transport_quic_create(uint16_t port,
+                                                      const char* cert_path,
+                                                      const char* key_path,
                                                       poseidon_channel_manager_t* manager);
+
+/**
+ * Creates a WebTransport server transport.
+ *
+ * Uses libwtf (HTTP/3 + WebTransport over QUIC) for browser-compatible
+ * connections. Requires TLS certificate and key.
+ *
+ * @param port       Listen port
+ * @param cert_path  TLS certificate PEM file (required)
+ * @param key_path   TLS private key PEM file (required)
+ * @param manager    Shared channel manager
+ * @return           New transport, or NULL on failure
+ */
+poseidon_transport_t* poseidon_transport_webtransport_create(uint16_t port,
+                                                             const char* cert_path,
+                                                             const char* key_path,
+                                                             poseidon_channel_manager_t* manager);
 
 #ifdef __ANDROID__
 /**

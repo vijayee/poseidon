@@ -87,6 +87,7 @@ set(POSEIDON_CLIENT_SOURCES
     ${POSEIDON_SRC_DIR}/Util/threadding.c
     ${POSEIDON_SRC_DIR}/Crypto/key_pair.c
     ${POSEIDON_SRC_DIR}/RefCounter/refcounter.c
+    ${POSEIDON_SRC_DIR}/Network/Meridian/msquic_singleton.c
 )
 
 # ============================================================================
@@ -99,6 +100,13 @@ target_include_directories(poseidon_client_objects PUBLIC
     ${POSEIDON_SRC_DIR}
     ${POSEIDON_INCLUDE_DIR}
 )
+
+# msquic include directory
+if(EXISTS ${POSEIDON_SRC_DIR}/../deps/msquic/src/inc/msquic.h)
+    target_include_directories(poseidon_client_objects PUBLIC
+        ${POSEIDON_SRC_DIR}/../deps/msquic/src/inc
+    )
+endif()
 
 # For libcbor headers: in-tree build uses deps/libcbor/src, standalone uses found package
 if(TARGET cbor)
@@ -117,6 +125,11 @@ target_link_libraries(poseidon_client_objects PUBLIC
     Threads::Threads
 )
 
+# Link msquic if available
+if(TARGET msquic::msquic)
+    target_link_libraries(poseidon_client_objects PUBLIC msquic::msquic msquic::platform)
+endif()
+
 add_library(poseidon_client_static STATIC $<TARGET_OBJECTS:poseidon_client_objects>)
 set_target_properties(poseidon_client_static PROPERTIES OUTPUT_NAME poseidon_client)
 target_include_directories(poseidon_client_static PUBLIC
@@ -129,6 +142,10 @@ target_link_libraries(poseidon_client_static PUBLIC
     Threads::Threads
 )
 
+if(TARGET msquic::msquic)
+    target_link_libraries(poseidon_client_static PUBLIC msquic::msquic msquic::platform)
+endif()
+
 add_library(poseidon_client_shared SHARED $<TARGET_OBJECTS:poseidon_client_objects>)
 set_target_properties(poseidon_client_shared PROPERTIES OUTPUT_NAME poseidon_client)
 target_include_directories(poseidon_client_shared PUBLIC
@@ -140,6 +157,10 @@ target_link_libraries(poseidon_client_shared PUBLIC
     OpenSSL::Crypto
     Threads::Threads
 )
+
+if(TARGET msquic::msquic)
+    target_link_libraries(poseidon_client_shared PUBLIC msquic::msquic msquic::platform)
+endif()
 
 # ============================================================================
 # Install rules

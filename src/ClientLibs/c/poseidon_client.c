@@ -7,6 +7,7 @@
 #include "Crypto/key_pair.h"
 #include "Channel/channel_config.h"
 #include "ClientAPIs/client_protocol.h"
+#include "Network/Meridian/msquic_singleton.h"
 #include "Util/allocator.h"
 #include "Util/log.h"
 #include "Util/threadding.h"
@@ -27,6 +28,7 @@
 struct poseidon_client_t {
     int fd;
     bool connected;
+    bool is_quic;
     uint32_t next_request_id;
     poseidon_message_cb_t message_cb;
     void* message_cb_ctx;
@@ -39,6 +41,16 @@ struct poseidon_client_t {
     volatile bool running;
     uint8_t read_buf[CLIENT_READ_BUF_SIZE];
     size_t read_len;
+
+    // QUIC-specific fields
+    const struct QUIC_API_TABLE* quic_api;
+    HQUIC quic_registration;
+    HQUIC quic_configuration;
+    HQUIC quic_connection;
+    HQUIC quic_stream;
+    volatile bool quic_stream_ready;
+    PLATFORMCONDITIONTYPE(quic_handshake_done);
+    PLATFORMLOCKTYPE(quic_lock);
 };
 
 // ============================================================================
@@ -60,6 +72,30 @@ static bool read_frame_header(const uint8_t* buf, uint32_t* len) {
 }
 
 static int send_frame(poseidon_client_t* client, const uint8_t* data, size_t len) {
+    if (client->is_quic) {
+        if (!client->quic_stream_ready || client->quic_stream == NULL) return -1;
+
+        size_t total_len = FRAME_HEADER_SIZE + len;
+        uint8_t* send_buf = get_clear_memory(total_len);
+        if (send_buf == NULL) return -1;
+
+        write_frame_header(send_buf, (uint32_t)len);
+        memcpy(send_buf + FRAME_HEADER_SIZE, data, len);
+
+        QUIC_BUFFER buf;
+        buf.Buffer = send_buf;
+        buf.Length = total_len;
+
+        QUIC_STATUS status = client->quic_api->StreamSend(
+            client->quic_stream, &buf, 1, QUIC_SEND_FLAG_NONE, send_buf);
+        if (QUIC_FAILED(status)) {
+            free(send_buf);
+            return -1;
+        }
+        // send_buf is freed in QUIC_STREAM_EVENT_SEND_COMPLETE callback
+        return 0;
+    }
+
     uint8_t header[FRAME_HEADER_SIZE];
     write_frame_header(header, (uint32_t)len);
 
@@ -123,7 +159,147 @@ static int send_admin_request(poseidon_client_t* client, uint8_t method,
 }
 
 // ============================================================================
-// RECEIVE THREAD
+// QUIC CALLBACKS
+// ============================================================================
+
+static void process_received_frame(poseidon_client_t* client, client_frame_t* frame);
+
+static QUIC_STATUS QUIC_API quic_client_stream_callback(HQUIC stream, void* context,
+                                                          QUIC_STREAM_EVENT* event) {
+    poseidon_client_t* client = (poseidon_client_t*)context;
+
+    switch (event->Type) {
+    case QUIC_STREAM_EVENT_START_COMPLETE:
+        platform_lock(&client->quic_lock);
+        client->quic_stream_ready = true;
+        platform_unlock(&client->quic_lock);
+        platform_signal_condition(&client->quic_handshake_done);
+        break;
+
+    case QUIC_STREAM_EVENT_RECEIVE: {
+        const QUIC_BUFFER* buffers = event->RECEIVE.Buffers;
+        uint32_t buffer_count = event->RECEIVE.BufferCount;
+
+        size_t total_received = 0;
+        for (uint32_t i = 0; i < buffer_count; i++) {
+            total_received += buffers[i].Length;
+        }
+
+        // Grow read buffer if needed
+        if (client->read_len + total_received > CLIENT_READ_BUF_SIZE) {
+            // For simplicity, just process what we can and discard overflow
+            log_warn("quic client: read buffer overflow, discarding data");
+            client->quic_api->StreamReceiveComplete(stream, total_received);
+            break;
+        }
+
+        for (uint32_t i = 0; i < buffer_count; i++) {
+            memcpy(client->read_buf + client->read_len,
+                   buffers[i].Buffer, buffers[i].Length);
+            client->read_len += buffers[i].Length;
+        }
+
+        // Process complete frames
+        while (client->read_len >= FRAME_HEADER_SIZE) {
+            uint32_t frame_len = 0;
+            if (!read_frame_header(client->read_buf, &frame_len)) {
+                client->connected = false;
+                break;
+            }
+
+            size_t total = FRAME_HEADER_SIZE + frame_len;
+            if (client->read_len < total) break;
+
+            struct cbor_load_result result;
+            cbor_item_t* item = cbor_load(client->read_buf + FRAME_HEADER_SIZE,
+                                          frame_len, &result);
+            if (item != NULL) {
+                client_frame_t frame;
+                memset(&frame, 0, sizeof(frame));
+                if (client_protocol_decode(item, &frame) == 0) {
+                    process_received_frame(client, &frame);
+                }
+                cbor_decref(&item);
+            }
+
+            memmove(client->read_buf, client->read_buf + total,
+                    client->read_len - total);
+            client->read_len -= total;
+        }
+
+        client->quic_api->StreamReceiveComplete(stream, total_received);
+        break;
+    }
+
+    case QUIC_STREAM_EVENT_SEND_COMPLETE:
+        if (event->SEND_COMPLETE.ClientContext != NULL) {
+            free(event->SEND_COMPLETE.ClientContext);
+        }
+        break;
+
+    case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
+        client->connected = false;
+        break;
+
+    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+        client->connected = false;
+        break;
+
+    default:
+        break;
+    }
+
+    return QUIC_STATUS_SUCCESS;
+}
+
+static QUIC_STATUS QUIC_API quic_client_connection_callback(HQUIC connection, void* context,
+                                                              QUIC_CONNECTION_EVENT* event) {
+    poseidon_client_t* client = (poseidon_client_t*)context;
+
+    switch (event->Type) {
+    case QUIC_CONNECTION_EVENT_CONNECTED:
+        client->connected = true;
+        // Open a bidirectional stream once connected
+        {
+            HQUIC stream = NULL;
+            QUIC_STATUS status = client->quic_api->StreamOpen(
+                connection, QUIC_STREAM_OPEN_FLAG_NONE,
+                (void*)quic_client_stream_callback, client, &stream);
+            if (QUIC_FAILED(status)) {
+                log_error("quic client: StreamOpen failed: 0x%x", status);
+                client->connected = false;
+                platform_signal_condition(&client->quic_handshake_done);
+                return QUIC_STATUS_SUCCESS;
+            }
+
+            status = client->quic_api->StreamStart(stream, QUIC_STREAM_OPEN_FLAG_NONE);
+            if (QUIC_FAILED(status)) {
+                log_error("quic client: StreamStart failed: 0x%x", status);
+                client->quic_api->StreamClose(stream);
+                client->connected = false;
+                platform_signal_condition(&client->quic_handshake_done);
+                return QUIC_STATUS_SUCCESS;
+            }
+
+            client->quic_stream = stream;
+        }
+        break;
+
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
+        client->connected = false;
+        platform_signal_condition(&client->quic_handshake_done);
+        client->quic_api->ConnectionClose(connection);
+        break;
+
+    default:
+        break;
+    }
+
+    return QUIC_STATUS_SUCCESS;
+}
+
+// ============================================================================
+// RECEIVE THREAD (Unix/TCP only — QUIC uses callbacks)
 // ============================================================================
 
 static void process_received_frame(poseidon_client_t* client, client_frame_t* frame) {
@@ -195,6 +371,157 @@ done:
 poseidon_client_t* poseidon_client_connect(const char* transport_url) {
     if (transport_url == NULL) return NULL;
 
+    // QUIC transport
+    if (strncmp(transport_url, "quic://", 7) == 0) {
+        const char* host_port = transport_url + 7;
+        char host[256] = {0};
+        uint16_t port = 0;
+
+        const char* colon = strrchr(host_port, ':');
+        if (colon == NULL) return NULL;
+        size_t host_len = colon - host_port;
+        if (host_len >= sizeof(host)) return NULL;
+        memcpy(host, host_port, host_len);
+        host[host_len] = '\0';
+        port = (uint16_t)atoi(colon + 1);
+
+        // Open msquic
+        const struct QUIC_API_TABLE* api = poseidon_msquic_open();
+        if (api == NULL) {
+            log_error("quic client: failed to open msquic");
+            return NULL;
+        }
+
+        poseidon_client_t* client = get_clear_memory(sizeof(poseidon_client_t));
+        if (client == NULL) {
+            poseidon_msquic_close();
+            return NULL;
+        }
+
+        client->is_quic = true;
+        client->quic_api = api;
+        client->next_request_id = 1;
+        client->connected = false; // Set true in CONNECTED callback
+        client->running = true;
+        platform_lock_init(&client->lock);
+        platform_lock_init(&client->quic_lock);
+        platform_condition_init(&client->quic_handshake_done);
+
+        // Open registration
+        HQUIC registration = NULL;
+        QUIC_STATUS status = api->RegistrationOpen(NULL, &registration);
+        if (QUIC_FAILED(status)) {
+            log_error("quic client: RegistrationOpen failed: 0x%x", status);
+            platform_condition_destroy(&client->quic_handshake_done);
+            platform_lock_destroy(&client->quic_lock);
+            platform_lock_destroy(&client->lock);
+            free(client);
+            poseidon_msquic_close();
+            return NULL;
+        }
+        client->quic_registration = registration;
+
+        // Open configuration
+        QUIC_BUFFER alpn;
+        static const uint8_t alpn_str[] = "poseidon_client";
+        alpn.Buffer = (uint8_t*)alpn_str;
+        alpn.Length = sizeof(alpn_str) - 1;
+
+        HQUIC configuration = NULL;
+        status = api->ConfigurationOpen(registration, &alpn, 1, NULL, 0, NULL, &configuration);
+        if (QUIC_FAILED(status)) {
+            log_error("quic client: ConfigurationOpen failed: 0x%x", status);
+            api->RegistrationClose(registration);
+            platform_condition_destroy(&client->quic_handshake_done);
+            platform_lock_destroy(&client->quic_lock);
+            platform_lock_destroy(&client->lock);
+            free(client);
+            poseidon_msquic_close();
+            return NULL;
+        }
+        client->quic_configuration = configuration;
+
+        // Load credentials — no cert validation for development
+        QUIC_CREDENTIAL_CONFIG cred_config;
+        memset(&cred_config, 0, sizeof(cred_config));
+        cred_config.Type = QUIC_CREDENTIAL_TYPE_NONE;
+        cred_config.Flags = QUIC_CREDENTIAL_FLAG_CLIENT |
+                            QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
+
+        status = api->ConfigurationLoadCredential(configuration, &cred_config);
+        if (QUIC_FAILED(status)) {
+            log_error("quic client: ConfigurationLoadCredential failed: 0x%x", status);
+            api->ConfigurationClose(configuration);
+            api->RegistrationClose(registration);
+            platform_condition_destroy(&client->quic_handshake_done);
+            platform_lock_destroy(&client->quic_lock);
+            platform_lock_destroy(&client->lock);
+            free(client);
+            poseidon_msquic_close();
+            return NULL;
+        }
+
+        // Open connection with callback
+        HQUIC connection = NULL;
+        status = api->ConnectionOpen(registration,
+                                     (void*)quic_client_connection_callback,
+                                     client, &connection);
+        if (QUIC_FAILED(status)) {
+            log_error("quic client: ConnectionOpen failed: 0x%x", status);
+            api->ConfigurationClose(configuration);
+            api->RegistrationClose(registration);
+            platform_condition_destroy(&client->quic_handshake_done);
+            platform_lock_destroy(&client->quic_lock);
+            platform_lock_destroy(&client->lock);
+            free(client);
+            poseidon_msquic_close();
+            return NULL;
+        }
+        client->quic_connection = connection;
+
+        // Start connection
+        status = api->ConnectionStart(connection, configuration,
+                                       QUIC_ADDRESS_FAMILY_INET, host, port);
+        if (QUIC_FAILED(status)) {
+            log_error("quic client: ConnectionStart failed: 0x%x", status);
+            api->ConnectionClose(connection);
+            api->ConfigurationClose(configuration);
+            api->RegistrationClose(registration);
+            platform_condition_destroy(&client->quic_handshake_done);
+            platform_lock_destroy(&client->quic_lock);
+            platform_lock_destroy(&client->lock);
+            free(client);
+            poseidon_msquic_close();
+            return NULL;
+        }
+
+        // Wait for handshake + stream to be ready
+        platform_lock(&client->quic_lock);
+        while (!client->quic_stream_ready && client->connected) {
+            platform_condition_wait(&client->quic_lock, &client->quic_handshake_done);
+        }
+        platform_unlock(&client->quic_lock);
+
+        if (!client->quic_stream_ready) {
+            log_error("quic client: failed to establish stream");
+            api->ConnectionShutdown(connection, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
+            api->ConnectionClose(connection);
+            api->ConfigurationClose(configuration);
+            api->RegistrationClose(registration);
+            platform_condition_destroy(&client->quic_handshake_done);
+            platform_lock_destroy(&client->quic_lock);
+            platform_lock_destroy(&client->lock);
+            free(client);
+            poseidon_msquic_close();
+            return NULL;
+        }
+
+        client->connected = true;
+        // No recv_thread for QUIC — msquic callbacks handle incoming data
+        return client;
+    }
+
+    // Unix domain socket transport
     int fd = -1;
 
     if (strncmp(transport_url, "unix://", 7) == 0) {
@@ -270,9 +597,36 @@ void poseidon_client_disconnect(poseidon_client_t* client) {
 
     client->running = false;
     client->connected = false;
-    shutdown(client->fd, SHUT_RDWR);
-    pthread_join(client->recv_thread, NULL);
-    close(client->fd);
+
+    if (client->is_quic) {
+        if (client->quic_stream != NULL) {
+            client->quic_api->StreamShutdown(client->quic_stream,
+                                              QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
+            client->quic_api->StreamClose(client->quic_stream);
+            client->quic_stream = NULL;
+        }
+        if (client->quic_connection != NULL) {
+            client->quic_api->ConnectionShutdown(client->quic_connection,
+                                                  QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
+            client->quic_api->ConnectionClose(client->quic_connection);
+            client->quic_connection = NULL;
+        }
+        if (client->quic_configuration != NULL) {
+            client->quic_api->ConfigurationClose(client->quic_configuration);
+            client->quic_configuration = NULL;
+        }
+        if (client->quic_registration != NULL) {
+            client->quic_api->RegistrationClose(client->quic_registration);
+            client->quic_registration = NULL;
+        }
+        poseidon_msquic_close();
+        platform_condition_destroy(&client->quic_handshake_done);
+        platform_lock_destroy(&client->quic_lock);
+    } else {
+        shutdown(client->fd, SHUT_RDWR);
+        pthread_join(client->recv_thread, NULL);
+        close(client->fd);
+    }
 
     platform_lock_destroy(&client->lock);
     free(client);
@@ -304,10 +658,11 @@ int poseidon_client_channel_destroy(poseidon_client_t* client, const char* topic
     if (client == NULL || topic_id == NULL || owner_key == NULL) return -1;
 
     // Sign: method_code || topic_id || timestamp
-    uint8_t data_to_sign[1 + 256 + 8];
+    size_t topic_len = strlen(topic_id);
+    if (topic_len > CLIENT_MAX_TOPIC_PATH) return -1;
+    uint8_t data_to_sign[1 + CLIENT_MAX_TOPIC_PATH + 8];
     size_t pos = 0;
     data_to_sign[pos++] = CLIENT_METHOD_CHANNEL_DESTROY;
-    size_t topic_len = strlen(topic_id);
     memcpy(data_to_sign + pos, topic_id, topic_len);
     pos += topic_len;
 
@@ -334,10 +689,11 @@ int poseidon_client_channel_modify(poseidon_client_t* client, const char* topic_
                                     const poseidon_key_pair_t* owner_key) {
     if (client == NULL || topic_id == NULL || config == NULL || owner_key == NULL) return -1;
 
-    uint8_t data_to_sign[1 + 256 + 8];
+    size_t topic_len = strlen(topic_id);
+    if (topic_len > CLIENT_MAX_TOPIC_PATH) return -1;
+    uint8_t data_to_sign[1 + CLIENT_MAX_TOPIC_PATH + 8];
     size_t pos = 0;
     data_to_sign[pos++] = CLIENT_METHOD_CHANNEL_MODIFY;
-    size_t topic_len = strlen(topic_id);
     memcpy(data_to_sign + pos, topic_id, topic_len);
     pos += topic_len;
 
