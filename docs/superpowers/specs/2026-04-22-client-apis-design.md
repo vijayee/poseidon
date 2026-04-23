@@ -360,6 +360,40 @@ New `src/poseidond.c`:
 6. Run periodic tick/gossip on a timer thread
 7. Signal handling (SIGINT/SIGTERM) → stop all transports, destroy manager, close msquic singleton
 
+### Transport enable flags
+
+Each transport is independently toggleable via command-line flags or config file. Default: only Unix socket enabled (safest, localhost-only).
+
+```
+--enable-unix          Enable Unix domain socket transport (default: on)
+--enable-tcp           Enable TCP + TLS transport (default: off)
+--enable-ws            Enable WebSocket over TLS transport (default: off)
+--enable-quic          Enable QUIC transport (default: off)
+--enable-binder        Enable Android Binder transport (default: off, Android only)
+--enable-xpc           Enable iOS XPC transport (default: off, iOS only)
+```
+
+The daemon's transport config struct:
+
+```c
+typedef struct {
+    bool enable_unix;
+    bool enable_tcp;
+    bool enable_ws;
+    bool enable_quic;
+    bool enable_binder;
+    bool enable_xpc;
+    const char* unix_socket_path;   // default: "/var/run/poseidond.sock"
+    uint16_t tcp_port;              // default: 9090
+    uint16_t ws_port;               // default: 9091
+    uint16_t quic_port;             // default: 9092
+    const char* tls_cert_path;      // required when tcp or ws enabled
+    const char* tls_key_path;       // required when tcp or ws enabled
+} poseidon_transport_config_t;
+```
+
+At startup, `poseidond` validates that required dependencies (TLS certs for TCP/WS, platform for Binder/XPC) are present before starting each transport. A transport that fails validation logs a warning and is skipped — the daemon continues with remaining transports.
+
 ## 7. Client Libraries
 
 Each library wraps the CBOR protocol into a native API. The library handles:
