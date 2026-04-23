@@ -27,16 +27,16 @@ TEST_F(ClientSessionTest, SubscribeUnsubscribe) {
     client_session_t* session = client_session_create(1, nullptr);
     ASSERT_NE(nullptr, session);
 
-    EXPECT_EQ(0, client_session_subscribe(session, "Feeds/public"));
+    EXPECT_EQ(0, client_session_subscribe(session, "Feeds/public", false));
     EXPECT_EQ(1u, session->num_subscriptions);
     EXPECT_TRUE(session->subscriptions[0].active);
     EXPECT_STREQ("Feeds/public", session->subscriptions[0].topic_path);
 
     // Duplicate subscribe is idempotent
-    EXPECT_EQ(0, client_session_subscribe(session, "Feeds/public"));
+    EXPECT_EQ(0, client_session_subscribe(session, "Feeds/public", false));
     EXPECT_EQ(1u, session->num_subscriptions);
 
-    EXPECT_EQ(0, client_session_subscribe(session, "Feeds/private"));
+    EXPECT_EQ(0, client_session_subscribe(session, "Feeds/private", false));
     EXPECT_EQ(2u, session->num_subscriptions);
 
     EXPECT_EQ(0, client_session_unsubscribe(session, "Feeds/public"));

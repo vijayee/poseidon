@@ -157,6 +157,10 @@ static void tcp_client_disconnect(tcp_client_t* client) {
     poseidon_transport_t* transport = client->transport;
     tcp_transport_data_t* data = (tcp_transport_data_t*)transport->loop;
 
+    // Clean up Quasar subscriptions before unregistering from session registry
+    client_session_cleanup_subscriptions(client->session);
+    poseidon_channel_manager_unregister_session(transport->manager, client->session);
+
     for (size_t i = 0; i < data->num_clients; i++) {
         if (data->clients[i] == client) {
             data->clients[i] = data->clients[data->num_clients - 1];
@@ -254,6 +258,8 @@ static void tcp_accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
         close(client_fd);
         return;
     }
+    client->session->client_fd = client_fd;
+    client->session->transport = transport;
     client->read_len = 0;
 
     // Wrap with SSL if TLS is configured
@@ -289,6 +295,7 @@ static void tcp_accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
     }
 
     data->clients[data->num_clients++] = client;
+    poseidon_channel_manager_register_session(transport->manager, client->session);
     log_info("tcp transport: client connected (fd=%d, total=%zu)",
              client_fd, data->num_clients);
 }

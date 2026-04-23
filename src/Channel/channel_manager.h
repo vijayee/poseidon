@@ -21,6 +21,7 @@ extern "C" {
 #endif
 
 #define POSEIDON_CHANNEL_MANAGER_MAX_CHANNELS 32
+#define POSEIDON_SESSION_REGISTRY_MAX 256
 #define POSEIDON_MAX_PENDING_BOOTSTRAPS 16
 #define POSEIDON_BOOTSTRAP_REPLY_ADDRS_MAX 16
 #define POSEIDON_TOMBSTONE_MAX 64
@@ -70,6 +71,8 @@ typedef struct poseidon_channel_manager_t {
     size_t num_pending_bootstraps;
     poseidon_tombstone_t tombstones[POSEIDON_TOMBSTONE_MAX];
     size_t num_tombstones;
+    void* sessions[POSEIDON_SESSION_REGISTRY_MAX];
+    size_t num_sessions;
 } poseidon_channel_manager_t;
 
 // ============================================================================
@@ -185,6 +188,13 @@ int poseidon_channel_manager_handle_bootstrap_request(
 
 int poseidon_channel_manager_tick_all(poseidon_channel_manager_t* mgr);
 int poseidon_channel_manager_gossip_all(poseidon_channel_manager_t* mgr);
+
+// ============================================================================
+// SESSION REGISTRY
+// ============================================================================
+
+int poseidon_channel_manager_register_session(poseidon_channel_manager_t* mgr, void* session);
+int poseidon_channel_manager_unregister_session(poseidon_channel_manager_t* mgr, void* session);
 
 // ============================================================================
 // TOMBSTONE OPERATIONS

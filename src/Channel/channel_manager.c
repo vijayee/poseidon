@@ -743,3 +743,35 @@ int poseidon_tombstone_from_modify_notice(const meridian_channel_modify_notice_t
     tombstone->has_config = true;
     return 0;
 }
+
+// ============================================================================
+// SESSION REGISTRY
+// ============================================================================
+
+int poseidon_channel_manager_register_session(poseidon_channel_manager_t* mgr, void* session) {
+    if (mgr == NULL || session == NULL) return -1;
+    platform_lock(&mgr->lock);
+    if (mgr->num_sessions >= POSEIDON_SESSION_REGISTRY_MAX) {
+        platform_unlock(&mgr->lock);
+        return -1;
+    }
+    mgr->sessions[mgr->num_sessions++] = session;
+    platform_unlock(&mgr->lock);
+    return 0;
+}
+
+int poseidon_channel_manager_unregister_session(poseidon_channel_manager_t* mgr, void* session) {
+    if (mgr == NULL || session == NULL) return -1;
+    platform_lock(&mgr->lock);
+    for (size_t i = 0; i < mgr->num_sessions; i++) {
+        if (mgr->sessions[i] == session) {
+            mgr->sessions[i] = mgr->sessions[mgr->num_sessions - 1];
+            mgr->sessions[mgr->num_sessions - 1] = NULL;
+            mgr->num_sessions--;
+            platform_unlock(&mgr->lock);
+            return 0;
+        }
+    }
+    platform_unlock(&mgr->lock);
+    return -1;
+}

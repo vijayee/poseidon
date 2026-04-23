@@ -66,6 +66,7 @@ typedef struct poseidon_channel_t {
     topic_alias_registry_t* aliases;     /**< Human-readable name → Base58 ID map */
     poseidon_channel_message_cb_t message_cb;
     void* message_cb_ctx;
+    void* publisher_session;    /**< Set before publish for self-delivery filtering */
     poseidon_channel_intercept_cb_t intercept_cb;  /**< Intercepts Quasar messages (e.g. bootstrap) */
     void* intercept_ctx;
     PLATFORMLOCKTYPE(lock);

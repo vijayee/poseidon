@@ -81,6 +81,8 @@ static unix_client_t* unix_client_create(int fd, poseidon_transport_t* transport
         free(client);
         return NULL;
     }
+    client->session->client_fd = fd;
+    client->session->transport = transport;
     client->read_len = 0;
 
     return client;
@@ -164,6 +166,10 @@ static void unix_client_disconnect(unix_client_t* client) {
 
     poseidon_transport_t* transport = client->transport;
     unix_transport_data_t* data = (unix_transport_data_t*)transport->loop;
+
+    // Clean up Quasar subscriptions before unregistering from session registry
+    client_session_cleanup_subscriptions(client->session);
+    poseidon_channel_manager_unregister_session(transport->manager, client->session);
 
     // Remove from client list
     for (size_t i = 0; i < data->num_clients; i++) {
@@ -257,6 +263,7 @@ static void unix_accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
     }
 
     data->clients[data->num_clients++] = client;
+    poseidon_channel_manager_register_session(transport->manager, client->session);
     log_info("unix transport: client connected (fd=%d, total=%zu)",
              client_fd, data->num_clients);
 }

@@ -17,6 +17,7 @@ add_subdirectory(deps/googletest)
 
 # Build libcbor separately as C (sanitizers disabled to avoid link issues)
 set(SANITIZE OFF CACHE BOOL "" FORCE)
+set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE OFF CACHE BOOL "" FORCE)
 add_subdirectory(deps/libcbor)
 
 # Build hashmap

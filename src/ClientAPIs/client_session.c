@@ -3,6 +3,7 @@
 //
 
 #include "client_session.h"
+#include "transport.h"
 #include "../Channel/channel_notice.h"
 #include "../Channel/channel_manager.h"
 #include "../Crypto/key_pair.h"
@@ -10,6 +11,14 @@
 #include "../Util/threadding.h"
 #include <cbor.h>
 #include <string.h>
+#include "../Util/vec.h"
+
+// Forward declarations — defined in later sections
+static bool manager_has_other_subscriber(poseidon_channel_manager_t* mgr,
+                                          const char* topic_path,
+                                          const client_session_t* exclude);
+static void session_dispatch_message(void* ctx, const uint8_t* topic, size_t topic_len,
+                                      const char* subtopic, const uint8_t* data, size_t data_len);
 
 // ============================================================================
 // LIFECYCLE
@@ -140,7 +149,8 @@ int client_session_handle_request(client_session_t* session,
         }
 
         case CLIENT_METHOD_SUBSCRIBE: {
-            int rc = client_session_subscribe(session, frame->topic_path);
+            bool loopback = (frame->payload_len > 0 && frame->payload[0] != 0);
+            int rc = client_session_subscribe(session, frame->topic_path, loopback);
             if (rc != 0) {
                 *out = client_protocol_encode_response(frame->request_id,
                                                         CLIENT_ERROR_INVALID_PARAMS, "");
@@ -176,10 +186,13 @@ int client_session_handle_request(client_session_t* session,
                                                         CLIENT_ERROR_CHANNEL_NOT_FOUND, "");
                 return -1;
             }
+            // Set publisher session for self-delivery filtering
+            channel->publisher_session = (void*)session;
             int rc = poseidon_channel_publish(channel,
                                                (const uint8_t*)frame->topic_path,
                                                strlen(frame->topic_path),
                                                frame->payload, frame->payload_len);
+            channel->publisher_session = NULL;
             if (rc != 0) {
                 *out = client_protocol_encode_response(frame->request_id,
                                                         CLIENT_ERROR_TRANSPORT, "");
@@ -418,7 +431,7 @@ int client_session_handle_request(client_session_t* session,
 // SUBSCRIPTION MANAGEMENT
 // ============================================================================
 
-int client_session_subscribe(client_session_t* session, const char* topic_path) {
+int client_session_subscribe(client_session_t* session, const char* topic_path, bool loopback) {
     if (session == NULL || topic_path == NULL) return -1;
 
     platform_lock(&session->lock);
@@ -426,6 +439,7 @@ int client_session_subscribe(client_session_t* session, const char* topic_path) 
     for (size_t i = 0; i < session->num_subscriptions; i++) {
         if (session->subscriptions[i].active &&
             strcmp(session->subscriptions[i].topic_path, topic_path) == 0) {
+            session->subscriptions[i].loopback = loopback;
             platform_unlock(&session->lock);
             return 0;
         }
@@ -440,9 +454,26 @@ int client_session_subscribe(client_session_t* session, const char* topic_path) 
             topic_path, CLIENT_MAX_TOPIC_PATH - 1);
     session->subscriptions[session->num_subscriptions].topic_path[CLIENT_MAX_TOPIC_PATH - 1] = '\0';
     session->subscriptions[session->num_subscriptions].active = true;
+    session->subscriptions[session->num_subscriptions].loopback = loopback;
     session->num_subscriptions++;
 
     platform_unlock(&session->lock);
+
+    // Wire subscription to the Quasar overlay
+    if (session->manager != NULL) {
+        poseidon_channel_t* channel = find_channel_by_topic(session->manager, topic_path);
+        if (channel != NULL) {
+            poseidon_channel_subscribe(channel,
+                                       (const uint8_t*)topic_path,
+                                       strlen(topic_path), 0);
+            // Set message callback if not already set
+            if (channel->message_cb == NULL) {
+                poseidon_channel_set_message_callback(channel,
+                    session_dispatch_message, session->manager);
+            }
+        }
+    }
+
     return 0;
 }
 
@@ -460,10 +491,186 @@ int client_session_unsubscribe(client_session_t* session, const char* topic_path
             }
             session->num_subscriptions--;
             platform_unlock(&session->lock);
+
+            // Unsubscribe from Quasar if this was the last local subscriber
+            if (session->manager != NULL &&
+                !manager_has_other_subscriber(session->manager, topic_path, session)) {
+                poseidon_channel_t* channel = find_channel_by_topic(session->manager,
+                                                                     topic_path);
+                if (channel != NULL) {
+                    poseidon_channel_unsubscribe(channel,
+                        (const uint8_t*)topic_path, strlen(topic_path));
+                }
+            }
             return 0;
         }
     }
 
     platform_unlock(&session->lock);
     return -1;
+}
+
+bool client_session_is_subscribed(client_session_t* session, const char* topic_path) {
+    if (session == NULL || topic_path == NULL) return false;
+    platform_lock(&session->lock);
+    for (size_t i = 0; i < session->num_subscriptions; i++) {
+        if (session->subscriptions[i].active &&
+            strcmp(session->subscriptions[i].topic_path, topic_path) == 0) {
+            platform_unlock(&session->lock);
+            return true;
+        }
+    }
+    platform_unlock(&session->lock);
+    return false;
+}
+
+bool client_session_has_loopback(client_session_t* session, const char* topic_path) {
+    if (session == NULL || topic_path == NULL) return false;
+    platform_lock(&session->lock);
+    for (size_t i = 0; i < session->num_subscriptions; i++) {
+        if (session->subscriptions[i].active &&
+            strcmp(session->subscriptions[i].topic_path, topic_path) == 0) {
+            bool lb = session->subscriptions[i].loopback;
+            platform_unlock(&session->lock);
+            return lb;
+        }
+    }
+    platform_unlock(&session->lock);
+    return false;
+}
+
+// ============================================================================
+// SUBSCRIPTION CLEANUP — called before unregistering session from manager
+// ============================================================================
+
+static bool manager_has_other_subscriber(poseidon_channel_manager_t* mgr,
+                                          const char* topic_path,
+                                          const client_session_t* exclude) {
+    // Snapshot session pointers to avoid holding manager->lock while
+    // taking session->lock (prevents deadlock with dispatch path)
+    vec_t(client_session_t*) snap;
+    vec_init(&snap);
+    platform_lock(&mgr->lock);
+    for (size_t i = 0; i < mgr->num_sessions; i++) {
+        client_session_t* s = (client_session_t*)mgr->sessions[i];
+        if (s != NULL && s != exclude) vec_push(&snap, s);
+    }
+    platform_unlock(&mgr->lock);
+
+    bool found = false;
+    for (int i = 0; i < snap.length; i++) {
+        if (client_session_is_subscribed(snap.data[i], topic_path)) {
+            found = true;
+            break;
+        }
+    }
+    vec_deinit(&snap);
+    return found;
+}
+
+void client_session_cleanup_subscriptions(client_session_t* session) {
+    if (session == NULL || session->manager == NULL) return;
+
+    vec_t(char*) topics;
+    vec_init(&topics);
+
+    platform_lock(&session->lock);
+    for (size_t i = 0; i < session->num_subscriptions; i++) {
+        if (session->subscriptions[i].active) {
+            char* topic = strdup(session->subscriptions[i].topic_path);
+            if (topic != NULL) vec_push(&topics, topic);
+        }
+    }
+    platform_unlock(&session->lock);
+
+    for (int i = 0; i < topics.length; i++) {
+        if (!manager_has_other_subscriber(session->manager, topics.data[i], session)) {
+            poseidon_channel_t* channel = find_channel_by_topic(session->manager, topics.data[i]);
+            if (channel != NULL) {
+                poseidon_channel_unsubscribe(channel,
+                    (const uint8_t*)topics.data[i], strlen(topics.data[i]));
+            }
+        }
+        free(topics.data[i]);
+    }
+    vec_deinit(&topics);
+}
+
+// ============================================================================
+// EVENT DISPATCH
+// ============================================================================
+
+static void session_dispatch_message(void* ctx, const uint8_t* topic, size_t topic_len,
+                                      const char* subtopic, const uint8_t* data, size_t data_len) {
+    poseidon_channel_manager_t* manager = (poseidon_channel_manager_t*)ctx;
+
+    // Build null-terminated topic string
+    char topic_str[CLIENT_MAX_TOPIC_PATH];
+    size_t copy_len = topic_len < CLIENT_MAX_TOPIC_PATH - 1 ? topic_len : CLIENT_MAX_TOPIC_PATH - 1;
+    memcpy(topic_str, topic, copy_len);
+    topic_str[copy_len] = '\0';
+
+    // Find the channel to get publisher_session for self-delivery filtering
+    poseidon_channel_t* channel = find_channel_by_topic(manager, topic_str);
+    void* publisher_session = (channel != NULL) ? channel->publisher_session : NULL;
+
+    // Encode the event frame
+    cbor_item_t* event = client_protocol_encode_event(
+        CLIENT_EVENT_MESSAGE, topic_str,
+        subtopic ? subtopic : "",
+        data, data_len);
+    if (event == NULL) return;
+
+    uint8_t* buf = NULL;
+    size_t buf_len = 0;
+    if (client_protocol_serialize(event, &buf, &buf_len) != 0) {
+        cbor_decref(&event);
+        return;
+    }
+    cbor_decref(&event);
+
+    // Snapshot session list under manager lock to avoid holding
+    // manager->lock while taking session->lock (prevents deadlock)
+    vec_t(client_session_t*) snap;
+    vec_init(&snap);
+    platform_lock(&manager->lock);
+    for (size_t i = 0; i < manager->num_sessions; i++) {
+        client_session_t* s = (client_session_t*)manager->sessions[i];
+        if (s != NULL) vec_push(&snap, s);
+    }
+    platform_unlock(&manager->lock);
+
+    // Deliver to each subscribed session (no manager lock held)
+    for (int i = 0; i < snap.length; i++) {
+        client_session_t* s = snap.data[i];
+        if (!client_session_is_subscribed(s, topic_str)) continue;
+        if (s == publisher_session && !client_session_has_loopback(s, topic_str)) continue;
+        if (s->transport != NULL && s->client_fd >= 0) {
+            s->transport->send(s->transport, s->client_fd, buf, buf_len);
+        }
+    }
+    vec_deinit(&snap);
+
+    free(buf);
+}
+
+void client_session_dispatch_event(client_session_t* session,
+                                    uint8_t event_type,
+                                    const char* topic_id,
+                                    const char* subtopic,
+                                    const uint8_t* data, size_t data_len) {
+    if (session == NULL || session->transport == NULL || session->client_fd < 0) return;
+
+    cbor_item_t* event = client_protocol_encode_event(event_type, topic_id,
+                                                        subtopic ? subtopic : "",
+                                                        data, data_len);
+    if (event == NULL) return;
+
+    uint8_t* buf = NULL;
+    size_t buf_len = 0;
+    if (client_protocol_serialize(event, &buf, &buf_len) == 0) {
+        session->transport->send(session->transport, session->client_fd, buf, buf_len);
+        free(buf);
+    }
+    cbor_decref(&event);
 }
