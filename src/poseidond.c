@@ -19,6 +19,7 @@
 #define DEFAULT_TCP_PORT 9090
 #define DEFAULT_WS_PORT 9091
 #define DEFAULT_QUIC_PORT 9092
+#define DEFAULT_WT_PORT 9093
 #define DEFAULT_DIAL_PORT 8000
 #define DEFAULT_PORT_RANGE_START 8001
 #define DEFAULT_PORT_RANGE_END 8100
@@ -39,6 +40,7 @@ static void print_usage(const char* program) {
     printf("  --enable-tcp           Enable TCP transport\n");
     printf("  --enable-ws            Enable WebSocket transport\n");
     printf("  --enable-quic          Enable QUIC transport\n");
+    printf("  --enable-wt           Enable WebTransport\n");
     printf("  --dial-port PORT       Dial channel port (default: %d)\n", DEFAULT_DIAL_PORT);
     printf("  --port-range-start PORT  Start of data channel port range (default: %d)\n", DEFAULT_PORT_RANGE_START);
     printf("  --port-range-end PORT    End of data channel port range (default: %d)\n", DEFAULT_PORT_RANGE_END);
@@ -46,6 +48,7 @@ static void print_usage(const char* program) {
     printf("  --tcp-port PORT        TCP listen port (default: %d)\n", DEFAULT_TCP_PORT);
     printf("  --ws-port PORT          WebSocket listen port (default: %d)\n", DEFAULT_WS_PORT);
     printf("  --quic-port PORT       QUIC listen port (default: %d)\n", DEFAULT_QUIC_PORT);
+    printf("  --wt-port PORT         WebTransport listen port (default: %d)\n", DEFAULT_WT_PORT);
     printf("  --tls-cert PATH        TLS certificate path\n");
     printf("  --tls-key PATH         TLS private key path\n");
     printf("  -h, --help             Show this help message\n");
@@ -63,6 +66,7 @@ int main(int argc, char* argv[]) {
         {"enable-tcp",       no_argument,       0, 'T'},
         {"enable-ws",        no_argument,       0, 'W'},
         {"enable-quic",      no_argument,       0, 'Q'},
+        {"enable-wt",        no_argument,       0, 'B'},
         {"dial-port",        required_argument, 0, 'd'},
         {"port-range-start", required_argument, 0, 's'},
         {"port-range-end",   required_argument, 0, 'e'},
@@ -70,6 +74,7 @@ int main(int argc, char* argv[]) {
         {"tcp-port",         required_argument, 0, 't'},
         {"ws-port",          required_argument, 0, 'w'},
         {"quic-port",        required_argument, 0, 'q'},
+        {"wt-port",          required_argument, 0, 'b'},
         {"tls-cert",         required_argument, 0, 'c'},
         {"tls-key",          required_argument, 0, 'k'},
         {"help",             no_argument,       0, 'h'},
@@ -84,6 +89,7 @@ int main(int argc, char* argv[]) {
         case 'T': config.enable_tcp = true; break;
         case 'W': config.enable_ws = true; break;
         case 'Q': config.enable_quic = true; break;
+        case 'B': config.enable_wt = true; break;
         case 'd': dial_port = (uint16_t)atoi(optarg); break;
         case 's': port_range_start = (uint16_t)atoi(optarg); break;
         case 'e': port_range_end = (uint16_t)atoi(optarg); break;
@@ -91,6 +97,7 @@ int main(int argc, char* argv[]) {
         case 't': config.tcp_port = (uint16_t)atoi(optarg); break;
         case 'w': config.ws_port = (uint16_t)atoi(optarg); break;
         case 'q': config.quic_port = (uint16_t)atoi(optarg); break;
+        case 'b': config.wt_port = (uint16_t)atoi(optarg); break;
         case 'c': config.tls_cert_path = optarg; break;
         case 'k': config.tls_key_path = optarg; break;
         case 'h': show_help = true; break;
@@ -154,6 +161,7 @@ int main(int argc, char* argv[]) {
     poseidon_transport_t* g_tcp_transport = NULL;
     poseidon_transport_t* g_ws_transport = NULL;
     poseidon_transport_t* g_quic_transport = NULL;
+    poseidon_transport_t* g_wt_transport = NULL;
 
     if (config.enable_unix) {
         g_unix_transport = poseidon_transport_unix_create(config.unix_socket_path, mgr);
@@ -211,14 +219,41 @@ int main(int argc, char* argv[]) {
     }
 
     if (config.enable_quic) {
-        g_quic_transport = poseidon_transport_quic_create(config.quic_port, mgr);
-        if (g_quic_transport != NULL) {
-            if (g_quic_transport->start(g_quic_transport) == 0) {
-                log_info("poseidond: QUIC transport listening on port %u", config.quic_port);
+        if (config.tls_cert_path == NULL || config.tls_key_path == NULL) {
+            log_error("poseidond: QUIC transport requires --tls-cert and --tls-key");
+        } else {
+            g_quic_transport = poseidon_transport_quic_create(
+                config.quic_port, config.tls_cert_path, config.tls_key_path, mgr);
+            if (g_quic_transport != NULL) {
+                if (g_quic_transport->start(g_quic_transport) == 0) {
+                    log_info("poseidond: QUIC transport listening on port %u", config.quic_port);
+                } else {
+                    log_error("poseidond: failed to start QUIC transport");
+                    poseidon_transport_destroy(g_quic_transport);
+                    g_quic_transport = NULL;
+                }
             } else {
-                log_warn("poseidond: QUIC transport not yet implemented");
-                poseidon_transport_destroy(g_quic_transport);
-                g_quic_transport = NULL;
+                log_error("poseidond: failed to create QUIC transport");
+            }
+        }
+    }
+
+    if (config.enable_wt) {
+        if (config.tls_cert_path == NULL || config.tls_key_path == NULL) {
+            log_error("poseidond: WebTransport requires --tls-cert and --tls-key");
+        } else {
+            g_wt_transport = poseidon_transport_webtransport_create(
+                config.wt_port, config.tls_cert_path, config.tls_key_path, mgr);
+            if (g_wt_transport != NULL) {
+                if (g_wt_transport->start(g_wt_transport) == 0) {
+                    log_info("poseidond: WebTransport listening on port %u", config.wt_port);
+                } else {
+                    log_error("poseidond: failed to start WebTransport");
+                    poseidon_transport_destroy(g_wt_transport);
+                    g_wt_transport = NULL;
+                }
+            } else {
+                log_error("poseidond: failed to create WebTransport");
             }
         }
     }
@@ -250,6 +285,10 @@ int main(int argc, char* argv[]) {
     if (g_quic_transport != NULL) {
         g_quic_transport->stop(g_quic_transport);
         poseidon_transport_destroy(g_quic_transport);
+    }
+    if (g_wt_transport != NULL) {
+        g_wt_transport->stop(g_wt_transport);
+        poseidon_transport_destroy(g_wt_transport);
     }
 
     // Cleanup

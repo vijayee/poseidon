@@ -38,6 +38,13 @@ set(POLL_DANCER_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(POLL_DANCER_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 add_subdirectory(deps/poll-dancer)
 
+# Build libwtf (WebTransport over HTTP/3) using our existing msquic
+set(WTF_USE_EXTERNAL_MSQUIC ON CACHE BOOL "" FORCE)
+set(WTF_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(WTF_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
+set(msquic_DIR ${CMAKE_CURRENT_SOURCE_DIR}/cmake CACHE PATH "msquic config dir" FORCE)
+add_subdirectory(deps/libwtf)
+
 # Source directories
 set(MERIDIAN_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Network/Meridian)
 set(UTIL_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Util)
@@ -111,6 +118,7 @@ set(POSEIDON_SOURCES
     ${CLIENT_APIS_SRC_DIR}/transport_tcp.c
     ${CLIENT_APIS_SRC_DIR}/transport_ws.c
     ${CLIENT_APIS_SRC_DIR}/transport_quic.c
+    ${CLIENT_APIS_SRC_DIR}/transport_webtransport.c
     ${CLIENT_LIBS_SRC_DIR}/poseidon_client.c
 )
 
@@ -129,6 +137,7 @@ target_include_directories(poseidon PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/src/inc
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/xxhash
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/blake3/c
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/libwtf/include
 )
 
 target_link_libraries(poseidon PRIVATE
@@ -141,6 +150,7 @@ target_link_libraries(poseidon PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
     poll_dancer
+    wtf
 )
 
 # Meridian Relay Server
@@ -156,6 +166,7 @@ target_include_directories(poseidond PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/src/inc
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/xxhash
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/blake3/c
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/libwtf/include
 )
 
 target_link_libraries(poseidond PRIVATE
@@ -169,6 +180,7 @@ target_link_libraries(poseidond PRIVATE
     OpenSSL::SSL
     OpenSSL::Crypto
     poll_dancer
+    wtf
     m
 )
 
