@@ -63,8 +63,8 @@ class PoseidonClient(private val connection: PoseidonConnection) {
         connection.sendRequest(METHOD_ALIAS_UNREGISTER, name)
     }
 
-    fun onDelivery(callback: (topicId: String, subtopic: String, data: ByteArray) -> Unit) {
-        connection.onDelivery(callback)
+    fun onMessage(callback: (topicId: String, subtopic: String, data: ByteArray) -> Unit) {
+        connection.onMessage(callback)
     }
 
     private fun decodeTopicId(response: ByteArray): String {

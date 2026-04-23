@@ -42,7 +42,7 @@ typedef enum {
 
 typedef struct poseidon_channel_t poseidon_channel_t;
 
-typedef void (*poseidon_channel_delivery_cb_t)(void* ctx, const uint8_t* topic,
+typedef void (*poseidon_channel_message_cb_t)(void* ctx, const uint8_t* topic,
                                                 size_t topic_len,
                                                 const char* subtopic,
                                                 const uint8_t* data, size_t data_len);
@@ -64,9 +64,9 @@ typedef struct poseidon_channel_t {
     bool owns_key_pair;
     subtopic_table_t* subtopic_subs;    /**< Per-granularity subtopic subscriptions */
     topic_alias_registry_t* aliases;     /**< Human-readable name → Base58 ID map */
-    poseidon_channel_delivery_cb_t delivery_cb;
-    void* delivery_cb_ctx;
-    poseidon_channel_intercept_cb_t intercept_cb;  /**< Intercepts Quasar deliveries (e.g. bootstrap) */
+    poseidon_channel_message_cb_t message_cb;
+    void* message_cb_ctx;
+    poseidon_channel_intercept_cb_t intercept_cb;  /**< Intercepts Quasar messages (e.g. bootstrap) */
     void* intercept_ctx;
     PLATFORMLOCKTYPE(lock);
 } poseidon_channel_t;
@@ -123,11 +123,11 @@ int poseidon_channel_publish_subtopic(poseidon_channel_t* channel,
                                        const char* subtopic,
                                        const uint8_t* data, size_t data_len);
 
-int poseidon_channel_set_delivery_callback(poseidon_channel_t* channel,
-                                            poseidon_channel_delivery_cb_t cb, void* ctx);
+int poseidon_channel_set_message_callback(poseidon_channel_t* channel,
+                                            poseidon_channel_message_cb_t cb, void* ctx);
 
-/** Enables Quasar delivery on a channel without setting an application callback. */
-int poseidon_channel_enable_quasar_delivery(poseidon_channel_t* channel);
+/** Enables Quasar message on a channel without setting an application callback. */
+int poseidon_channel_enable_quasar_message(poseidon_channel_t* channel);
 
 // ============================================================================
 // SUBTOPIC OPERATIONS

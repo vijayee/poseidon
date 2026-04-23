@@ -45,7 +45,7 @@ await client.subscribe(topicId + '/events');
 await client.publish(topicId + '/events', Buffer.from('hello'));
 
 // Receive messages
-client.onDelivery((topicId, subtopic, data) => {
+client.onMessage((topicId, subtopic, data) => {
   console.log('Got message:', subtopic, data.toString());
 });
 
@@ -79,7 +79,7 @@ await client.disconnect();
 | `publish(topicPath, data)` | `Promise<void>` | Publish data to a topic path |
 | `registerAlias(name, topicId)` | `Promise<void>` | Register a channel alias |
 | `unregisterAlias(name)` | `Promise<void>` | Unregister a channel alias |
-| `onDelivery(cb)` | `void` | Set delivery callback: `(topicId, subtopic, data) => void` |
+| `onMessage(cb)` | `void` | Set message callback: `(topicId, subtopic, data) => void` |
 | `onEvent(cb)` | `void` | Set event callback: `(eventType, data) => void` |
 
 ### `ChannelConfig`

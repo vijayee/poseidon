@@ -28,8 +28,8 @@ struct poseidon_client_t {
     int fd;
     bool connected;
     uint32_t next_request_id;
-    poseidon_delivery_cb_t delivery_cb;
-    void* delivery_cb_ctx;
+    poseidon_message_cb_t message_cb;
+    void* message_cb_ctx;
     poseidon_event_cb_t event_cb;
     void* event_cb_ctx;
     poseidon_response_cb_t response_cb;
@@ -133,8 +133,8 @@ static void process_received_frame(poseidon_client_t* client, client_frame_t* fr
                                frame->error_code, frame->result_data);
         }
     } else if (frame->frame_type == CLIENT_FRAME_EVENT) {
-        if (frame->event_type == CLIENT_EVENT_DELIVERY && client->delivery_cb != NULL) {
-            client->delivery_cb(client->delivery_cb_ctx, frame->topic_path,
+        if (frame->event_type == CLIENT_EVENT_MESSAGE && client->message_cb != NULL) {
+            client->message_cb(client->message_cb_ctx, frame->topic_path,
                                frame->subtopic, frame->payload, frame->payload_len);
         } else if (client->event_cb != NULL) {
             client->event_cb(client->event_cb_ctx, frame->event_type,
@@ -399,11 +399,11 @@ int poseidon_client_alias_unregister(poseidon_client_t* client, const char* name
 // EVENTS
 // ============================================================================
 
-void poseidon_client_on_delivery(poseidon_client_t* client,
-                                  poseidon_delivery_cb_t cb, void* ctx) {
+void poseidon_client_on_message(poseidon_client_t* client,
+                                  poseidon_message_cb_t cb, void* ctx) {
     if (client == NULL) return;
-    client->delivery_cb = cb;
-    client->delivery_cb_ctx = ctx;
+    client->message_cb = cb;
+    client->message_cb_ctx = ctx;
 }
 
 void poseidon_client_on_event(poseidon_client_t* client,

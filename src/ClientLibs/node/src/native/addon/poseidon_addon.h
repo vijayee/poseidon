@@ -24,11 +24,11 @@ private:
   Napi::Value Publish(const Napi::CallbackInfo& info);
   Napi::Value RegisterAlias(const Napi::CallbackInfo& info);
   Napi::Value UnregisterAlias(const Napi::CallbackInfo& info);
-  Napi::Value OnDelivery(const Napi::CallbackInfo& info);
+  Napi::Value OnMessage(const Napi::CallbackInfo& info);
   Napi::Value OnEvent(const Napi::CallbackInfo& info);
 
   poseidon_client* client_ = nullptr;
-  Napi::ThreadSafeFunction tsfn_delivery_;
+  Napi::ThreadSafeFunction tsfn_message_;
   Napi::ThreadSafeFunction tsfn_event_;
 };
 

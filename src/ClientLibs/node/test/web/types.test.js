@@ -7,7 +7,7 @@ const {
   ERROR_OK, ERROR_UNKNOWN_METHOD, ERROR_INVALID_PARAMS,
   ERROR_CHANNEL_NOT_FOUND, ERROR_ALIAS_AMBIGUOUS, ERROR_NOT_AUTHORIZED,
   ERROR_CHANNEL_EXISTS, ERROR_TOO_MANY_CHANNELS, ERROR_TRANSPORT,
-  EVENT_DELIVERY, EVENT_CHANNEL_JOINED, EVENT_CHANNEL_LEFT, EVENT_PEER_EVENT,
+  EVENT_MESSAGE, EVENT_CHANNEL_JOINED, EVENT_CHANNEL_LEFT, EVENT_PEER_EVENT,
   PoseidonError, errorFromCode,
 } = require('../../src/types');
 
@@ -53,7 +53,7 @@ describe('types', () => {
 
   describe('event types', () => {
     it('assigns sequential codes 1-4', () => {
-      expect(EVENT_DELIVERY).toBe(1);
+      expect(EVENT_MESSAGE).toBe(1);
       expect(EVENT_CHANNEL_JOINED).toBe(2);
       expect(EVENT_CHANNEL_LEFT).toBe(3);
       expect(EVENT_PEER_EVENT).toBe(4);

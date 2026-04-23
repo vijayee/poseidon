@@ -75,7 +75,7 @@ class PoseidonClient {
             topicPath: name)
     }
 
-    func onDelivery(_ callback: @escaping (String, String, Data) -> Void) {
-        connection.onDelivery(callback)
+    func onMessage(_ callback: @escaping (String, String, Data) -> Void) {
+        connection.onMessage(callback)
     }
 }

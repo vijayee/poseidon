@@ -70,14 +70,14 @@ TEST(PoseidonClientTest, ProtocolEncodeResponse) {
 TEST(PoseidonClientTest, ProtocolEncodeEvent) {
     uint8_t data[] = {0xAA, 0xBB};
     cbor_item_t* frame = client_protocol_encode_event(
-        CLIENT_EVENT_DELIVERY, "topic123", "sub", data, 2);
+        CLIENT_EVENT_MESSAGE, "topic123", "sub", data, 2);
     ASSERT_NE(frame, nullptr);
 
     client_frame_t decoded;
     memset(&decoded, 0, sizeof(decoded));
     EXPECT_EQ(client_protocol_decode(frame, &decoded), 0);
     EXPECT_EQ(decoded.frame_type, CLIENT_FRAME_EVENT);
-    EXPECT_EQ(decoded.event_type, CLIENT_EVENT_DELIVERY);
+    EXPECT_EQ(decoded.event_type, CLIENT_EVENT_MESSAGE);
     EXPECT_STREQ(decoded.topic_path, "topic123");
     EXPECT_STREQ(decoded.subtopic, "sub");
     EXPECT_EQ(decoded.payload_len, 2u);

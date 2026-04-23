@@ -3,7 +3,7 @@ const {
   encodeResponse, encodeEvent, wrapFrame,
 } = require('../../src/web/protocol');
 const {
-  FRAME_RESPONSE, FRAME_EVENT, EVENT_DELIVERY, ERROR_CHANNEL_NOT_FOUND,
+  FRAME_RESPONSE, FRAME_EVENT, EVENT_MESSAGE, ERROR_CHANNEL_NOT_FOUND,
 } = require('../../src/types');
 
 // Mock transport that records sends and allows injecting server frames
@@ -123,13 +123,13 @@ describe('Connection', () => {
       await conn.disconnect();
     });
 
-    it('dispatches delivery events to onDelivery callback', () => {
+    it('dispatches message events to onMessage callback', () => {
       const deliveries = [];
-      conn.onDelivery((topicId, subtopic, data) => {
+      conn.onMessage((topicId, subtopic, data) => {
         deliveries.push({ topicId, subtopic, data });
       });
 
-      const eventFrame = encodeEvent(EVENT_DELIVERY, 'topic-1', 'sub-1', new Uint8Array([0xaa]));
+      const eventFrame = encodeEvent(EVENT_MESSAGE, 'topic-1', 'sub-1', new Uint8Array([0xaa]));
       conn.transport.receive(wrapFrame(eventFrame));
 
       expect(deliveries).toHaveLength(1);
@@ -177,12 +177,12 @@ describe('Connection', () => {
 
     it('handles multiple frames in a single data chunk', async () => {
       const deliveries = [];
-      conn.onDelivery((topicId, subtopic, data) => {
+      conn.onMessage((topicId, subtopic, data) => {
         deliveries.push({ topicId, subtopic });
       });
 
-      const event1 = encodeEvent(EVENT_DELIVERY, 'topic-a', 'sub-a', new Uint8Array([1]));
-      const event2 = encodeEvent(EVENT_DELIVERY, 'topic-b', 'sub-b', new Uint8Array([2]));
+      const event1 = encodeEvent(EVENT_MESSAGE, 'topic-a', 'sub-a', new Uint8Array([1]));
+      const event2 = encodeEvent(EVENT_MESSAGE, 'topic-b', 'sub-b', new Uint8Array([2]));
       const wrapped1 = wrapFrame(event1);
       const wrapped2 = wrapFrame(event2);
 

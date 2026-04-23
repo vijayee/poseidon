@@ -72,7 +72,7 @@ TEST_F(ClientProtocolTest, EncodeDecodeResponse) {
 TEST_F(ClientProtocolTest, EncodeDecodeEvent) {
     const uint8_t data[] = {0x01, 0x02, 0x03};
     cbor_item_t* encoded = client_protocol_encode_event(
-        CLIENT_EVENT_DELIVERY, "topic-1", "sub/feed", data, sizeof(data));
+        CLIENT_EVENT_MESSAGE, "topic-1", "sub/feed", data, sizeof(data));
     ASSERT_NE(nullptr, encoded);
 
     uint8_t* buf = nullptr;
@@ -88,7 +88,7 @@ TEST_F(ClientProtocolTest, EncodeDecodeEvent) {
     client_frame_t frame = {};
     EXPECT_EQ(0, client_protocol_decode(loaded, &frame));
     EXPECT_EQ(CLIENT_FRAME_EVENT, frame.frame_type);
-    EXPECT_EQ(CLIENT_EVENT_DELIVERY, frame.event_type);
+    EXPECT_EQ(CLIENT_EVENT_MESSAGE, frame.event_type);
     EXPECT_STREQ("topic-1", frame.topic_path);
     EXPECT_STREQ("sub/feed", frame.subtopic);
     EXPECT_EQ(sizeof(data), frame.payload_len);

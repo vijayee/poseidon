@@ -24,7 +24,7 @@ class PoseidonConnection(private val context: Context) {
     private var binder: IPoseidonService? = null
     private var requestId = 0
     private val pendingRequests = mutableMapOf<Int, (ByteArray?) -> Unit>()
-    private var deliveryCallback: ((String, String, ByteArray) -> Unit)? = null
+    private var messageCallback: ((String, String, ByteArray) -> Unit)? = null
     private var eventCallback: ((Int, ByteArray) -> Unit)? = null
     private var connected = false
 
@@ -84,16 +84,16 @@ class PoseidonConnection(private val context: Context) {
         pendingRequests.remove(requestId)?.invoke(data)
     }
 
-    fun handleDelivery(topicId: String, subtopic: String, data: ByteArray) {
-        deliveryCallback?.invoke(topicId, subtopic, data)
+    fun handleMessage(topicId: String, subtopic: String, data: ByteArray) {
+        messageCallback?.invoke(topicId, subtopic, data)
     }
 
     fun handleEvent(eventType: Int, data: ByteArray) {
         eventCallback?.invoke(eventType, data)
     }
 
-    fun onDelivery(callback: (topicId: String, subtopic: String, data: ByteArray) -> Unit) {
-        deliveryCallback = callback
+    fun onMessage(callback: (topicId: String, subtopic: String, data: ByteArray) -> Unit) {
+        messageCallback = callback
     }
 
     fun onEvent(callback: (eventType: Int, data: ByteArray) -> Unit) {

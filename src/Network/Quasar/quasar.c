@@ -167,8 +167,8 @@ quasar_t* quasar_create(struct meridian_protocol_t* protocol, uint32_t max_hops,
     quasar->seen = bloom_filter_create(seen_size, seen_hashes);
     quasar->seen_size = seen_size;
     quasar->seen_hashes = seen_hashes;
-    quasar->on_delivery = NULL;
-    quasar->delivery_ctx = NULL;
+    quasar->on_message = NULL;
+    quasar->message_ctx = NULL;
     platform_lock_init(&quasar->lock);
     refcounter_init((refcounter_t*)quasar);
     return quasar;
@@ -197,11 +197,11 @@ void quasar_destroy(quasar_t* quasar) {
     }
 }
 
-void quasar_set_delivery_callback(quasar_t* quasar, quasar_delivery_cb_t cb, void* ctx) {
+void quasar_set_message_callback(quasar_t* quasar, quasar_message_cb_t cb, void* ctx) {
     if (quasar == NULL) return;
     platform_lock(&quasar->lock);
-    quasar->on_delivery = cb;
-    quasar->delivery_ctx = ctx;
+    quasar->on_message = cb;
+    quasar->message_ctx = ctx;
     platform_unlock(&quasar->lock);
 }
 
@@ -343,9 +343,9 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
     if (locally_subscribed) {
         // Algorithm 2, lines 4-8: deliver locally, add self to PUB, re-publish to all neighbors
 
-        if (quasar->on_delivery != NULL) {
-            quasar_delivery_cb_t cb = quasar->on_delivery;
-            void* ctx = quasar->delivery_ctx;
+        if (quasar->on_message != NULL) {
+            quasar_message_cb_t cb = quasar->on_message;
+            void* ctx = quasar->message_ctx;
             platform_unlock(&quasar->lock);
             cb(ctx, topic, topic_len, data, data_len);
             platform_lock(&quasar->lock);
@@ -541,9 +541,9 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
             quasar_route_message_add_publisher(msg, local_node);
         }
 
-        if (quasar->on_delivery != NULL) {
-            quasar_delivery_cb_t cb = quasar->on_delivery;
-            void* ctx = quasar->delivery_ctx;
+        if (quasar->on_message != NULL) {
+            quasar_message_cb_t cb = quasar->on_message;
+            void* ctx = quasar->message_ctx;
             platform_unlock(&quasar->lock);
             cb(ctx, msg->topic->data, msg->topic->size, msg->data->data, msg->data->size);
             platform_lock(&quasar->lock);

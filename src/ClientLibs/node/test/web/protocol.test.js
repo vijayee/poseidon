@@ -123,7 +123,7 @@ describe('protocol', () => {
   });
 
   describe('encodeEvent / decodeFrame', () => {
-    it('round-trips a delivery event', () => {
+    it('round-trips a message event', () => {
       const data = new Uint8Array([1, 2, 3, 4]);
       const encoded = encodeEvent(1, 'topic-abc', 'subtopic', data);
       const decoded = decodeFrame(encoded);

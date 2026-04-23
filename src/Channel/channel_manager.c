@@ -112,10 +112,10 @@ poseidon_channel_manager_t* poseidon_channel_manager_create(
     }
     mgr->dial_channel->is_dial = true;
 
-    // Wire intercept + delivery so bootstrap packets delivered via Quasar are dispatched
+    // Wire intercept + message so bootstrap packets delivered via Quasar are dispatched
     mgr->dial_channel->intercept_cb = channel_manager_bootstrap_intercept;
     mgr->dial_channel->intercept_ctx = mgr;
-    poseidon_channel_enable_quasar_delivery(mgr->dial_channel);
+    poseidon_channel_enable_quasar_message(mgr->dial_channel);
 
     platform_lock_init(&mgr->lock);
     refcounter_init((refcounter_t*)mgr);
@@ -238,7 +238,7 @@ poseidon_channel_t* poseidon_channel_manager_join_channel(
     mgr->channels[mgr->num_channels++] = channel;
     platform_unlock(&mgr->lock);
 
-    // I/O operations outside lock to avoid deadlock with Quasar delivery callbacks
+    // I/O operations outside lock to avoid deadlock with Quasar message callbacks
     poseidon_channel_subscribe(mgr->dial_channel,
                                 (const uint8_t*)topic_str, strlen(topic_str), 300);
 

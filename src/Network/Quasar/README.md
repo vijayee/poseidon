@@ -57,7 +57,7 @@ typedef struct quasar_route_message_t {
 
 ### quasar_t
 
-Main Quasar instance. Ties together the Meridian protocol, the routing filter, local subscriptions, and the delivery callback.
+Main Quasar instance. Ties together the Meridian protocol, the routing filter, local subscriptions, and the message callback.
 
 ```c
 typedef struct quasar_t {
@@ -67,8 +67,8 @@ typedef struct quasar_t {
     vec_t(quasar_subscription_t) local_subs;       // Locally active subscriptions
     uint32_t max_hops;                             // Maximum routing hops (determines filter depth)
     uint32_t alpha;                                // Fan-out for random walk when no route known
-    quasar_delivery_cb_t on_delivery;              // Called when a message is delivered locally
-    void* delivery_ctx;                            // User context for delivery callback
+    quasar_message_cb_t on_message;              // Called when a message is delivered locally
+    void* message_ctx;                            // User context for message callback
     PLATFORMLOCKTYPE(lock);                        // Thread-safe access
 } quasar_t;
 ```
@@ -92,7 +92,7 @@ This shift-on-merge creates a distance-gradient: the level at which a topic appe
 
 When a node publishes a message to a topic, `quasar_publish` checks the routing filter:
 
-1. **Local delivery (hops == 0):** The topic is in level 0 — this node is subscribed. Deliver locally via the `on_delivery` callback.
+1. **Local message (hops == 0):** The topic is in level 0 — this node is subscribed. Deliver locally via the `on_message` callback.
 2. **Directed routing (hops > 0):** The topic appears at some level N — a subscriber is N hops away. Forward the message toward the neighbor that contributed the matching filter level.
 3. **Random walk (not found):** The topic doesn't appear in any level. No route to a subscriber is known. Create a `quasar_route_message_t` with a **negative bloom filter** initialized with the local node, then forward to `alpha` random neighbors that are not in the negative filter.
 
@@ -161,8 +161,8 @@ Quasar depends on Meridian for all transport and peer discovery:
 // Create Quasar overlay on top of a running Meridian protocol
 quasar_t* quasar = quasar_create(protocol, 5, 3);
 
-// Set a callback for local message delivery
-quasar_set_delivery_callback(quasar, my_delivery_handler, my_ctx);
+// Set a callback for local message
+quasar_set_message_callback(quasar, my_message_handler, my_ctx);
 
 // Subscribe to a topic
 quasar_subscribe(quasar, (uint8_t*)"sensors/temp", 12, 100);

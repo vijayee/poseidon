@@ -148,7 +148,7 @@ int quasar_route_message_add_publisher(quasar_route_message_t* msg, const meridi
 bool quasar_route_message_has_publisher(quasar_route_message_t* msg, const meridian_node_t* node);
 
 // ============================================================================
-// LOCAL DELIVERY CALLBACK
+// LOCAL MESSAGE CALLBACK
 // ============================================================================
 
 /**
@@ -160,7 +160,7 @@ bool quasar_route_message_has_publisher(quasar_route_message_t* msg, const merid
  * @param data      Message payload bytes
  * @param data_len  Length of payload
  */
-typedef void (*quasar_delivery_cb_t)(void* ctx, const uint8_t* topic, size_t topic_len,
+typedef void (*quasar_message_cb_t)(void* ctx, const uint8_t* topic, size_t topic_len,
                                       const uint8_t* data, size_t data_len);
 
 // ============================================================================
@@ -175,7 +175,7 @@ typedef void (*quasar_delivery_cb_t)(void* ctx, const uint8_t* topic, size_t top
  * Routing strategy:
  * - Level 0 of the routing filter holds topics subscribed to locally
  * - Higher levels hold topics reachable through neighbors at increasing hop distances
- * - Publishing checks the filter: local delivery (level 0), directed routing (level N),
+ * - Publishing checks the filter: local message (level 0), directed routing (level N),
  *   or random walk (not found) with alpha fan-out
  *
  * Lifecycle:
@@ -196,8 +196,8 @@ typedef struct quasar_t {
     bloom_filter_t* seen;                    /**< Per-node dedup: message IDs already processed */
     uint32_t seen_size;                      /**< Dedup filter size in bits */
     uint32_t seen_hashes;                    /**< Dedup filter hash count */
-    quasar_delivery_cb_t on_delivery;              /**< Called when a message is delivered to a local subscriber */
-    void* delivery_ctx;                            /**< User context for delivery callback */
+    quasar_message_cb_t on_message;              /**< Called when a message is delivered to a local subscriber */
+    void* message_ctx;                            /**< User context for message callback */
     PLATFORMLOCKTYPE(lock);                        /**< Thread-safe access to subscriptions and filter */
 } quasar_t;
 
@@ -230,10 +230,10 @@ void quasar_destroy(quasar_t* quasar);
  * Sets the callback invoked when a message is delivered to a local subscriber.
  *
  * @param quasar  Quasar instance
- * @param cb      Delivery callback (may be NULL to unset)
+ * @param cb      Message callback (may be NULL to unset)
  * @param ctx     User context passed to the callback
  */
-void quasar_set_delivery_callback(quasar_t* quasar, quasar_delivery_cb_t cb, void* ctx);
+void quasar_set_message_callback(quasar_t* quasar, quasar_message_cb_t cb, void* ctx);
 
 /**
  * Gets the attenuated filter for a specific neighbor.
@@ -298,7 +298,7 @@ int quasar_unsubscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len)
 
 /**
  * Publishes a message to a topic. Routes based on the routing filter:
- * - hops == 0: local delivery (this node is subscribed)
+ * - hops == 0: local message (this node is subscribed)
  * - hops > 0:  directed routing toward the subscriber via Meridian
  * - not found: random walk to alpha random neighbors
  *

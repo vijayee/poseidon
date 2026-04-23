@@ -72,7 +72,7 @@ class PoseidonClientNative {
     await this._handle.unregisterAlias(name);
   }
 
-  onDelivery(cb) { if (this._handle) this._handle.onDelivery(cb); }
+  onMessage(cb) { if (this._handle) this._handle.onMessage(cb); }
   onEvent(cb) { if (this._handle) this._handle.onEvent(cb); }
 }
 

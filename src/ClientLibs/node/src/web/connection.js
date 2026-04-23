@@ -1,6 +1,6 @@
 const { createTransport } = require('./transports');
 const { decodeFrame, wrapFrame, readFrameHeader, FRAME_HEADER_SIZE } = require('./protocol');
-const { FRAME_RESPONSE, FRAME_EVENT, EVENT_DELIVERY, errorFromCode } = require('../types');
+const { FRAME_RESPONSE, FRAME_EVENT, EVENT_MESSAGE, errorFromCode } = require('../types');
 
 class Connection {
   constructor() {
@@ -10,12 +10,12 @@ class Connection {
     this.readBuf = new Uint8Array(65536);
     this.readLen = 0;
     this.defaultTimeout = 30000;
-    this.deliveryCb = null;
+    this.messageCb = null;
     this.eventCb = null;
   }
 
   setTimeout(ms) { this.defaultTimeout = ms; }
-  onDelivery(cb) { this.deliveryCb = cb; }
+  onMessage(cb) { this.messageCb = cb; }
   onEvent(cb) { this.eventCb = cb; }
 
   async connect(url) {
@@ -98,8 +98,8 @@ class Connection {
   }
 
   _handleEvent(frame) {
-    if (frame.eventType === EVENT_DELIVERY && this.deliveryCb) {
-      this.deliveryCb(frame.topicId, frame.subtopic, frame.payload);
+    if (frame.eventType === EVENT_MESSAGE && this.messageCb) {
+      this.messageCb(frame.topicId, frame.subtopic, frame.payload);
     } else if (this.eventCb) {
       this.eventCb(frame.eventType, frame.payload);
     }

@@ -28,7 +28,7 @@ exports.ERROR_TOO_MANY_CHANNELS = 7;
 exports.ERROR_TRANSPORT = 8;
 
 // Event types
-exports.EVENT_DELIVERY = 1;
+exports.EVENT_MESSAGE = 1;
 exports.EVENT_CHANNEL_JOINED = 2;
 exports.EVENT_CHANNEL_LEFT = 3;
 exports.EVENT_PEER_EVENT = 4;

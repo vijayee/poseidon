@@ -9,7 +9,7 @@ class PoseidonConnection {
     private var requestId: UInt32 = 0
     private var pendingRequests: [UInt32: (Result<Data, Error>) -> Void] = [:]
     private let queue = DispatchQueue(label: "com.poseidon.connection", attributes: .concurrent)
-    private var deliveryCallback: ((String, String, Data) -> Void)?
+    private var messageCallback: ((String, String, Data) -> Void)?
     private var eventCallback: ((UInt8, Data) -> Void)?
 
     // Method codes matching client_protocol.h
@@ -73,8 +73,8 @@ class PoseidonConnection {
         }
     }
 
-    func onDelivery(_ callback: @escaping (String, String, Data) -> Void) {
-        deliveryCallback = callback
+    func onMessage(_ callback: @escaping (String, String, Data) -> Void) {
+        messageCallback = callback
     }
 
     func onEvent(_ callback: @escaping (UInt8, Data) -> Void) {

@@ -239,10 +239,10 @@ const char* poseidon_channel_get_topic(const poseidon_channel_t* channel) {
 }
 
 // ============================================================================
-// INTERNAL DELIVERY WRAPPER
+// INTERNAL MESSAGE WRAPPER
 // ============================================================================
 
-static void channel_quasar_delivery_handler(void* ctx, const uint8_t* topic, size_t topic_len,
+static void channel_quasar_message_handler(void* ctx, const uint8_t* topic, size_t topic_len,
                                               const uint8_t* data, size_t data_len) {
     poseidon_channel_t* channel = (poseidon_channel_t*)ctx;
 
@@ -253,14 +253,14 @@ static void channel_quasar_delivery_handler(void* ctx, const uint8_t* topic, siz
         }
     }
 
-    if (channel->delivery_cb == NULL) return;
+    if (channel->message_cb == NULL) return;
 
     // Decode the channel message envelope to extract subtopic
     struct cbor_load_result result;
     cbor_item_t* item = cbor_load(data, data_len, &result);
     if (item == NULL) {
         // Not a channel message envelope — deliver raw
-        channel->delivery_cb(channel->delivery_cb_ctx, topic, topic_len, "", data, data_len);
+        channel->message_cb(channel->message_cb_ctx, topic, topic_len, "", data, data_len);
         return;
     }
 
@@ -271,12 +271,12 @@ static void channel_quasar_delivery_handler(void* ctx, const uint8_t* topic, siz
                                 payload, sizeof(payload), &payload_len) == 0) {
         // Check subtopic filter
         if (subtopic_table_should_deliver(channel->subtopic_subs, subtopic)) {
-            channel->delivery_cb(channel->delivery_cb_ctx, topic, topic_len,
+            channel->message_cb(channel->message_cb_ctx, topic, topic_len,
                                      subtopic, payload, payload_len);
         }
     } else {
         // Failed to decode — deliver raw
-        channel->delivery_cb(channel->delivery_cb_ctx, topic, topic_len, "", data, data_len);
+        channel->message_cb(channel->message_cb_ctx, topic, topic_len, "", data, data_len);
     }
 
     cbor_decref(&item);
@@ -328,18 +328,18 @@ int poseidon_channel_publish_subtopic(poseidon_channel_t* channel,
     return rc;
 }
 
-int poseidon_channel_set_delivery_callback(poseidon_channel_t* channel,
-                                            poseidon_channel_delivery_cb_t cb, void* ctx) {
+int poseidon_channel_set_message_callback(poseidon_channel_t* channel,
+                                            poseidon_channel_message_cb_t cb, void* ctx) {
     if (channel == NULL || channel->quasar == NULL) return -1;
-    channel->delivery_cb = cb;
-    channel->delivery_cb_ctx = ctx;
-    quasar_set_delivery_callback(channel->quasar, channel_quasar_delivery_handler, channel);
+    channel->message_cb = cb;
+    channel->message_cb_ctx = ctx;
+    quasar_set_message_callback(channel->quasar, channel_quasar_message_handler, channel);
     return 0;
 }
 
-int poseidon_channel_enable_quasar_delivery(poseidon_channel_t* channel) {
+int poseidon_channel_enable_quasar_message(poseidon_channel_t* channel) {
     if (channel == NULL || channel->quasar == NULL) return -1;
-    quasar_set_delivery_callback(channel->quasar, channel_quasar_delivery_handler, channel);
+    quasar_set_message_callback(channel->quasar, channel_quasar_message_handler, channel);
     return 0;
 }
 
@@ -483,10 +483,10 @@ int poseidon_channel_rejoin_with_config(poseidon_channel_t* channel,
                      (const uint8_t*)channel->node_id.str,
                      strlen(channel->node_id.str), 300);
 
-    // Re-enable delivery callback on new quasar
-    if (channel->delivery_cb != NULL) {
-        quasar_set_delivery_callback(channel->quasar,
-                                      channel_quasar_delivery_handler, channel);
+    // Re-enable message callback on new quasar
+    if (channel->message_cb != NULL) {
+        quasar_set_message_callback(channel->quasar,
+                                      channel_quasar_message_handler, channel);
     }
 
     channel->state = POSEIDON_CHANNEL_STATE_BOOTSTRAPPING;

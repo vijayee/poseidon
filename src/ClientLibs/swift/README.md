@@ -48,8 +48,8 @@ let topicId = try await client.createChannel(name: "my-channel")
 try await client.subscribe(topicPath: topicId)
 try await client.publish(topicPath: topicId, data: "Hello".data(using: .utf8)!)
 
-// Set delivery callback
-client.onDelivery { topicId, subtopic, data in
+// Set message callback
+client.onMessage { topicId, subtopic, data in
     print("Received on \(topicId)/\(subtopic): \(data)")
 }
 

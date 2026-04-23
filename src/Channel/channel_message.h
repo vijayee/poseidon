@@ -11,7 +11,7 @@ extern "C" {
 
 /**
  * Encodes a channel message as a CBOR array: [subtopic_string, data_bytes].
- * The subtopic allows the receiver to filter delivery by subscription.
+ * The subtopic allows the receiver to filter messages by subscription.
  *
  * @param subtopic    Subtopic path (null-terminated string)
  * @param subtopic_len Length of subtopic string

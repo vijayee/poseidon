@@ -77,9 +77,9 @@ TEST_F(QuasarTest, MultipleSubscriptions) {
     quasar_destroy(q);
 }
 
-TEST_F(QuasarTest, SetDeliveryCallback) {
+TEST_F(QuasarTest, SetMessageCallback) {
     quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
-    quasar_set_delivery_callback(q, NULL, NULL);
+    quasar_set_message_callback(q, NULL, NULL);
     quasar_destroy(q);
 }
 
@@ -269,9 +269,9 @@ TEST_F(RouteMessageTest, PublishersList) {
 // DELIVERY CALLBACK TESTS
 // ============================================================================
 
-class DeliveryCallbackTest : public ::testing::Test {
+class MessageCallbackTest : public ::testing::Test {
 protected:
-    static void delivery_handler(void* ctx, const uint8_t* topic, size_t topic_len,
+    static void message_handler(void* ctx, const uint8_t* topic, size_t topic_len,
                                   const uint8_t* data, size_t data_len) {
         int* call_count = (int*)ctx;
         (*call_count)++;
@@ -280,12 +280,12 @@ protected:
     int call_count = 0;
 };
 
-TEST_F(DeliveryCallbackTest, LocalDeliveryCallback) {
+TEST_F(MessageCallbackTest, LocalMessageCallback) {
     quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* msg = (const uint8_t*)"goal!";
 
-    quasar_set_delivery_callback(q, delivery_handler, &call_count);
+    quasar_set_message_callback(q, message_handler, &call_count);
     quasar_subscribe(q, topic, 6, 100);
 
     EXPECT_EQ(0, quasar_publish(q, topic, 6, msg, 5));
@@ -294,12 +294,12 @@ TEST_F(DeliveryCallbackTest, LocalDeliveryCallback) {
     quasar_destroy(q);
 }
 
-TEST_F(DeliveryCallbackTest, NoCallbackWhenNotSubscribed) {
+TEST_F(MessageCallbackTest, NoCallbackWhenNotSubscribed) {
     quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* msg = (const uint8_t*)"goal!";
 
-    quasar_set_delivery_callback(q, delivery_handler, &call_count);
+    quasar_set_message_callback(q, message_handler, &call_count);
 
     // Publish without subscribing — should not trigger callback
     EXPECT_EQ(0, quasar_publish(q, topic, 6, msg, 5));
@@ -308,7 +308,7 @@ TEST_F(DeliveryCallbackTest, NoCallbackWhenNotSubscribed) {
     quasar_destroy(q);
 }
 
-TEST_F(DeliveryCallbackTest, NullCallbackDoesNotCrash) {
+TEST_F(MessageCallbackTest, NullCallbackDoesNotCrash) {
     quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* msg = (const uint8_t*)"goal!";
@@ -435,13 +435,13 @@ TEST_F(OnRouteMessageTest, NullQuasarRejected) {
     meridian_node_destroy(from);
 }
 
-TEST_F(OnRouteMessageTest, LocalDeliveryViaRouteMessage) {
+TEST_F(OnRouteMessageTest, LocalMessageViaRouteMessage) {
     quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* data = (const uint8_t*)"goal!";
 
     int call_count = 0;
-    quasar_set_delivery_callback(q, [](void* ctx, const uint8_t* t, size_t tl,
+    quasar_set_message_callback(q, [](void* ctx, const uint8_t* t, size_t tl,
                                         const uint8_t* d, size_t dl) {
         int* count = (int*)ctx;
         (*count)++;
@@ -555,7 +555,7 @@ TEST_F(DedupFilterTest, DuplicateRouteMessageDiscarded) {
     const uint8_t* data = (const uint8_t*)"goal!";
 
     int call_count = 0;
-    quasar_set_delivery_callback(q, [](void* ctx, const uint8_t*, size_t,
+    quasar_set_message_callback(q, [](void* ctx, const uint8_t*, size_t,
                                         const uint8_t*, size_t) {
         int* count = (int*)ctx;
         (*count)++;
@@ -584,7 +584,7 @@ TEST_F(DedupFilterTest, DifferentMessagesNotDiscarded) {
     const uint8_t* data = (const uint8_t*)"goal!";
 
     int call_count = 0;
-    quasar_set_delivery_callback(q, [](void* ctx, const uint8_t*, size_t,
+    quasar_set_message_callback(q, [](void* ctx, const uint8_t*, size_t,
                                         const uint8_t*, size_t) {
         int* count = (int*)ctx;
         (*count)++;
@@ -627,7 +627,7 @@ TEST_F(QuasarTest, Algorithm2DirectedWalk) {
     quasar_t* node_a = quasar_create(NULL, 5, 3, 4096, 3);
     const uint8_t* topic = (const uint8_t*)"sports";
     int delivered = 0;
-    quasar_set_delivery_callback(node_a, [](void* ctx, const uint8_t*, size_t,
+    quasar_set_message_callback(node_a, [](void* ctx, const uint8_t*, size_t,
                                             const uint8_t*, size_t) {
         int* count = (int*)ctx;
         (*count)++;
@@ -668,7 +668,7 @@ TEST_F(QuasarTest, NegativeInformationPreventsSelfLoop) {
     const uint8_t* topic = (const uint8_t*)"sports";
 
     int delivered = 0;
-    quasar_set_delivery_callback(q, [](void* ctx, const uint8_t*, size_t,
+    quasar_set_message_callback(q, [](void* ctx, const uint8_t*, size_t,
                                         const uint8_t*, size_t) {
         int* count = (int*)ctx;
         (*count)++;

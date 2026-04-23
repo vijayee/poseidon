@@ -51,5 +51,5 @@ The C client library is also built as part of the full Poseidon project. The roo
 | `poseidon_client_subscribe(client, topic)` | Subscribe to a topic |
 | `poseidon_client_unsubscribe(client, topic)` | Unsubscribe |
 | `poseidon_client_publish(client, topic, data, len)` | Publish data |
-| `poseidon_client_on_delivery(client, cb, ctx)` | Set delivery callback |
+| `poseidon_client_on_message(client, cb, ctx)` | Set message callback |
 | `poseidon_client_on_event(client, cb, ctx)` | Set event callback |

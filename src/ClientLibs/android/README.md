@@ -43,8 +43,8 @@ val topicId = client.createChannel("my-channel")
 client.subscribe(topicId)
 client.publish(topicId, "Hello".toByteArray())
 
-// Set delivery callback
-client.onDelivery { topicId, subtopic, data ->
+// Set message callback
+client.onMessage { topicId, subtopic, data ->
     println("Received on $topicId/$subtopic: ${String(data)}")
 }
 

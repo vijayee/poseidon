@@ -89,7 +89,7 @@ Napi::Object PoseidonClientNative::Init(Napi::Env env, Napi::Object exports) {
     InstanceMethod("publish", &PoseidonClientNative::Publish),
     InstanceMethod("registerAlias", &PoseidonClientNative::RegisterAlias),
     InstanceMethod("unregisterAlias", &PoseidonClientNative::UnregisterAlias),
-    InstanceMethod("onDelivery", &PoseidonClientNative::OnDelivery),
+    InstanceMethod("onMessage", &PoseidonClientNative::OnMessage),
     InstanceMethod("onEvent", &PoseidonClientNative::OnEvent),
   });
   exports.Set("PoseidonClientNative", func);
@@ -104,7 +104,7 @@ PoseidonClientNative::~PoseidonClientNative() {
     poseidon_client_destroy(client_);
     client_ = nullptr;
   }
-  if (tsfn_delivery_) tsfn_delivery_.Release();
+  if (tsfn_message_) tsfn_message_.Release();
   if (tsfn_event_) tsfn_event_.Release();
 }
 
@@ -449,17 +449,17 @@ Napi::Value PoseidonClientNative::UnregisterAlias(const Napi::CallbackInfo& info
 // Callbacks (ThreadSafeFunction)
 // ============================================================================
 
-Napi::Value PoseidonClientNative::OnDelivery(const Napi::CallbackInfo& info) {
+Napi::Value PoseidonClientNative::OnMessage(const Napi::CallbackInfo& info) {
   if (info.Length() < 1 || !info[0].IsFunction()) {
     return info.Env().Undefined();
   }
 
   Napi::Function cb = info[0].As<Napi::Function>();
-  tsfn_delivery_ = Napi::ThreadSafeFunction::New(
-    info.Env(), cb, "poseidon_delivery", 0, 1);
+  tsfn_message_ = Napi::ThreadSafeFunction::New(
+    info.Env(), cb, "poseidon_message", 0, 1);
 
   if (client_) {
-    auto* tsfn_ptr = &tsfn_delivery_;
+    auto* tsfn_ptr = &tsfn_message_;
     poseidon_client_on_delivery(client_,
       [](void* ctx, const char* topic_id, const char* subtopic,
          const uint8_t* data, size_t len) {

@@ -22,7 +22,7 @@ extern "C" {
 
 typedef struct poseidon_client_t poseidon_client_t;
 
-typedef void (*poseidon_delivery_cb_t)(void* ctx, const char* topic_id,
+typedef void (*poseidon_message_cb_t)(void* ctx, const char* topic_id,
                                         const char* subtopic,
                                         const uint8_t* data, size_t len);
 
@@ -89,8 +89,8 @@ int poseidon_client_alias_unregister(poseidon_client_t* client, const char* name
 // EVENTS
 // ============================================================================
 
-void poseidon_client_on_delivery(poseidon_client_t* client,
-                                  poseidon_delivery_cb_t cb, void* ctx);
+void poseidon_client_on_message(poseidon_client_t* client,
+                                  poseidon_message_cb_t cb, void* ctx);
 void poseidon_client_on_event(poseidon_client_t* client,
                                poseidon_event_cb_t cb, void* ctx);
 void poseidon_client_on_response(poseidon_client_t* client,

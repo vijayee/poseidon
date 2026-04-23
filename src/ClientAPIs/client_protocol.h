@@ -44,7 +44,7 @@ extern "C" {
 #define CLIENT_ERROR_TRANSPORT         8
 
 // Event types
-#define CLIENT_EVENT_DELIVERY       1
+#define CLIENT_EVENT_MESSAGE       1
 #define CLIENT_EVENT_CHANNEL_JOINED 2
 #define CLIENT_EVENT_CHANNEL_LEFT    3
 #define CLIENT_EVENT_PEER_EVENT      4

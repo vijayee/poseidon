@@ -69,7 +69,7 @@ class PoseidonClient {
     await this._conn.sendRequest(frame);
   }
 
-  onDelivery(cb) { this._conn.onDelivery(cb); }
+  onMessage(cb) { this._conn.onMessage(cb); }
   onEvent(cb) { this._conn.onEvent(cb); }
 
   async _signAdminPayload(method, topicId, ownerKeyPem) {

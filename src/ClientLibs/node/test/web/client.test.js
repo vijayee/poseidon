@@ -7,7 +7,7 @@ const {
   METHOD_CHANNEL_DESTROY, METHOD_CHANNEL_MODIFY,
   METHOD_SUBSCRIBE, METHOD_UNSUBSCRIBE, METHOD_PUBLISH,
   METHOD_ALIAS_REGISTER, METHOD_ALIAS_UNREGISTER,
-  EVENT_DELIVERY,
+  EVENT_MESSAGE,
 } = require('../../src/types');
 
 // Mock transport
@@ -156,18 +156,18 @@ describe('PoseidonClient', () => {
     });
   });
 
-  describe('delivery events', () => {
+  describe('message events', () => {
     beforeEach(async () => {
       await connectAndWait();
     });
 
-    it('onDelivery receives delivery events', () => {
+    it('onMessage receives message events', () => {
       const deliveries = [];
-      client.onDelivery((topicId, subtopic, data) => {
+      client.onMessage((topicId, subtopic, data) => {
         deliveries.push({ topicId, subtopic, data: Buffer.from(data).toString() });
       });
 
-      const eventFrame = encodeEvent(EVENT_DELIVERY, 'topic-1', 'sub-1', Buffer.from('hello'));
+      const eventFrame = encodeEvent(EVENT_MESSAGE, 'topic-1', 'sub-1', Buffer.from('hello'));
       client._conn.transport.receive(wrapFrame(eventFrame));
 
       expect(deliveries).toHaveLength(1);
@@ -176,7 +176,7 @@ describe('PoseidonClient', () => {
       expect(deliveries[0].data).toBe('hello');
     });
 
-    it('onEvent receives non-delivery events', () => {
+    it('onEvent receives non-message events', () => {
       const events = [];
       client.onEvent((eventType, data) => {
         events.push({ eventType, data });
