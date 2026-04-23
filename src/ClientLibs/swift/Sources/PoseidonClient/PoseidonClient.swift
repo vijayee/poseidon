@@ -43,10 +43,12 @@ class PoseidonClient {
             payload: ownerKey)
     }
 
-    func subscribe(topicPath: String) async throws {
+    func subscribe(topicPath: String, loopback: Bool = false) async throws {
+        let payload: Data? = loopback ? Data([0x01]) : nil
         _ = try await connection.sendRequest(
             method: PoseidonConnection.methodSubscribe,
-            topicPath: topicPath)
+            topicPath: topicPath,
+            payload: payload)
     }
 
     func unsubscribe(topicPath: String) async throws {
@@ -75,7 +77,18 @@ class PoseidonClient {
             topicPath: name)
     }
 
+    func resolveAlias(name: String) async throws -> String {
+        let response = try await connection.sendRequest(
+            method: PoseidonConnection.methodAliasResolve,
+            topicPath: name)
+        return String(data: response, encoding: .utf8) ?? ""
+    }
+
     func onMessage(_ callback: @escaping (String, String, Data) -> Void) {
         connection.onMessage(callback)
+    }
+
+    func onEvent(_ callback: @escaping (UInt8, Data) -> Void) {
+        connection.onEvent(callback)
     }
 }

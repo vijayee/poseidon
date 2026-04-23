@@ -43,10 +43,10 @@ class PoseidonClientObjC: NSObject {
         }
     }
 
-    func subscribe(topicPath: String, completion: @escaping (Error?) -> Void) {
+    func subscribe(topicPath: String, loopback: Bool = false, completion: @escaping (Error?) -> Void) {
         Task {
             do {
-                try await client.subscribe(topicPath: topicPath)
+                try await client.subscribe(topicPath: topicPath, loopback: loopback)
                 completion(nil)
             } catch {
                 completion(error)
@@ -72,6 +72,17 @@ class PoseidonClientObjC: NSObject {
                 completion(nil)
             } catch {
                 completion(error)
+            }
+        }
+    }
+
+    func resolveAlias(name: String, completion: @escaping (String?, Error?) -> Void) {
+        Task {
+            do {
+                let result = try await client.resolveAlias(name: name)
+                completion(result, nil)
+            } catch {
+                completion(nil, error)
             }
         }
     }
