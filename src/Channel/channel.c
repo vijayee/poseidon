@@ -3,12 +3,15 @@
 //
 
 #include "channel.h"
+#include "channel_manager.h"
 #include "../Util/allocator.h"
 #include "../Util/threadding.h"
 #include "../Crypto/key_pair.h"
+#include "../Network/Meridian/meridian_packet.h"
 #include "channel_message.h"
 #include <string.h>
 #include <stdio.h>
+#include <sys/time.h>
 #include <unistd.h>
 #include <cbor.h>
 
@@ -318,7 +321,7 @@ int poseidon_channel_publish_subtopic(poseidon_channel_t* channel,
     size_t written = cbor_serialize_alloc(msg, &buf, &buf_len);
     cbor_decref(&msg);
 
-    if (written == 0 || buf == NULL) return -1;
+    if (written == 0 || buf == NULL) { free(buf); return -1; }
 
     int rc = quasar_publish(channel->quasar, topic, topic_len, buf, written);
     free(buf);
@@ -422,5 +425,99 @@ int poseidon_channel_update_config(poseidon_channel_t* channel,
     platform_lock(&channel->lock);
     channel->config = *new_config;
     platform_unlock(&channel->lock);
+    return 0;
+}
+
+// ============================================================================
+// SIGNED LIFECYCLE OPERATIONS
+// ============================================================================
+
+int poseidon_channel_delete_signed(poseidon_channel_t* channel) {
+    if (channel == NULL) return -1;
+    if (channel->state == POSEIDON_CHANNEL_STATE_DELETED) return 0;
+
+    channel->state = POSEIDON_CHANNEL_STATE_DELETED;
+
+    if (channel->quasar != NULL) {
+        quasar_unsubscribe(channel->quasar,
+                           (const uint8_t*)channel->node_id.str,
+                           strlen(channel->node_id.str));
+    }
+    if (channel->protocol != NULL) {
+        meridian_protocol_stop(channel->protocol);
+    }
+    return 0;
+}
+
+int poseidon_channel_rejoin_with_config(poseidon_channel_t* channel,
+                                          const poseidon_channel_config_t* new_config,
+                                          poseidon_channel_manager_t* mgr) {
+    if (channel == NULL || new_config == NULL || mgr == NULL) return -1;
+
+    channel->state = POSEIDON_CHANNEL_STATE_SHUTTING_DOWN;
+
+    if (channel->quasar != NULL) {
+        quasar_unsubscribe(channel->quasar,
+                           (const uint8_t*)channel->node_id.str,
+                           strlen(channel->node_id.str));
+    }
+    if (channel->protocol != NULL) {
+        meridian_protocol_stop(channel->protocol);
+    }
+
+    channel->config = *new_config;
+
+    // Re-create Quasar with new config
+    if (channel->quasar != NULL) {
+        quasar_destroy(channel->quasar);
+    }
+    channel->quasar = quasar_create(channel->protocol,
+                                      new_config->quasar_max_hops,
+                                      new_config->quasar_alpha,
+                                      new_config->quasar_seen_size,
+                                      new_config->quasar_seen_hashes);
+    if (channel->quasar == NULL) return -1;
+
+    // Re-subscribe to this channel's topic
+    quasar_subscribe(channel->quasar,
+                     (const uint8_t*)channel->node_id.str,
+                     strlen(channel->node_id.str), 300);
+
+    // Re-enable delivery callback on new quasar
+    if (channel->delivery_cb != NULL) {
+        quasar_set_delivery_callback(channel->quasar,
+                                      channel_quasar_delivery_handler, channel);
+    }
+
+    channel->state = POSEIDON_CHANNEL_STATE_BOOTSTRAPPING;
+
+    // Re-bootstrap via dial channel
+    poseidon_channel_t* dial = poseidon_channel_manager_get_dial(mgr);
+    if (dial != NULL) {
+        char sender[64];
+        strncpy(sender, channel->node_id.str, sizeof(sender) - 1);
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        uint64_t ts = (uint64_t)tv.tv_sec * 1000000 + (uint64_t)tv.tv_usec;
+
+        cbor_item_t* encoded = meridian_channel_bootstrap_encode(
+            channel->node_id.str, sender, ts);
+        if (encoded != NULL) {
+            unsigned char* buf = NULL;
+            size_t buf_len = 0;
+            size_t written = cbor_serialize_alloc(encoded, &buf, &buf_len);
+            cbor_decref(&encoded);
+            if (written > 0 && buf != NULL) {
+                poseidon_channel_publish(dial,
+                                         (const uint8_t*)channel->node_id.str,
+                                         strlen(channel->node_id.str),
+                                         buf, written);
+                free(buf);
+            } else {
+                free(buf);
+            }
+        }
+    }
+
     return 0;
 }

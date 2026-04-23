@@ -12,6 +12,7 @@
 #include "../Crypto/node_id.h"
 #include "channel.h"
 #include "../Network/Meridian/meridian.h"
+#include "../Network/Meridian/meridian_packet.h"
 #include "../Workers/pool.h"
 #include "../Time/wheel.h"
 
@@ -22,6 +23,28 @@ extern "C" {
 #define POSEIDON_CHANNEL_MANAGER_MAX_CHANNELS 32
 #define POSEIDON_MAX_PENDING_BOOTSTRAPS 16
 #define POSEIDON_BOOTSTRAP_REPLY_ADDRS_MAX 16
+#define POSEIDON_TOMBSTONE_MAX 64
+#define POSEIDON_TOMBSTONE_DEFAULT_TTL_SECONDS (90 * 24 * 3600)
+
+typedef enum {
+    POSEIDON_TOMBSTONE_DELETE,
+    POSEIDON_TOMBSTONE_MODIFY
+} poseidon_tombstone_type_t;
+
+typedef struct poseidon_tombstone_t {
+    poseidon_tombstone_type_t type;
+    char topic_id[64];
+    char node_id[64];
+    char key_type[16];
+    uint8_t public_key[64];
+    size_t public_key_len;
+    uint64_t timestamp_us;
+    uint64_t expires_at_us;
+    uint8_t signature[64];
+    size_t signature_len;
+    poseidon_channel_config_t config;
+    bool has_config;
+} poseidon_tombstone_t;
 
 typedef struct pending_bootstrap_t {
     char topic_id[64];
@@ -45,6 +68,8 @@ typedef struct poseidon_channel_manager_t {
     PLATFORMLOCKTYPE(lock);
     pending_bootstrap_t pending_bootstraps[POSEIDON_MAX_PENDING_BOOTSTRAPS];
     size_t num_pending_bootstraps;
+    poseidon_tombstone_t tombstones[POSEIDON_TOMBSTONE_MAX];
+    size_t num_tombstones;
 } poseidon_channel_manager_t;
 
 // ============================================================================
@@ -160,6 +185,46 @@ int poseidon_channel_manager_handle_bootstrap_request(
 
 int poseidon_channel_manager_tick_all(poseidon_channel_manager_t* mgr);
 int poseidon_channel_manager_gossip_all(poseidon_channel_manager_t* mgr);
+
+// ============================================================================
+// TOMBSTONE OPERATIONS
+// ============================================================================
+
+int poseidon_channel_manager_add_tombstone(poseidon_channel_manager_t* mgr,
+                                            const poseidon_tombstone_t* tombstone);
+
+const poseidon_tombstone_t* poseidon_channel_manager_find_tombstone(
+    const poseidon_channel_manager_t* mgr, const char* topic_id);
+
+void poseidon_channel_manager_expire_tombstones(poseidon_channel_manager_t* mgr);
+
+int poseidon_tombstone_from_delete_notice(const meridian_channel_delete_notice_t* notice,
+                                             poseidon_tombstone_t* tombstone);
+
+int poseidon_tombstone_from_modify_notice(const meridian_channel_modify_notice_t* notice,
+                                            poseidon_tombstone_t* tombstone);
+
+// ============================================================================
+// DELETE/MODIFY NOTICE HANDLERS
+// ============================================================================
+
+/**
+ * Handles a verified delete notice received from the network.
+ * Stores a tombstone, deletes the channel locally if present, and
+ * redistributes the notice on the dial channel.
+ */
+void poseidon_channel_manager_handle_delete_notice(
+    poseidon_channel_manager_t* mgr,
+    const meridian_channel_delete_notice_t* notice);
+
+/**
+ * Handles a verified modify notice received from the network.
+ * Stores a tombstone, triggers rejoin with new config if channel is local,
+ * and redistributes the notice on the dial channel.
+ */
+void poseidon_channel_manager_handle_modify_notice(
+    poseidon_channel_manager_t* mgr,
+    const meridian_channel_modify_notice_t* notice);
 
 #ifdef __cplusplus
 }

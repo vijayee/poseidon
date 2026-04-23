@@ -49,7 +49,7 @@ set(QUASAR_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Network/Quasar)
 set(CRYPTO_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Crypto)
 set(CHANNEL_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Channel)
 set(CLIENT_APIS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/ClientAPIs)
-set(CLIENT_LIBS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/client_libs/c)
+set(CLIENT_LIBS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/ClientLibs/c)
 
 # Poseidon Library
 set(POSEIDON_SOURCES
@@ -101,6 +101,7 @@ set(POSEIDON_SOURCES
     ${CHANNEL_SRC_DIR}/channel_manager.c
     ${CHANNEL_SRC_DIR}/subtopic.c
     ${CHANNEL_SRC_DIR}/channel_message.c
+    ${CHANNEL_SRC_DIR}/channel_notice.c
     ${CHANNEL_SRC_DIR}/topic_alias.c
     ${CHANNEL_SRC_DIR}/topic_id.c
     ${CLIENT_APIS_SRC_DIR}/client_protocol.c
@@ -142,29 +143,9 @@ target_link_libraries(poseidon PRIVATE
 )
 
 # Meridian Relay Server
-add_executable(meridian_relay
-    src/relay_main.c
-    src/Network/Meridian/meridian_relay_server.c
-)
-
-target_include_directories(meridian_relay PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/deps/msquic/src/inc
-    ${CMAKE_CURRENT_SOURCE_DIR}/deps/xxhash
-    ${CMAKE_CURRENT_SOURCE_DIR}/deps/blake3/c
-)
-
-target_link_libraries(meridian_relay PRIVATE
-    poseidon
-    cbor
-    hashmap
-    blake3
-    msquic::msquic
-    msquic::platform
-    pthread
-    OpenSSL::SSL
-    OpenSSL::Crypto
-)
+set(RELAY_STANDALONE OFF)
+set(POSEIDON_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/src/Network/Meridian/relay ${CMAKE_BINARY_DIR}/meridian_relay)
 
 # Poseidon Daemon
 add_executable(poseidond src/poseidond.c)
@@ -189,6 +170,18 @@ target_link_libraries(poseidond PRIVATE
     poll_dancer
     m
 )
+
+# ============================================================================
+# Poseidon Client Library (separate installable target)
+# ============================================================================
+
+# Built via its own CMakeLists.txt for standalone builds, or add_subdirectory here
+# When building as part of the parent project, source dirs and cbor target are available.
+set(POSEIDON_CLIENT_STANDALONE OFF)
+set(POSEIDON_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
+set(POSEIDON_CLIENT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/ClientLibs/c)
+set(POSEIDON_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/src/ClientLibs/c ${CMAKE_BINARY_DIR}/poseidon_client)
 
 # Test include paths for transitive dependencies
 set(TEST_INCLUDE_DIRS
@@ -241,6 +234,7 @@ add_meridian_test(pki_test tests/pki_test.cpp)
 # Channel Tests
 add_meridian_test(channel_test tests/channel_test.cpp)
 add_meridian_test(channel_bootstrap_test tests/channel_bootstrap_test.cpp)
+add_meridian_test(channel_notice_test tests/channel_notice_test.cpp)
 add_meridian_test(topic_id_test tests/topic_id_test.cpp)
 
 # ClientAPI Tests

@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "channel_config.h"
 #include "../RefCounter/refcounter.h"
 #include "../Crypto/key_pair.h"
 #include "../Crypto/node_id.h"
@@ -31,26 +32,9 @@ typedef enum {
     POSEIDON_CHANNEL_STATE_INIT,
     POSEIDON_CHANNEL_STATE_BOOTSTRAPPING,
     POSEIDON_CHANNEL_STATE_RUNNING,
-    POSEIDON_CHANNEL_STATE_SHUTTING_DOWN
+    POSEIDON_CHANNEL_STATE_SHUTTING_DOWN,
+    POSEIDON_CHANNEL_STATE_DELETED
 } poseidon_channel_state_t;
-
-// ============================================================================
-// CHANNEL CONFIGURATION
-// ============================================================================
-
-typedef struct poseidon_channel_config_t {
-    uint32_t ring_sizes[MERIDIAN_MAX_RINGS];   /**< Meridian ring sizes */
-    uint32_t gossip_init_interval_s;     /**< Gossip interval during bootstrap */
-    uint32_t gossip_steady_interval_s;   /**< Gossip interval in steady state */
-    uint32_t gossip_num_init_intervals;  /**< Number of init-phase gossip cycles */
-    uint32_t quasar_max_hops;            /**< Quasar routing filter depth */
-    uint32_t quasar_alpha;               /**< Quasar random walk fan-out */
-    uint32_t quasar_seen_size;           /**< Quasar dedup filter size (bits) */
-    uint32_t quasar_seen_hashes;         /**< Quasar dedup filter hash count */
-} poseidon_channel_config_t;
-
-/** Returns default channel configuration values */
-poseidon_channel_config_t poseidon_channel_config_defaults(void);
 
 // ============================================================================
 // CHANNEL
@@ -207,6 +191,24 @@ int poseidon_channel_gossip(poseidon_channel_t* channel);
 int poseidon_channel_update_config(poseidon_channel_t* channel,
                                     const poseidon_channel_config_t* new_config,
                                     poseidon_key_pair_t* key_pair);
+
+// ============================================================================
+// SIGNED LIFECYCLE OPERATIONS
+// ============================================================================
+
+/**
+ * Transitions a channel to DELETED state after a verified delete notice.
+ * Unsubscribes from Quasar and stops the Meridian protocol.
+ */
+int poseidon_channel_delete_signed(poseidon_channel_t* channel);
+
+/**
+ * Reconfigures a channel after a verified modify notice.
+ * Stops the overlay, updates config, re-creates Quasar, and re-bootstraps.
+ */
+int poseidon_channel_rejoin_with_config(poseidon_channel_t* channel,
+                                          const poseidon_channel_config_t* new_config,
+                                          struct poseidon_channel_manager_t* mgr);
 
 #ifdef __cplusplus
 }

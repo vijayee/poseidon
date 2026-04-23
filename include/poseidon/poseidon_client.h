@@ -1,5 +1,5 @@
 //
-// Created by victor on 4/22/26.
+// Poseidon C client library — connect to a Poseidon daemon and interact with channels.
 //
 
 #ifndef POSEIDON_CLIENT_H
@@ -8,8 +8,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include "Crypto/key_pair.h"
-#include "Channel/channel.h"
+
+typedef struct poseidon_key_pair_t poseidon_key_pair_t;
+typedef struct poseidon_channel_config_t poseidon_channel_config_t;
 
 #ifdef __cplusplus
 extern "C" {

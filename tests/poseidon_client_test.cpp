@@ -3,7 +3,7 @@
 //
 
 #include <gtest/gtest.h>
-#include "client_libs/c/poseidon_client.h"
+#include "ClientLibs/c/poseidon_client.h"
 #include "Crypto/key_pair.h"
 #include "ClientAPIs/client_protocol.h"
 

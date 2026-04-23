@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include "meridian.h"
+#include "../../Channel/channel_config.h"
 #include "../../Util/allocator.h"
 #include "../../Util/vec.h"
 #include <cbor.h>
@@ -226,6 +227,79 @@ int meridian_channel_bootstrap_reply_decode(const cbor_item_t* item,
                                              uint16_t* seed_ports,
                                              size_t* num_seeds,
                                              size_t max_seeds);
+
+// ============================================================================
+// CHANNEL LIFECYCLE PACKET TYPES
+// ============================================================================
+
+/** Channel delete notice: signed message from channel owner to delete the channel */
+#define MERIDIAN_PACKET_TYPE_CHANNEL_DELETE_NOTICE  60
+/** Channel modify notice: signed message from channel owner to reconfigure the channel */
+#define MERIDIAN_PACKET_TYPE_CHANNEL_MODIFY_NOTICE   61
+
+#define POSEIDON_CHANNEL_NOTICE_MAX_PUBLIC_KEY 64
+#define POSEIDON_CHANNEL_NOTICE_MAX_SIGNATURE  64
+
+// ============================================================================
+// CHANNEL LIFECYCLE STRUCTURES
+// ============================================================================
+
+/**
+ * Channel delete notice packet.
+ * Signed by the channel owner's private key and distributed via Quasar.
+ *
+ * Wire format (CBOR array):
+ * [type(60), string(topic_id), string(node_id), string(key_type),
+ *  bytes(public_key), uint64(timestamp_us), bytes(signature)]
+ */
+typedef struct meridian_channel_delete_notice_t {
+    uint8_t type;                    /**< MERIDIAN_PACKET_TYPE_CHANNEL_DELETE_NOTICE (60) */
+    char topic_id[64];               /**< Channel topic ID */
+    char node_id[64];                /**< Owner node ID string */
+    char key_type[16];               /**< Algorithm name: "ED25519", "RSA", "EC" */
+    uint8_t public_key[POSEIDON_CHANNEL_NOTICE_MAX_PUBLIC_KEY]; /**< Raw (ED25519) or DER (RSA/EC) */
+    size_t public_key_len;           /**< Length of public key */
+    uint64_t timestamp_us;           /**< When the notice was created */
+    uint8_t signature[POSEIDON_CHANNEL_NOTICE_MAX_SIGNATURE]; /**< Signature bytes */
+    size_t signature_len;            /**< Length of signature */
+} meridian_channel_delete_notice_t;
+
+/**
+ * Channel modify notice packet.
+ * Signed by the channel owner's private key and distributed via Quasar.
+ *
+ * Wire format (CBOR array):
+ * [type(61), string(topic_id), string(node_id), string(key_type),
+ *  bytes(public_key), uint64(timestamp_us), map(config), bytes(signature)]
+ */
+typedef struct meridian_channel_modify_notice_t {
+    uint8_t type;                    /**< MERIDIAN_PACKET_TYPE_CHANNEL_MODIFY_NOTICE (61) */
+    char topic_id[64];               /**< Channel topic ID */
+    char node_id[64];                /**< Owner node ID string */
+    char key_type[16];               /**< Algorithm name: "ED25519", "RSA", "EC" */
+    uint8_t public_key[POSEIDON_CHANNEL_NOTICE_MAX_PUBLIC_KEY]; /**< Raw (ED25519) or DER (RSA/EC) */
+    size_t public_key_len;           /**< Length of public key */
+    uint64_t timestamp_us;           /**< When the notice was created */
+    poseidon_channel_config_t config; /**< New channel configuration */
+    uint8_t signature[POSEIDON_CHANNEL_NOTICE_MAX_SIGNATURE]; /**< Signature bytes */
+    size_t signature_len;            /**< Length of signature */
+} meridian_channel_modify_notice_t;
+
+// ============================================================================
+// CHANNEL LIFECYCLE PACKET OPERATIONS
+// ============================================================================
+
+cbor_item_t* meridian_channel_delete_notice_encode(
+    const meridian_channel_delete_notice_t* notice);
+
+int meridian_channel_delete_notice_decode(const cbor_item_t* item,
+                                            meridian_channel_delete_notice_t* notice);
+
+cbor_item_t* meridian_channel_modify_notice_encode(
+    const meridian_channel_modify_notice_t* notice);
+
+int meridian_channel_modify_notice_decode(const cbor_item_t* item,
+                                           meridian_channel_modify_notice_t* notice);
 
 /** Quasar gossip: Routing filter propagation between peers */
 #define MERIDIAN_PACKET_TYPE_QUASAR_GOSSIP           50

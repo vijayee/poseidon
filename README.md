@@ -42,13 +42,24 @@ Symmetric NAT peers are automatically detected and routed relay-only, skipping d
 src/
 ├── Bloom/              # Bloom filters (bitset, standard, elastic, attenuated)
 ├── Buffer/             # Binary data manipulation
+├── Channel/            # Topic channels, subtopics, aliases
+├── ClientAPIs/          # Client protocol, sessions, transports (Unix, TCP, WS, QUIC)
+├── ClientLibs/
+│   ├── c/              # Installable C client library (static + shared, CMake package)
+│   ├── android/        # Android client library (Kotlin, Binder IPC)
+│   └── swift/          # Swift client library (SPM, XPC IPC)
+├── Crypto/             # BLAKE3 wrapper, node IDs, key pairs
 ├── Network/
 │   ├── Meridian/       # P2P overlay (rings, gossip, queries, measurement, NAT traversal)
+│   │   └── relay/      # Standalone QUIC relay server
 │   └── Quasar/         # Pub/sub overlay
 ├── RefCounter/         # Lock-free reference counting
 ├── Time/               # Timing wheels, tickers, debouncers
 ├── Util/               # Allocator, logging, vectors, threading, paths
 └── Workers/            # Work pool, promises, queues, error handling
+
+include/
+└── poseidon/           # Public headers for the installable C client library
 ```
 
 ## Dependencies
@@ -59,9 +70,11 @@ All dependencies are included as git submodules in `deps/`:
 |---|---|
 | [MSQUIC](https://github.com/microsoft/msquic) | QUIC protocol implementation |
 | [libcbor](https://github.com/PJK/libcbor) | CBOR encoding/decoding |
+| [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) | Cryptographic hashing |
 | [googletest](https://github.com/google/googletest) | C++ test framework |
 | [hashmap](https://github.com/tidwall/hashmap.c) | Hash map implementation |
 | [xxhash](https://github.com/Cyan4973/xxHash) | Fast hash function |
+| [poll-dancer](https://github.com/vijayee/poll-dancer) | Event loop library |
 
 ## Building
 
@@ -73,7 +86,7 @@ All dependencies are included as git submodules in `deps/`:
 - OpenSSL development libraries (required by MSQUIC)
 - `libnuma-dev` (on Linux, for MSQUIC)
 
-### Build Steps
+### Full Project Build
 
 ```bash
 # Clone with submodules
@@ -91,26 +104,49 @@ make -j$(nproc)
 ctest --output-on-failure
 ```
 
+### Standalone Builds
+
+Each component can also be built independently:
+
+**C Client Library** — produces static and shared libraries with `find_package(PoseidonClient)` support:
+
+```bash
+cd src/ClientLibs/c
+mkdir build && cd build
+cmake ..
+make
+
+# Install
+cmake --install . --prefix /usr/local
+```
+
+Downstream projects can then use:
+
+```cmake
+find_package(PoseidonClient REQUIRED)
+target_link_libraries(myapp PRIVATE PoseidonClient::poseidon_client_shared)
+```
+
+**Relay Server** — standalone QUIC relay binary:
+
+```bash
+cd src/Network/Meridian/relay
+mkdir build && cd build
+cmake ..
+make
+```
+
+See [relay/README.md](src/Network/Meridian/relay/README.md) for relay-specific options and usage.
+
 ### Build Targets
 
 | Target | Description |
 |---|---|
 | `poseidon` | Static library with all core components |
+| `poseidon_client_static` | Installable C client library (static) |
+| `poseidon_client_shared` | Installable C client library (shared) |
 | `meridian_relay` | Standalone relay server binary |
-| `meridian_node_test` | Node creation and reference counting |
-| `meridian_ring_test` | Latency ring management |
-| `meridian_packet_test` | CBOR packet encode/decode |
-| `meridian_measure_test` | Latency measurement |
-| `meridian_query_test` | Closest-node queries |
-| `meridian_integration_test` | Multi-node integration |
-| `meridian_relay_test` | Relay client/server and packet types |
-| `meridian_nat_detect_test` | NAT type classification |
-| `meridian_conn_test` | Connection manager state machine |
-| `bloom_bitset_test` | Bitset operations |
-| `bloom_filter_test` | Standard Bloom filter |
-| `elastic_bloom_filter_test` | Elastic Bloom filter |
-| `attenuated_bloom_filter_test` | Attenuated Bloom filter |
-| `quasar_test` | Quasar pub/sub |
+| `poseidond` | Poseidon daemon |
 
 ## Running the Relay Server
 
@@ -131,4 +167,4 @@ See [STYLEGUIDE.md](STYLEGUIDE.md) for the full C coding conventions used in thi
 
 ## License
 
-See [LICENSE](LICENSE) for details.
+This project is licensed under the GNU General Public License v3 — see the [LICENSE](LICENSE) file for details.

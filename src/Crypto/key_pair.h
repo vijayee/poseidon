@@ -133,7 +133,7 @@ int poseidon_key_pair_sign(poseidon_key_pair_t* kp,
 
 /**
  * Verifies an ED25519 signature against a public key derived from node_id.
- * Stub implementation — always returns -1 until full implementation.
+ * Legacy stub — callers should use poseidon_verify_signature_with_key instead.
  *
  * @param topic_id_str  Base58 topic ID string (encodes the public key)
  * @param data          Data that was signed
@@ -145,6 +145,24 @@ int poseidon_key_pair_sign(poseidon_key_pair_t* kp,
 int poseidon_verify_signature(const char* topic_id_str,
                                const uint8_t* data, size_t data_len,
                                const uint8_t* signature, size_t sig_len);
+
+/**
+ * Verifies a signature against a DER-encoded SubjectPublicKeyInfo, dispatching by algorithm.
+ * Supports ED25519 (pure EdDSA), RSA (PKCS1v15 + SHA-256), and EC (ECDSA + SHA-256).
+ *
+ * @param key_type   Algorithm name: "ED25519", "RSA", or "EC"
+ * @param public_key DER-encoded SubjectPublicKeyInfo bytes (output of i2d_PUBKEY)
+ * @param key_len    Length of public_key
+ * @param data       Data that was signed
+ * @param data_len   Length of data
+ * @param signature  Signature bytes
+ * @param sig_len    Length of signature
+ * @return           0 if valid, -1 if invalid or error
+ */
+int poseidon_verify_signature_with_key(const char* key_type,
+                                        const uint8_t* public_key, size_t key_len,
+                                        const uint8_t* data, size_t data_len,
+                                        const uint8_t* signature, size_t sig_len);
 
 #ifdef __cplusplus
 }

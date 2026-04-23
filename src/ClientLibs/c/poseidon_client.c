@@ -4,6 +4,8 @@
 
 #define _POSIX_C_SOURCE 200809L
 #include "poseidon_client.h"
+#include "Crypto/key_pair.h"
+#include "Channel/channel_config.h"
 #include "ClientAPIs/client_protocol.h"
 #include "Util/allocator.h"
 #include "Util/log.h"

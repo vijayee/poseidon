@@ -3,14 +3,15 @@
 //
 
 #include "channel_manager.h"
+#include "channel_notice.h"
 #include "../Util/allocator.h"
 #include "../Util/threadding.h"
 #include "../Crypto/key_pair.h"
 #include "../Network/Meridian/meridian_packet.h"
 #include "../Network/Meridian/meridian_protocol.h"
 #include <string.h>
-#include <cbor.h>
 #include <time.h>
+#include <cbor.h>
 
 // ============================================================================
 // BOOTSTRAP INTERCEPT
@@ -54,6 +55,22 @@ static bool channel_manager_bootstrap_intercept(void* ctx, const uint8_t* data, 
             poseidon_channel_manager_handle_bootstrap_reply(
                 mgr, topic_id, addr, port, ts, seed_addrs, seed_ports, num_seeds);
             handled = true;
+        }
+    } else if (pkt_type == MERIDIAN_PACKET_TYPE_CHANNEL_DELETE_NOTICE) {
+        meridian_channel_delete_notice_t notice;
+        if (meridian_channel_delete_notice_decode(item, &notice) == 0) {
+            if (poseidon_channel_verify_delete_notice(&notice) == 0) {
+                poseidon_channel_manager_handle_delete_notice(mgr, &notice);
+                handled = true;
+            }
+        }
+    } else if (pkt_type == MERIDIAN_PACKET_TYPE_CHANNEL_MODIFY_NOTICE) {
+        meridian_channel_modify_notice_t notice;
+        if (meridian_channel_modify_notice_decode(item, &notice) == 0) {
+            if (poseidon_channel_verify_modify_notice(&notice) == 0) {
+                poseidon_channel_manager_handle_modify_notice(mgr, &notice);
+                handled = true;
+            }
         }
     }
 
@@ -236,8 +253,8 @@ poseidon_channel_t* poseidon_channel_manager_join_channel(
             poseidon_channel_publish(mgr->dial_channel,
                                       (const uint8_t*)topic_str, strlen(topic_str),
                                       buf, written);
-            free(buf);
         }
+        free(buf);
     }
 
     return channel;
@@ -358,6 +375,61 @@ int poseidon_channel_manager_handle_bootstrap_request(
     const char* sender_node_id) {
     if (mgr == NULL || topic_id == NULL || sender_node_id == NULL) return -1;
 
+    // Check for a tombstone first — send it instead of a bootstrap reply
+    const poseidon_tombstone_t* tombstone =
+        poseidon_channel_manager_find_tombstone(mgr, topic_id);
+    if (tombstone != NULL) {
+        poseidon_channel_t* dial_channel = mgr->dial_channel;
+        cbor_item_t* notice_encoded = NULL;
+
+        if (tombstone->type == POSEIDON_TOMBSTONE_DELETE) {
+            meridian_channel_delete_notice_t notice;
+            memset(&notice, 0, sizeof(notice));
+            notice.type = MERIDIAN_PACKET_TYPE_CHANNEL_DELETE_NOTICE;
+            strncpy(notice.topic_id, tombstone->topic_id, sizeof(notice.topic_id) - 1);
+            strncpy(notice.node_id, tombstone->node_id, sizeof(notice.node_id) - 1);
+            strncpy(notice.key_type, tombstone->key_type, sizeof(notice.key_type) - 1);
+            memcpy(notice.public_key, tombstone->public_key, tombstone->public_key_len);
+            notice.public_key_len = tombstone->public_key_len;
+            notice.timestamp_us = tombstone->timestamp_us;
+            memcpy(notice.signature, tombstone->signature, tombstone->signature_len);
+            notice.signature_len = tombstone->signature_len;
+            notice_encoded = meridian_channel_delete_notice_encode(&notice);
+        } else if (tombstone->type == POSEIDON_TOMBSTONE_MODIFY) {
+            meridian_channel_modify_notice_t notice;
+            memset(&notice, 0, sizeof(notice));
+            notice.type = MERIDIAN_PACKET_TYPE_CHANNEL_MODIFY_NOTICE;
+            strncpy(notice.topic_id, tombstone->topic_id, sizeof(notice.topic_id) - 1);
+            strncpy(notice.node_id, tombstone->node_id, sizeof(notice.node_id) - 1);
+            strncpy(notice.key_type, tombstone->key_type, sizeof(notice.key_type) - 1);
+            memcpy(notice.public_key, tombstone->public_key, tombstone->public_key_len);
+            notice.public_key_len = tombstone->public_key_len;
+            notice.timestamp_us = tombstone->timestamp_us;
+            notice.config = tombstone->config;
+            memcpy(notice.signature, tombstone->signature, tombstone->signature_len);
+            notice.signature_len = tombstone->signature_len;
+            notice_encoded = meridian_channel_modify_notice_encode(&notice);
+        }
+
+        if (notice_encoded != NULL) {
+            if (dial_channel != NULL) {
+                unsigned char* buf = NULL;
+                size_t buf_len = 0;
+                size_t written = cbor_serialize_alloc(notice_encoded, &buf, &buf_len);
+                if (written > 0 && buf != NULL) {
+                    poseidon_channel_publish(dial_channel,
+                                             (const uint8_t*)topic_id, strlen(topic_id),
+                                             buf, written);
+                    free(buf);
+                } else {
+                    free(buf);
+                }
+            }
+            cbor_decref(&notice_encoded);
+        }
+        return 0;
+    }
+
     platform_lock(&mgr->lock);
 
     // Check if we're a member of the requested channel
@@ -405,10 +477,10 @@ int poseidon_channel_manager_handle_bootstrap_request(
             rc = poseidon_channel_publish(dial_channel,
                                            (const uint8_t*)topic_id, strlen(topic_id),
                                            buf, written);
-            free(buf);
         } else {
             rc = -1;
         }
+        free(buf);
     } else {
         rc = -1;
     }
@@ -417,7 +489,106 @@ int poseidon_channel_manager_handle_bootstrap_request(
 }
 
 // ============================================================================
-// PERIODIC OPERATIONS
+// DELETE/MODIFY NOTICE HANDLERS
+// ============================================================================
+
+void poseidon_channel_manager_handle_delete_notice(
+    poseidon_channel_manager_t* mgr,
+    const meridian_channel_delete_notice_t* notice) {
+    if (mgr == NULL || notice == NULL) return;
+
+    // Store tombstone locally
+    poseidon_tombstone_t tombstone;
+    if (poseidon_tombstone_from_delete_notice(notice, &tombstone) == 0) {
+        poseidon_channel_manager_add_tombstone(mgr, &tombstone);
+    }
+
+    // If we have the channel locally, delete it
+    platform_lock(&mgr->lock);
+    poseidon_channel_t* channel = NULL;
+    for (size_t i = 0; i < mgr->num_channels; i++) {
+        if (mgr->channels[i] != NULL) {
+            const char* topic = poseidon_channel_get_topic(mgr->channels[i]);
+            if (topic != NULL && strcmp(topic, notice->topic_id) == 0) {
+                channel = mgr->channels[i];
+                break;
+            }
+        }
+    }
+    platform_unlock(&mgr->lock);
+
+    if (channel != NULL) {
+        const poseidon_node_id_t* nid = poseidon_channel_get_node_id(channel);
+        poseidon_channel_delete_signed(channel);
+        poseidon_channel_manager_destroy_channel(mgr, nid);
+    }
+
+    // Redistribute on dial channel
+    if (mgr->dial_channel != NULL) {
+        cbor_item_t* encoded = meridian_channel_delete_notice_encode(notice);
+        if (encoded != NULL) {
+            unsigned char* buf = NULL;
+            size_t buf_len = 0;
+            size_t written = cbor_serialize_alloc(encoded, &buf, &buf_len);
+            cbor_decref(&encoded);
+            if (written > 0 && buf != NULL) {
+                poseidon_channel_publish(mgr->dial_channel,
+                                         (const uint8_t*)notice->topic_id,
+                                         strlen(notice->topic_id),
+                                         buf, written);
+            }
+            free(buf);
+        }
+    }
+}
+
+void poseidon_channel_manager_handle_modify_notice(
+    poseidon_channel_manager_t* mgr,
+    const meridian_channel_modify_notice_t* notice) {
+    if (mgr == NULL || notice == NULL) return;
+
+    // Store tombstone locally
+    poseidon_tombstone_t tombstone;
+    if (poseidon_tombstone_from_modify_notice(notice, &tombstone) == 0) {
+        poseidon_channel_manager_add_tombstone(mgr, &tombstone);
+    }
+
+    // If we have the channel locally, rejoin with new config
+    platform_lock(&mgr->lock);
+    poseidon_channel_t* channel = NULL;
+    for (size_t i = 0; i < mgr->num_channels; i++) {
+        if (mgr->channels[i] != NULL) {
+            const char* topic = poseidon_channel_get_topic(mgr->channels[i]);
+            if (topic != NULL && strcmp(topic, notice->topic_id) == 0) {
+                channel = mgr->channels[i];
+                break;
+            }
+        }
+    }
+    platform_unlock(&mgr->lock);
+
+    if (channel != NULL) {
+        poseidon_channel_rejoin_with_config(channel, &notice->config, mgr);
+    }
+
+    // Redistribute on dial channel
+    if (mgr->dial_channel != NULL) {
+        cbor_item_t* encoded = meridian_channel_modify_notice_encode(notice);
+        if (encoded != NULL) {
+            unsigned char* buf = NULL;
+            size_t buf_len = 0;
+            size_t written = cbor_serialize_alloc(encoded, &buf, &buf_len);
+            cbor_decref(&encoded);
+            if (written > 0 && buf != NULL) {
+                poseidon_channel_publish(mgr->dial_channel,
+                                         (const uint8_t*)notice->topic_id,
+                                         strlen(notice->topic_id),
+                                         buf, written);
+            }
+            free(buf);
+        }
+    }
+}
 // ============================================================================
 
 int poseidon_channel_manager_tick_all(poseidon_channel_manager_t* mgr) {
@@ -432,6 +603,7 @@ int poseidon_channel_manager_tick_all(poseidon_channel_manager_t* mgr) {
             rc |= poseidon_channel_tick(mgr->channels[i]);
         }
     }
+    poseidon_channel_manager_expire_tombstones(mgr);
     return rc;
 }
 
@@ -448,4 +620,126 @@ int poseidon_channel_manager_gossip_all(poseidon_channel_manager_t* mgr) {
         }
     }
     return rc;
+}
+
+// ============================================================================
+// TOMBSTONE OPERATIONS
+// ============================================================================
+
+int poseidon_channel_manager_add_tombstone(poseidon_channel_manager_t* mgr,
+                                            const poseidon_tombstone_t* tombstone) {
+    if (mgr == NULL || tombstone == NULL) return -1;
+
+    platform_lock(&mgr->lock);
+
+    // Check for duplicate topic_id
+    for (size_t i = 0; i < mgr->num_tombstones; i++) {
+        if (strcmp(mgr->tombstones[i].topic_id, tombstone->topic_id) == 0) {
+            // Replace if newer
+            if (tombstone->timestamp_us > mgr->tombstones[i].timestamp_us) {
+                mgr->tombstones[i] = *tombstone;
+            }
+            platform_unlock(&mgr->lock);
+            return 0;
+        }
+    }
+
+    if (mgr->num_tombstones >= POSEIDON_TOMBSTONE_MAX) {
+        platform_unlock(&mgr->lock);
+        return -1;
+    }
+
+    mgr->tombstones[mgr->num_tombstones++] = *tombstone;
+    platform_unlock(&mgr->lock);
+    return 0;
+}
+
+const poseidon_tombstone_t* poseidon_channel_manager_find_tombstone(
+    const poseidon_channel_manager_t* mgr, const char* topic_id) {
+    if (mgr == NULL || topic_id == NULL) return NULL;
+
+    for (size_t i = 0; i < mgr->num_tombstones; i++) {
+        if (strcmp(mgr->tombstones[i].topic_id, topic_id) == 0) {
+            return &mgr->tombstones[i];
+        }
+    }
+    return NULL;
+}
+
+void poseidon_channel_manager_expire_tombstones(poseidon_channel_manager_t* mgr) {
+    if (mgr == NULL) return;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t now_us = (uint64_t)now.tv_sec * 1000000 + (uint64_t)now.tv_nsec / 1000;
+
+    platform_lock(&mgr->lock);
+    size_t write = 0;
+    for (size_t i = 0; i < mgr->num_tombstones; i++) {
+        if (mgr->tombstones[i].expires_at_us > now_us) {
+            if (write != i) {
+                mgr->tombstones[write] = mgr->tombstones[i];
+            }
+            write++;
+        }
+    }
+    mgr->num_tombstones = write;
+    platform_unlock(&mgr->lock);
+}
+
+int poseidon_tombstone_from_delete_notice(const meridian_channel_delete_notice_t* notice,
+                                             poseidon_tombstone_t* tombstone) {
+    if (notice == NULL || tombstone == NULL) return -1;
+    memset(tombstone, 0, sizeof(*tombstone));
+
+    tombstone->type = POSEIDON_TOMBSTONE_DELETE;
+    strncpy(tombstone->topic_id, notice->topic_id, sizeof(tombstone->topic_id) - 1);
+    strncpy(tombstone->node_id, notice->node_id, sizeof(tombstone->node_id) - 1);
+    strncpy(tombstone->key_type, notice->key_type, sizeof(tombstone->key_type) - 1);
+    if (notice->public_key_len <= sizeof(tombstone->public_key)) {
+        memcpy(tombstone->public_key, notice->public_key, notice->public_key_len);
+        tombstone->public_key_len = notice->public_key_len;
+    }
+    tombstone->timestamp_us = notice->timestamp_us;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t now_us = (uint64_t)now.tv_sec * 1000000 + (uint64_t)now.tv_nsec / 1000;
+    tombstone->expires_at_us = now_us + (uint64_t)POSEIDON_TOMBSTONE_DEFAULT_TTL_SECONDS * 1000000;
+
+    if (notice->signature_len <= sizeof(tombstone->signature)) {
+        memcpy(tombstone->signature, notice->signature, notice->signature_len);
+        tombstone->signature_len = notice->signature_len;
+    }
+    tombstone->has_config = false;
+    return 0;
+}
+
+int poseidon_tombstone_from_modify_notice(const meridian_channel_modify_notice_t* notice,
+                                            poseidon_tombstone_t* tombstone) {
+    if (notice == NULL || tombstone == NULL) return -1;
+    memset(tombstone, 0, sizeof(*tombstone));
+
+    tombstone->type = POSEIDON_TOMBSTONE_MODIFY;
+    strncpy(tombstone->topic_id, notice->topic_id, sizeof(tombstone->topic_id) - 1);
+    strncpy(tombstone->node_id, notice->node_id, sizeof(tombstone->node_id) - 1);
+    strncpy(tombstone->key_type, notice->key_type, sizeof(tombstone->key_type) - 1);
+    if (notice->public_key_len <= sizeof(tombstone->public_key)) {
+        memcpy(tombstone->public_key, notice->public_key, notice->public_key_len);
+        tombstone->public_key_len = notice->public_key_len;
+    }
+    tombstone->timestamp_us = notice->timestamp_us;
+
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    uint64_t now_us = (uint64_t)now.tv_sec * 1000000 + (uint64_t)now.tv_nsec / 1000;
+    tombstone->expires_at_us = now_us + (uint64_t)POSEIDON_TOMBSTONE_DEFAULT_TTL_SECONDS * 1000000;
+
+    if (notice->signature_len <= sizeof(tombstone->signature)) {
+        memcpy(tombstone->signature, notice->signature, notice->signature_len);
+        tombstone->signature_len = notice->signature_len;
+    }
+    tombstone->config = notice->config;
+    tombstone->has_config = true;
+    return 0;
 }

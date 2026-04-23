@@ -76,3 +76,13 @@ uint64_t poseidon_node_id_hash(const poseidon_node_id_t* id) {
     memcpy(&val, id->hash, sizeof(uint64_t));
     return val;
 }
+
+int poseidon_node_id_verify_public_key(const poseidon_node_id_t* node_id,
+                                        const uint8_t* public_key, size_t key_len) {
+    if (node_id == NULL || public_key == NULL || key_len == 0) return -1;
+
+    uint8_t computed_hash[POSEIDON_NODE_ID_HASH_SIZE];
+    if (poseidon_blake3_hash(public_key, key_len, computed_hash) != 0) return -1;
+
+    return (memcmp(computed_hash, node_id->hash, POSEIDON_NODE_ID_HASH_SIZE) == 0) ? 0 : -1;
+}

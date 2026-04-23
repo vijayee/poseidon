@@ -82,6 +82,18 @@ void poseidon_node_id_clear(poseidon_node_id_t* id);
  */
 uint64_t poseidon_node_id_hash(const poseidon_node_id_t* id);
 
+/**
+ * Verifies that BLAKE3(public_key) matches the given node_id.
+ * Used to confirm that a public key belongs to the claimed identity.
+ *
+ * @param node_id    Expected node identity
+ * @param public_key Public key bytes to verify
+ * @param key_len    Length of public_key
+ * @return           0 if BLAKE3(public_key) matches node_id->hash, -1 otherwise
+ */
+int poseidon_node_id_verify_public_key(const poseidon_node_id_t* node_id,
+                                        const uint8_t* public_key, size_t key_len);
+
 #ifdef __cplusplus
 }
 #endif

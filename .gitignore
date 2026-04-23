@@ -31,3 +31,4 @@ benchmark_*.txt
 bindings/dart/.dart_tool/
 bindings/dart/libwavedb.so
 bindings/dart/pubspec.lock
+.claude/

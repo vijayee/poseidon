@@ -322,3 +322,46 @@ int poseidon_verify_signature(const char* topic_id_str,
     (void)sig_len;
     return -1;
 }
+
+int poseidon_verify_signature_with_key(const char* key_type,
+                                        const uint8_t* public_key, size_t key_len,
+                                        const uint8_t* data, size_t data_len,
+                                        const uint8_t* signature, size_t sig_len) {
+    if (key_type == NULL || public_key == NULL || data == NULL || signature == NULL)
+        return -1;
+
+    EVP_PKEY* pkey = NULL;
+    {
+        // All key types are DER-encoded SubjectPublicKeyInfo from poseidon_key_pair_get_public_key
+        const unsigned char* p = public_key;
+        pkey = d2i_PUBKEY(NULL, &p, (long)key_len);
+    }
+    if (pkey == NULL) return -1;
+
+    EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+    if (ctx == NULL) { EVP_PKEY_free(pkey); return -1; }
+
+    int result = -1;
+    if (strcmp(key_type, "ED25519") == 0) {
+        if (EVP_DigestVerifyInit(ctx, NULL, NULL, NULL, pkey) == 1) {
+            result = (EVP_DigestVerify(ctx, signature, sig_len,
+                                       data, data_len) == 1) ? 0 : -1;
+        }
+    } else if (strcmp(key_type, "RSA") == 0) {
+        EVP_PKEY_CTX* pctx = NULL;
+        if (EVP_DigestVerifyInit(ctx, EVP_sha256(), &pctx, NULL, pkey) == 1) {
+            result = (EVP_DigestVerify(ctx, signature, sig_len,
+                                       data, data_len) == 1) ? 0 : -1;
+        }
+    } else if (strcmp(key_type, "EC") == 0) {
+        EVP_PKEY_CTX* pctx = NULL;
+        if (EVP_DigestVerifyInit(ctx, EVP_sha256(), &pctx, NULL, pkey) == 1) {
+            result = (EVP_DigestVerify(ctx, signature, sig_len,
+                                       data, data_len) == 1) ? 0 : -1;
+        }
+    }
+
+    EVP_MD_CTX_free(ctx);
+    EVP_PKEY_free(pkey);
+    return result;
+}

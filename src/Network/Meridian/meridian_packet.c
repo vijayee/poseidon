@@ -1037,3 +1037,208 @@ int meridian_channel_bootstrap_reply_decode(const cbor_item_t* item,
 
     return 0;
 }
+
+// ============================================================================
+// CHANNEL DELETE NOTICE
+// ============================================================================
+
+cbor_item_t* meridian_channel_delete_notice_encode(
+    const meridian_channel_delete_notice_t* notice) {
+    if (notice == NULL) return NULL;
+
+    cbor_item_t* array = cbor_new_definite_array(7);
+    if (array == NULL) return NULL;
+
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint8(MERIDIAN_PACKET_TYPE_CHANNEL_DELETE_NOTICE))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_string(notice->topic_id))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_string(notice->node_id))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_string(notice->key_type))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_bytestring(notice->public_key, notice->public_key_len))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint64(notice->timestamp_us))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_bytestring(notice->signature, notice->signature_len)))) {
+        cbor_decref(&array);
+        return NULL;
+    }
+
+    return array;
+}
+
+int meridian_channel_delete_notice_decode(const cbor_item_t* item,
+                                            meridian_channel_delete_notice_t* notice) {
+    if (item == NULL || notice == NULL) return -1;
+    if (!cbor_isa_array(item)) return -1;
+    if (cbor_array_size(item) != 7) return -1;
+
+    cbor_item_t** items = cbor_array_handle(item);
+
+    if (!cbor_isa_uint(items[0]) || !cbor_isa_string(items[1]) ||
+        !cbor_isa_string(items[2]) || !cbor_isa_string(items[3]) ||
+        !cbor_isa_bytestring(items[4]) || !cbor_isa_uint(items[5]) ||
+        !cbor_isa_bytestring(items[6]))
+        return -1;
+
+    memset(notice, 0, sizeof(*notice));
+    notice->type = (uint8_t)cbor_get_uint8(items[0]);
+
+    size_t topic_len = cbor_string_length(items[1]);
+    if (topic_len >= sizeof(notice->topic_id)) return -1;
+    memcpy(notice->topic_id, cbor_string_handle(items[1]), topic_len);
+
+    size_t node_id_len = cbor_string_length(items[2]);
+    if (node_id_len >= sizeof(notice->node_id)) return -1;
+    memcpy(notice->node_id, cbor_string_handle(items[2]), node_id_len);
+
+    size_t key_type_len = cbor_string_length(items[3]);
+    if (key_type_len >= sizeof(notice->key_type)) return -1;
+    memcpy(notice->key_type, cbor_string_handle(items[3]), key_type_len);
+
+    notice->public_key_len = cbor_bytestring_length(items[4]);
+    if (notice->public_key_len > POSEIDON_CHANNEL_NOTICE_MAX_PUBLIC_KEY) return -1;
+    memcpy(notice->public_key, cbor_bytestring_handle(items[4]), notice->public_key_len);
+
+    notice->timestamp_us = cbor_get_uint64(items[5]);
+
+    notice->signature_len = cbor_bytestring_length(items[6]);
+    if (notice->signature_len > POSEIDON_CHANNEL_NOTICE_MAX_SIGNATURE) return -1;
+    memcpy(notice->signature, cbor_bytestring_handle(items[6]), notice->signature_len);
+
+    return 0;
+}
+
+// ============================================================================
+// CHANNEL MODIFY NOTICE
+// ============================================================================
+
+cbor_item_t* meridian_channel_modify_notice_encode(
+    const meridian_channel_modify_notice_t* notice) {
+    if (notice == NULL) return NULL;
+
+    cbor_item_t* array = cbor_new_definite_array(8);
+    if (array == NULL) return NULL;
+
+    if (!cbor_array_push(array, cbor_move(cbor_build_uint8(MERIDIAN_PACKET_TYPE_CHANNEL_MODIFY_NOTICE))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_string(notice->topic_id))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_string(notice->node_id))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_string(notice->key_type))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_bytestring(notice->public_key, notice->public_key_len))) ||
+        !cbor_array_push(array, cbor_move(cbor_build_uint64(notice->timestamp_us)))) {
+        cbor_decref(&array);
+        return NULL;
+    }
+
+    cbor_item_t* config_map = cbor_new_definite_map(8 + MERIDIAN_MAX_RINGS);
+    if (config_map == NULL) { cbor_decref(&array); return NULL; }
+
+    for (int i = 0; i < MERIDIAN_MAX_RINGS; i++) {
+        char key[4];
+        snprintf(key, sizeof(key), "r%d", i);
+        if (!cbor_map_add(config_map, (struct cbor_pair) {
+            .key = cbor_move(cbor_build_string(key)),
+            .value = cbor_move(cbor_build_uint32(notice->config.ring_sizes[i]))
+        })) { cbor_decref(&config_map); cbor_decref(&array); return NULL; }
+    }
+    if (!cbor_map_add(config_map, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("gis")),
+        .value = cbor_move(cbor_build_uint32(notice->config.gossip_init_interval_s))
+    }) || !cbor_map_add(config_map, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("gss")),
+        .value = cbor_move(cbor_build_uint32(notice->config.gossip_steady_interval_s))
+    }) || !cbor_map_add(config_map, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("gni")),
+        .value = cbor_move(cbor_build_uint32(notice->config.gossip_num_init_intervals))
+    }) || !cbor_map_add(config_map, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("qmh")),
+        .value = cbor_move(cbor_build_uint32(notice->config.quasar_max_hops))
+    }) || !cbor_map_add(config_map, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("qa")),
+        .value = cbor_move(cbor_build_uint32(notice->config.quasar_alpha))
+    }) || !cbor_map_add(config_map, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("qss")),
+        .value = cbor_move(cbor_build_uint32(notice->config.quasar_seen_size))
+    }) || !cbor_map_add(config_map, (struct cbor_pair) {
+        .key = cbor_move(cbor_build_string("qsh")),
+        .value = cbor_move(cbor_build_uint32(notice->config.quasar_seen_hashes))
+    })) { cbor_decref(&config_map); cbor_decref(&array); return NULL; }
+
+    if (!cbor_array_push(array, cbor_move(config_map))) {
+        cbor_decref(&array);
+        return NULL;
+    }
+
+    if (!cbor_array_push(array, cbor_move(cbor_build_bytestring(notice->signature, notice->signature_len)))) {
+        cbor_decref(&array);
+        return NULL;
+    }
+
+    return array;
+}
+
+int meridian_channel_modify_notice_decode(const cbor_item_t* item,
+                                           meridian_channel_modify_notice_t* notice) {
+    if (item == NULL || notice == NULL) return -1;
+    if (!cbor_isa_array(item)) return -1;
+    if (cbor_array_size(item) != 8) return -1;
+
+    cbor_item_t** items = cbor_array_handle(item);
+
+    if (!cbor_isa_uint(items[0]) || !cbor_isa_string(items[1]) ||
+        !cbor_isa_string(items[2]) || !cbor_isa_string(items[3]) ||
+        !cbor_isa_bytestring(items[4]) || !cbor_isa_uint(items[5]) ||
+        !cbor_isa_map(items[6]) || !cbor_isa_bytestring(items[7]))
+        return -1;
+
+    memset(notice, 0, sizeof(*notice));
+    notice->type = (uint8_t)cbor_get_uint8(items[0]);
+
+    size_t topic_len = cbor_string_length(items[1]);
+    if (topic_len >= sizeof(notice->topic_id)) return -1;
+    memcpy(notice->topic_id, cbor_string_handle(items[1]), topic_len);
+
+    size_t node_id_len = cbor_string_length(items[2]);
+    if (node_id_len >= sizeof(notice->node_id)) return -1;
+    memcpy(notice->node_id, cbor_string_handle(items[2]), node_id_len);
+
+    size_t key_type_len = cbor_string_length(items[3]);
+    if (key_type_len >= sizeof(notice->key_type)) return -1;
+    memcpy(notice->key_type, cbor_string_handle(items[3]), key_type_len);
+
+    notice->public_key_len = cbor_bytestring_length(items[4]);
+    if (notice->public_key_len > POSEIDON_CHANNEL_NOTICE_MAX_PUBLIC_KEY) return -1;
+    memcpy(notice->public_key, cbor_bytestring_handle(items[4]), notice->public_key_len);
+
+    notice->timestamp_us = cbor_get_uint64(items[5]);
+
+    notice->config = poseidon_channel_config_defaults();
+    size_t map_size = cbor_map_size(items[6]);
+    struct cbor_pair* pairs = cbor_map_handle(items[6]);
+    for (size_t i = 0; i < map_size; i++) {
+        if (!cbor_isa_string(pairs[i].key) || !cbor_isa_uint(pairs[i].value)) continue;
+        size_t klen = cbor_string_length(pairs[i].key);
+        const char* key = (const char*)cbor_string_handle(pairs[i].key);
+        uint32_t val = (uint32_t)cbor_get_uint32(pairs[i].value);
+        if (klen == 2 && key[0] == 'r' && key[1] >= '0' && key[1] <= '9') {
+            int idx = key[1] - '0';
+            if (idx < MERIDIAN_MAX_RINGS) notice->config.ring_sizes[idx] = val;
+        } else if (klen == 3 && memcmp(key, "gis", 3) == 0) {
+            notice->config.gossip_init_interval_s = val;
+        } else if (klen == 3 && memcmp(key, "gss", 3) == 0) {
+            notice->config.gossip_steady_interval_s = val;
+        } else if (klen == 3 && memcmp(key, "gni", 3) == 0) {
+            notice->config.gossip_num_init_intervals = val;
+        } else if (klen == 3 && memcmp(key, "qmh", 3) == 0) {
+            notice->config.quasar_max_hops = val;
+        } else if (klen == 2 && memcmp(key, "qa", 2) == 0) {
+            notice->config.quasar_alpha = val;
+        } else if (klen == 3 && memcmp(key, "qss", 3) == 0) {
+            notice->config.quasar_seen_size = val;
+        } else if (klen == 3 && memcmp(key, "qsh", 3) == 0) {
+            notice->config.quasar_seen_hashes = val;
+        }
+    }
+
+    notice->signature_len = cbor_bytestring_length(items[7]);
+    if (notice->signature_len > POSEIDON_CHANNEL_NOTICE_MAX_SIGNATURE) return -1;
+    memcpy(notice->signature, cbor_bytestring_handle(items[7]), notice->signature_len);
+
+    return 0;
+}
