@@ -22,13 +22,7 @@
 
 #define FRAME_HEADER_SIZE 4
 #define CLIENT_READ_BUF_SIZE 65536
-#define MAX_PENDING 64
-
-typedef struct pending_request_t {
-    uint32_t request_id;
-    cbor_item_t** response_ptr;
-    bool completed;
-} pending_request_t;
+#define CLIENT_MAX_RESULT 1024
 
 struct poseidon_client_t {
     int fd;
@@ -38,10 +32,10 @@ struct poseidon_client_t {
     void* delivery_cb_ctx;
     poseidon_event_cb_t event_cb;
     void* event_cb_ctx;
-    pending_request_t pending[MAX_PENDING];
-    size_t num_pending;
+    poseidon_response_cb_t response_cb;
+    void* response_cb_ctx;
     PLATFORMLOCKTYPE(lock);
-    PLATFORMTHREADTYPE recv_thread;
+    PLATFORMTHREADTYPE(recv_thread);
     volatile bool running;
     uint8_t read_buf[CLIENT_READ_BUF_SIZE];
     size_t read_len;
@@ -77,10 +71,19 @@ static int send_frame(poseidon_client_t* client, const uint8_t* data, size_t len
     return (h == FRAME_HEADER_SIZE && (size_t)d == len) ? 0 : -1;
 }
 
+static uint32_t next_id(poseidon_client_t* client) {
+    platform_lock(&client->lock);
+    uint32_t id = client->next_request_id++;
+    platform_unlock(&client->lock);
+    return id;
+}
+
 static int send_request(poseidon_client_t* client, uint8_t method,
                         const char* topic_path, const uint8_t* payload, size_t payload_len) {
+    uint32_t id = next_id(client);
+
     cbor_item_t* frame = client_protocol_encode_request(
-        client->next_request_id++, method, topic_path, payload, payload_len);
+        id, method, topic_path, payload, payload_len);
     if (frame == NULL) return -1;
 
     uint8_t* buf = NULL;
@@ -100,9 +103,10 @@ static int send_admin_request(poseidon_client_t* client, uint8_t method,
                               const char* topic_path,
                               const uint8_t* signature, size_t sig_len,
                               const uint8_t* config_data, size_t config_len) {
+    uint32_t id = next_id(client);
+
     cbor_item_t* frame = client_protocol_encode_admin_request(
-        client->next_request_id++, method, topic_path,
-        signature, sig_len, config_data, config_len);
+        id, method, topic_path, signature, sig_len, config_data, config_len);
     if (frame == NULL) return -1;
 
     uint8_t* buf = NULL;
@@ -122,22 +126,12 @@ static int send_admin_request(poseidon_client_t* client, uint8_t method,
 // RECEIVE THREAD
 // ============================================================================
 
-static poseidon_client_t* g_recv_client = NULL;
-
 static void process_received_frame(poseidon_client_t* client, client_frame_t* frame) {
     if (frame->frame_type == CLIENT_FRAME_RESPONSE) {
-        platform_lock(&client->lock);
-        for (size_t i = 0; i < client->num_pending; i++) {
-            if (client->pending[i].request_id == frame->request_id) {
-                client->pending[i].completed = true;
-                if (client->pending[i].response_ptr != NULL) {
-                    // Copy result data
-                    // For now, just mark completed
-                }
-                break;
-            }
+        if (client->response_cb != NULL) {
+            client->response_cb(client->response_cb_ctx, frame->request_id,
+                               frame->error_code, frame->result_data);
         }
-        platform_unlock(&client->lock);
     } else if (frame->frame_type == CLIENT_FRAME_EVENT) {
         if (frame->event_type == CLIENT_EVENT_DELIVERY && client->delivery_cb != NULL) {
             client->delivery_cb(client->delivery_cb_ctx, frame->topic_path,
@@ -258,11 +252,9 @@ poseidon_client_t* poseidon_client_connect(const char* transport_url) {
     client->fd = fd;
     client->connected = true;
     client->next_request_id = 1;
-    client->num_pending = 0;
     client->running = true;
     platform_lock_init(&client->lock);
 
-    g_recv_client = client;
     if (pthread_create(&client->recv_thread, NULL, recv_thread_func, client) != 0) {
         platform_lock_destroy(&client->lock);
         free(client);
@@ -363,7 +355,6 @@ int poseidon_client_channel_modify(poseidon_client_t* client, const char* topic_
         return -1;
     }
 
-    // Serialize config as CBOR (simplified — just send raw bytes for now)
     return send_admin_request(client, CLIENT_METHOD_CHANNEL_MODIFY, topic_id,
                                signature, sig_len, (const uint8_t*)config, sizeof(*config));
 }
@@ -420,4 +411,11 @@ void poseidon_client_on_event(poseidon_client_t* client,
     if (client == NULL) return;
     client->event_cb = cb;
     client->event_cb_ctx = ctx;
+}
+
+void poseidon_client_on_response(poseidon_client_t* client,
+                                  poseidon_response_cb_t cb, void* ctx) {
+    if (client == NULL) return;
+    client->response_cb = cb;
+    client->response_cb_ctx = ctx;
 }

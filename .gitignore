@@ -25,6 +25,8 @@ benchmark_*.txt
 !.github/
 !CMakeLists.txt
 !bindings/nodejs/*.json
+!src/ClientLibs/node/package.json
+!src/ClientLibs/node/package-lock.json
 
 
 # Dart bindings

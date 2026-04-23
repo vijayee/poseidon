@@ -29,6 +29,10 @@ typedef void (*poseidon_delivery_cb_t)(void* ctx, const char* topic_id,
 typedef void (*poseidon_event_cb_t)(void* ctx, uint8_t event_type,
                                      const uint8_t* data, size_t len);
 
+typedef void (*poseidon_response_cb_t)(void* ctx, uint32_t request_id,
+                                        uint8_t error_code,
+                                        const char* result_data);
+
 // ============================================================================
 // CONNECTION MANAGEMENT
 // ============================================================================
@@ -89,6 +93,8 @@ void poseidon_client_on_delivery(poseidon_client_t* client,
                                   poseidon_delivery_cb_t cb, void* ctx);
 void poseidon_client_on_event(poseidon_client_t* client,
                                poseidon_event_cb_t cb, void* ctx);
+void poseidon_client_on_response(poseidon_client_t* client,
+                                  poseidon_response_cb_t cb, void* ctx);
 
 #ifdef __cplusplus
 }

@@ -46,6 +46,7 @@ src/
 ├── ClientAPIs/          # Client protocol, sessions, transports (Unix, TCP, WS, QUIC)
 ├── ClientLibs/
 │   ├── c/              # Installable C client library (static + shared, CMake package)
+│   ├── node/           # Node.js client (N-API addon + pure JS web, npm package)
 │   ├── android/        # Android client library (Kotlin, Binder IPC)
 │   └── swift/          # Swift client library (SPM, XPC IPC)
 ├── Crypto/             # BLAKE3 wrapper, node IDs, key pairs
@@ -127,6 +128,16 @@ find_package(PoseidonClient REQUIRED)
 target_link_libraries(myapp PRIVATE PoseidonClient::poseidon_client_shared)
 ```
 
+**Node.js Client** — npm package with native addon and pure JS web client:
+
+```bash
+cd src/ClientLibs/node
+npm install
+npm run build:native   # optional: compile native addon
+```
+
+See [node/README.md](src/ClientLibs/node/README.md) for API docs and transport options.
+
 **Relay Server** — standalone QUIC relay binary:
 
 ```bash
@@ -145,6 +156,7 @@ See [relay/README.md](src/Network/Meridian/relay/README.md) for relay-specific o
 | `poseidon` | Static library with all core components |
 | `poseidon_client_static` | Installable C client library (static) |
 | `poseidon_client_shared` | Installable C client library (shared) |
+| `poseidon-client` | Node.js client (npm, native addon + web) |
 | `meridian_relay` | Standalone relay server binary |
 | `poseidond` | Poseidon daemon |
 
