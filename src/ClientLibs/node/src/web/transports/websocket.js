@@ -32,8 +32,9 @@ class WebSocketTransport extends Transport {
 
       ws.onclose = () => { if (this.onClose) this.onClose(); };
 
-      ws.onerror = () => {
-        const err = new Error('WebSocket error: ' + this.url);
+      ws.onerror = (event) => {
+        const msg = event.message || ('WebSocket error: ' + this.url);
+        const err = new Error(msg);
         if (!this.ws) reject(err);
         else if (this.onError) this.onError(err);
       };

@@ -5,7 +5,9 @@ class WebTransportTransport extends Transport {
     super();
     this.url = url;
     this.session = null;
+    this.stream = null;
     this.reader = null;
+    this.writer = null;
   }
 
   async connect() {
@@ -16,33 +18,33 @@ class WebTransportTransport extends Transport {
     this.session = new WebTransport(this.url);
     await this.session.ready;
 
-    const stream = await this.session.createBidirectionalStream();
-    this.reader = stream.readable.getReader();
+    this.stream = await this.session.createBidirectionalStream();
+    this.reader = this.stream.readable.getReader();
+    this.writer = this.stream.writable.getWriter();
 
-    this._readLoop(this.reader).catch(() => {
+    this._readLoop().catch(() => {
       if (this.onClose) this.onClose();
     });
   }
 
-  async _readLoop(reader) {
+  async _readLoop() {
     while (true) {
-      const { value, done } = await reader.read();
+      const { value, done } = await this.reader.read();
       if (done) break;
       if (this.onMessage && value) this.onMessage(value);
     }
   }
 
   async disconnect() {
-    if (this.reader) { await this.reader.cancel(); this.reader = null; }
+    if (this.writer) { await this.writer.close().catch(() => {}); this.writer = null; }
+    if (this.reader) { await this.reader.cancel().catch(() => {}); this.reader = null; }
+    this.stream = null;
     if (this.session) { this.session.close(); this.session = null; }
   }
 
   async send(data) {
-    if (!this.session) throw new Error('Not connected');
-    const stream = await this.session.createBidirectionalStream();
-    const writer = stream.writable.getWriter();
-    await writer.write(data);
-    await writer.close();
+    if (!this.writer) throw new Error('Not connected');
+    await this.writer.write(data);
   }
 }
 
