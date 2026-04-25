@@ -1836,7 +1836,7 @@ class MembersPanel extends StatelessWidget {
     return Container(
       width: 280,
       decoration: const BoxDecoration(
-        color: AppColors.surface,
+        color: Color(0xFFEAEEF4),
         border: Border(left: BorderSide(color: AppColors.border)),
       ),
       child: Column(
