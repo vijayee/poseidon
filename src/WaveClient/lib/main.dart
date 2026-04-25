@@ -309,13 +309,12 @@ class _EmailClientScreenState extends State<EmailClientScreen> {
           SizedBox(
             width: 340,
             child: Row(
+              mainAxisAlignment: MainAxisAlignment.end,
               children: [
                 const Text(
                   'Sort',
                   style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
                 ),
-                const SizedBox(width: 4),
-                const Icon(Icons.keyboard_arrow_down, size: 18, color: AppColors.textSecondary),
                 const SizedBox(width: 12),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -443,27 +442,18 @@ class _EmailClientScreenState extends State<EmailClientScreen> {
               ),
             ),
           ),
-          // Column 2: TopicList width (200px) - Channel name
+          // Column 2: TopicList width (200px) - Poseidon text
           SizedBox(
             width: 200,
             child: Padding(
               padding: const EdgeInsets.only(left: 16),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      _channelNames[_selectedChannelIndex],
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15,
-                        color: AppColors.textPrimary,
-                      ),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  const Icon(Icons.keyboard_arrow_down, size: 18, color: AppColors.textSecondary),
-                  const SizedBox(width: 8),
-                ],
+              child: Text(
+                'Poseidon',
+                style: GoogleFonts.leagueSpartan(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 20,
+                  color: AppColors.textPrimary,
+                ),
               ),
             ),
           ),
@@ -473,19 +463,6 @@ class _EmailClientScreenState extends State<EmailClientScreen> {
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Row(
                 children: [
-                  const Icon(Icons.tag, size: 18, color: AppColors.textMuted),
-                  const SizedBox(width: 8),
-                  Text(
-                    _channelTopics[_selectedChannelIndex][_selectedTopicIndex].name,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
-                      color: AppColors.textPrimary,
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  const VerticalDivider(width: 1, indent: 16, endIndent: 16),
-                  const SizedBox(width: 16),
                   Expanded(
                     child: Container(
                       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -887,9 +864,9 @@ class EmailDetailPane extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    // Header row: Avatar | Name + Icons | Date
+                    // Header row: Avatar | Name + Icons
                     Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+                      crossAxisAlignment: CrossAxisAlignment.center,
                       children: [
                         // Left: Avatar
                         CircleAvatar(
@@ -905,179 +882,176 @@ class EmailDetailPane extends StatelessWidget {
                           ),
                         ),
                         const SizedBox(width: 16),
-                        // Right: Name, icons, date
+                        // Right: Name + Icons
                         Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                          child: Row(
                             children: [
-                              // Top row: Name + Icons + Date
-                              Row(
-                                children: [
-                                  Expanded(
-                                    child: Text(
-                                      email.senderName,
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w500,
-                                        fontSize: 15,
-                                        color: AppColors.textPrimary,
-                                      ),
-                                    ),
+                              Expanded(
+                                child: Text(
+                                  email.senderName,
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.w500,
+                                    fontSize: 15,
+                                    color: AppColors.textPrimary,
                                   ),
-                                  // Action icons
-                                  IconButton(
-                                    icon: const Icon(Icons.reply, size: 18, color: AppColors.textSecondary),
-                                    onPressed: () {},
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(),
-                                  ),
-                                  const SizedBox(width: 16),
-                                  IconButton(
-                                    icon: const Icon(Icons.reply_all, size: 18, color: AppColors.textSecondary),
-                                    onPressed: () {},
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(),
-                                  ),
-                                  const SizedBox(width: 16),
-                                  IconButton(
-                                    icon: const Icon(Icons.delete_outline, size: 18, color: AppColors.textSecondary),
-                                    onPressed: () {},
-                                    padding: EdgeInsets.zero,
-                                    constraints: const BoxConstraints(),
-                                  ),
-                                  const SizedBox(width: 24),
-                                  // Date
-                                  Text(
-                                    'Monday, Apr 7, 2018',
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: AppColors.textMuted.withValues(alpha: 0.7),
-                                    ),
-                                  ),
-                                ],
+                                ),
                               ),
-                              const SizedBox(height: 20),
-                              // Subject row: Bold title | Time
-                              Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Expanded(
-                                    child: Text(
-                                      'Hey there! Check out this thing!',
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 22,
-                                        color: AppColors.textPrimary,
-                                      ),
-                                    ),
-                                  ),
-                                  Text(
-                                    '10:35',
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: AppColors.textMuted.withValues(alpha: 0.7),
-                                    ),
-                                  ),
-                                ],
+                              // Action icons
+                              IconButton(
+                                icon: const Icon(Icons.reply, size: 18, color: AppColors.textSecondary),
+                                onPressed: () {},
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                              ),
+                              const SizedBox(width: 16),
+                              IconButton(
+                                icon: const Icon(Icons.reply_all, size: 18, color: AppColors.textSecondary),
+                                onPressed: () {},
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                              ),
+                              const SizedBox(width: 16),
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline, size: 18, color: AppColors.textSecondary),
+                                onPressed: () {},
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
                               ),
                             ],
                           ),
                         ),
                       ],
                     ),
+                    const SizedBox(height: 20),
+                    // Subject row: Bold title | Timestamp
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 64),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Expanded(
+                            child: Text(
+                              'Hey there! Check out this thing!',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 22,
+                                color: AppColors.textPrimary,
+                              ),
+                            ),
+                          ),
+                          Text(
+                            'Monday, Apr 7, 2018  10:35',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: AppColors.textMuted.withValues(alpha: 0.7),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
 
                     const SizedBox(height: 24),
 
-                    // Message Body
-                    const Text(
-                      'Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace diversity and empowerment.',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: AppColors.textSecondary,
-                        height: 1.7,
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    const Text(
-                      'Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: AppColors.textSecondary,
-                        height: 1.7,
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    const Text(
-                      'Capitalize on low hanging fruit to identify a ballpark value added activity to beta test. Override the digital divide with additional clickthroughs from DevOps.',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: AppColors.textSecondary,
-                        height: 1.7,
-                      ),
-                    ),
+                    // Body + attachments indented to align with name/subject text
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 64),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // Message Body
+                          const Text(
+                            'Leverage agile frameworks to provide a robust synopsis for high level overviews. Iterative approaches to corporate strategy foster collaborative thinking to further the overall value proposition. Organically grow the holistic world view of disruptive innovation via workplace diversity and empowerment.',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: AppColors.textSecondary,
+                              height: 1.7,
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          const Text(
+                            'Bring to the table win-win survival strategies to ensure proactive domination. At the end of the day, going forward, a new normal that has evolved from generation X is on the runway heading towards a streamlined cloud solution. User generated content in real-time will have multiple touchpoints for offshoring.',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: AppColors.textSecondary,
+                              height: 1.7,
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          const Text(
+                            'Capitalize on low hanging fruit to identify a ballpark value added activity to beta test. Override the digital divide with additional clickthroughs from DevOps.',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: AppColors.textSecondary,
+                              height: 1.7,
+                            ),
+                          ),
 
-                    const SizedBox(height: 32),
+                          const SizedBox(height: 32),
 
-                    // Attachment bar matching image
-                    if (email.hasAttachment) ...[
-                      Row(
-                          children: [
-                            // PDF icon box
-                            Container(
-                              width: 56,
-                              height: 56,
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFE8E8E8),
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                              child: const Center(
-                                child: Text(
-                                  'PDF',
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.bold,
-                                    fontSize: 14,
-                                    color: AppColors.textMuted,
+                          // Attachment bar matching image
+                          if (email.hasAttachment) ...[
+                            Row(
+                              children: [
+                                // PDF icon box
+                                Container(
+                                  width: 56,
+                                  height: 56,
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFFE8E8E8),
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                  child: const Center(
+                                    child: Text(
+                                      'PDF',
+                                      style: TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 14,
+                                        color: AppColors.textMuted,
+                                      ),
+                                    ),
                                   ),
                                 ),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            // Link icon + filename
-                            const Icon(Icons.link, size: 16, color: AppColors.textSecondary),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                'Shop_Presentation_01.pdf (100 KB)',
-                                style: const TextStyle(
-                                  fontSize: 13,
-                                  color: AppColors.textPrimary,
+                                const SizedBox(width: 12),
+                                // Link icon + filename
+                                const Icon(Icons.link, size: 16, color: AppColors.textSecondary),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    'Shop_Presentation_01.pdf (100 KB)',
+                                    style: const TextStyle(
+                                      fontSize: 13,
+                                      color: AppColors.textPrimary,
+                                    ),
+                                  ),
                                 ),
-                              ),
-                            ),
-                            // Action buttons
-                            TextButton(
-                              onPressed: () {},
-                              child: const Text(
-                                'Share',
-                                style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
-                              ),
-                            ),
-                            TextButton(
-                              onPressed: () {},
-                              child: const Text(
-                                'Show',
-                                style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
-                              ),
-                            ),
-                            TextButton(
-                              onPressed: () {},
-                              child: const Text(
-                                'Download',
-                                style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
-                              ),
+                                // Action buttons
+                                TextButton(
+                                  onPressed: () {},
+                                  child: const Text(
+                                    'Share',
+                                    style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+                                  ),
+                                ),
+                                TextButton(
+                                  onPressed: () {},
+                                  child: const Text(
+                                    'Show',
+                                    style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+                                  ),
+                                ),
+                                TextButton(
+                                  onPressed: () {},
+                                  child: const Text(
+                                    'Download',
+                                    style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
-                        ),
-                    ],
+                        ],
+                      ),
+                    ),
                   ],
                 ),
               ),
@@ -1249,7 +1223,7 @@ class ContactListPane extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: 340,
-      color: AppColors.background,
+      color: const Color(0xFFEAEEF4),
       child: ListView.builder(
         padding: const EdgeInsets.all(8),
         itemCount: contacts.length,
@@ -1346,157 +1320,177 @@ class SingleContactPanel extends StatelessWidget {
     return Container(
       width: 280,
       decoration: const BoxDecoration(
-        color: AppColors.surface,
+        color: Color(0xFFEAEEF2),
         border: Border(left: BorderSide(color: AppColors.border)),
       ),
-      child: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Banner
-            Container(
-              height: 100,
-              color: (contact.avatarColor ?? AppColors.primary).withValues(alpha: 0.3),
-            ),
-
-            // Avatar overlapping banner
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Transform.translate(
-                offset: const Offset(0, -30),
-                child: CircleAvatar(
-                  radius: 36,
-                  backgroundColor: AppColors.surface,
-                  child: CircleAvatar(
-                    radius: 32,
-                    backgroundColor: (contact.avatarColor ?? Colors.grey).withValues(alpha: 0.2),
-                    child: Text(
-                      contact.name[0],
-                      style: TextStyle(
-                        color: contact.avatarColor ?? Colors.grey,
-                        fontSize: 24,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ),
-                ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          return SingleChildScrollView(
+            child: Container(
+              constraints: BoxConstraints(minHeight: constraints.maxHeight),
+              padding: const EdgeInsets.all(12),
+              alignment: Alignment.topCenter,
+              decoration: const BoxDecoration(
+                color: Color(0xFFEAEEF2),
               ),
-            ),
-
-            // Name and handle
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    contact.name,
-                    style: const TextStyle(
-                      fontWeight: FontWeight.bold,
-                      fontSize: 18,
-                      color: AppColors.textPrimary,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    contact.handle,
-                    style: const TextStyle(
-                      fontSize: 13,
-                      color: AppColors.textSecondary,
-                    ),
-                  ),
-                  if (contact.status != null) ...[
-                    const SizedBox(height: 8),
+              child: Container(
+                clipBehavior: Clip.antiAlias,
+                decoration: BoxDecoration(
+                  color: AppColors.surface,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Banner
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: AppColors.background,
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: Text(
-                        contact.status!,
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: AppColors.textSecondary,
+                      height: 100,
+                      color: (contact.avatarColor ?? AppColors.primary).withValues(alpha: 0.3),
+                    ),
+
+                    // Avatar overlapping banner
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Transform.translate(
+                        offset: const Offset(0, -30),
+                        child: CircleAvatar(
+                          radius: 36,
+                          backgroundColor: AppColors.surface,
+                          child: CircleAvatar(
+                            radius: 32,
+                            backgroundColor: (contact.avatarColor ?? Colors.grey).withValues(alpha: 0.2),
+                            child: Text(
+                              contact.name[0],
+                              style: TextStyle(
+                                color: contact.avatarColor ?? Colors.grey,
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
                         ),
                       ),
                     ),
+
+                    // Name and handle
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            contact.name,
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 18,
+                              color: AppColors.textPrimary,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            contact.handle,
+                            style: const TextStyle(
+                              fontSize: 13,
+                              color: AppColors.textSecondary,
+                            ),
+                          ),
+                          if (contact.status != null) ...[
+                            const SizedBox(height: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: AppColors.background,
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              child: Text(
+                                contact.status!,
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: AppColors.textSecondary,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+
+                    const Divider(height: 1),
+
+                    // Member Since
+                    if (contact.memberSince != null)
+                      Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Member Since',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: AppColors.textMuted,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            Text(
+                              contact.memberSince!,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: AppColors.textPrimary,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                    // Mutual Servers
+                    if (contact.mutualServers > 0)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              'Mutual Servers — ${contact.mutualServers}',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.textPrimary,
+                              ),
+                            ),
+                            const Icon(Icons.keyboard_arrow_right, size: 18, color: AppColors.textMuted),
+                          ],
+                        ),
+                      ),
+
+                    // Mutual Friends
+                    if (contact.mutualFriends > 0)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              'Mutual Friends — ${contact.mutualFriends}',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.textPrimary,
+                              ),
+                            ),
+                            const Icon(Icons.keyboard_arrow_right, size: 18, color: AppColors.textMuted),
+                          ],
+                        ),
+                      ),
                   ],
-                ],
+                ),
               ),
             ),
-
-            const Divider(height: 1),
-
-            // Member Since
-            if (contact.memberSince != null)
-              Padding(
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      'Member Since',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w700,
-                        color: AppColors.textMuted,
-                        letterSpacing: 0.5,
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      contact.memberSince!,
-                      style: const TextStyle(
-                        fontSize: 13,
-                        color: AppColors.textPrimary,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-
-            // Mutual Servers
-            if (contact.mutualServers > 0)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Mutual Servers — ${contact.mutualServers}',
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.textPrimary,
-                      ),
-                    ),
-                    const Icon(Icons.keyboard_arrow_right, size: 18, color: AppColors.textMuted),
-                  ],
-                ),
-              ),
-
-            // Mutual Friends
-            if (contact.mutualFriends > 0)
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Mutual Friends — ${contact.mutualFriends}',
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.textPrimary,
-                      ),
-                    ),
-                    const Icon(Icons.keyboard_arrow_right, size: 18, color: AppColors.textMuted),
-                  ],
-                ),
-              ),
-          ],
-        ),
+          );
+        },
       ),
     );
   }
@@ -1522,7 +1516,7 @@ class TopicList extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: 200,
-      color: const Color(0xFFF2F3F5),
+      color: const Color(0xFFEAEEF4),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -1707,6 +1701,7 @@ class ChatArea extends StatelessWidget {
           Container(
             padding: const EdgeInsets.all(16),
             decoration: const BoxDecoration(
+              color: Color(0xFFC9E0EC),
               border: Border(top: BorderSide(color: AppColors.border)),
             ),
             child: Row(
