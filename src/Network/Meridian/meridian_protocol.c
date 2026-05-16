@@ -28,6 +28,183 @@ static QUIC_STATUS QUIC_API
 ConnectionCallback(HQUIC Connection, void* Context,
                    QUIC_CONNECTION_EVENT* Event);
 
+static QUIC_STATUS QUIC_API
+protocol_uni_stream_callback(HQUIC Stream, void* Context,
+                              QUIC_STREAM_EVENT* Event);
+
+static QUIC_STATUS QUIC_API
+protocol_bidi_stream_callback(HQUIC Stream, void* Context,
+                               QUIC_STREAM_EVENT* Event);
+
+// ============================================================================
+// STREAM TRACKING HELPERS
+// ============================================================================
+
+static int protocol_add_stream(meridian_protocol_t* protocol,
+                                meridian_stream_entry_t* entry) {
+    if (protocol == NULL || entry == NULL) return -1;
+
+    platform_lock(&protocol->lock);
+    if (protocol->num_active_streams >= protocol->active_streams_cap) {
+        size_t new_cap = protocol->active_streams_cap * 2;
+        meridian_stream_entry_t** new_arr = (meridian_stream_entry_t**)
+            realloc(protocol->active_streams, new_cap * sizeof(meridian_stream_entry_t*));
+        if (new_arr == NULL) {
+            platform_unlock(&protocol->lock);
+            return -1;
+        }
+        protocol->active_streams = new_arr;
+        protocol->active_streams_cap = new_cap;
+    }
+    protocol->active_streams[protocol->num_active_streams++] = entry;
+    platform_unlock(&protocol->lock);
+    return 0;
+}
+
+static void protocol_remove_stream(meridian_protocol_t* protocol,
+                                    meridian_stream_entry_t* entry) {
+    if (protocol == NULL || entry == NULL) return;
+
+    platform_lock(&protocol->lock);
+    for (size_t i = 0; i < protocol->num_active_streams; i++) {
+        if (protocol->active_streams[i] == entry) {
+            protocol->active_streams[i] =
+                protocol->active_streams[protocol->num_active_streams - 1];
+            protocol->num_active_streams--;
+            break;
+        }
+    }
+    platform_unlock(&protocol->lock);
+}
+
+// ============================================================================
+// STREAM CALLBACKS
+// ============================================================================
+
+static QUIC_STATUS QUIC_API
+protocol_uni_stream_callback(HQUIC Stream, void* Context,
+                              QUIC_STREAM_EVENT* Event) {
+    meridian_stream_entry_t* entry = (meridian_stream_entry_t*)Context;
+
+    switch (Event->Type) {
+    case QUIC_STREAM_EVENT_RECEIVE: {
+        // Outbound uni streams (sender side) have context=NULL
+        if (entry == NULL) break;
+
+        const QUIC_BUFFER* buffers = Event->RECEIVE.Buffers;
+        uint32_t buffer_count = Event->RECEIVE.BufferCount;
+
+        for (uint32_t i = 0; i < buffer_count; i++) {
+            if (meridian_stream_entry_append(entry, buffers[i].Buffer,
+                                              buffers[i].Length) != 0) {
+                break;
+            }
+        }
+        Event->RECEIVE.TotalBufferLength = 0;
+        break;
+    }
+
+    case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
+        if (entry != NULL && entry->user_context != NULL) {
+            meridian_protocol_t* proto = (meridian_protocol_t*)entry->user_context;
+            if (proto->callbacks.on_packet) {
+                proto->callbacks.on_packet(proto->callbacks.user_ctx, proto,
+                                            entry->recv_buf, entry->recv_len);
+            }
+        }
+        break;
+    }
+
+    case QUIC_STREAM_EVENT_SEND_COMPLETE:
+        if (Event->SEND_COMPLETE.ClientContext != NULL) {
+            free(Event->SEND_COMPLETE.ClientContext);
+        }
+        break;
+
+    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
+        meridian_protocol_t* proto = (entry != NULL && entry->user_context != NULL)
+            ? (meridian_protocol_t*)entry->user_context : NULL;
+        if (proto != NULL) {
+            protocol_remove_stream(proto, entry);
+        }
+        meridian_stream_entry_destroy(entry);
+        if (Stream) {
+            // Stream handle closed by msquic after this callback
+        }
+        break;
+    }
+
+    default:
+        break;
+    }
+
+    return QUIC_STATUS_SUCCESS;
+}
+
+static QUIC_STATUS QUIC_API
+protocol_bidi_stream_callback(HQUIC Stream, void* Context,
+                               QUIC_STREAM_EVENT* Event) {
+    meridian_stream_entry_t* entry = (meridian_stream_entry_t*)Context;
+
+    switch (Event->Type) {
+    case QUIC_STREAM_EVENT_START_COMPLETE:
+        break;
+
+    case QUIC_STREAM_EVENT_RECEIVE: {
+        if (entry == NULL) break;
+
+        const QUIC_BUFFER* buffers = Event->RECEIVE.Buffers;
+        uint32_t buffer_count = Event->RECEIVE.BufferCount;
+
+        for (uint32_t i = 0; i < buffer_count; i++) {
+            if (meridian_stream_entry_append(entry, buffers[i].Buffer,
+                                              buffers[i].Length) != 0) {
+                break;
+            }
+        }
+        Event->RECEIVE.TotalBufferLength = 0;
+        break;
+    }
+
+    case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
+        if (entry != NULL && entry->user_context != NULL) {
+            meridian_protocol_t* proto = (meridian_protocol_t*)entry->user_context;
+            if (proto->callbacks.on_packet) {
+                proto->callbacks.on_packet(proto->callbacks.user_ctx, proto,
+                                            entry->recv_buf, entry->recv_len);
+            }
+            // Gracefully close our send side after receiving peer's complete message
+            if (Stream) {
+                proto->msquic->StreamShutdown(Stream,
+                    QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
+            }
+        }
+        break;
+    }
+
+    case QUIC_STREAM_EVENT_SEND_COMPLETE:
+        if (Event->SEND_COMPLETE.ClientContext != NULL) {
+            free(Event->SEND_COMPLETE.ClientContext);
+        }
+        break;
+
+    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
+        meridian_protocol_t* proto = (entry != NULL && entry->user_context != NULL)
+            ? (meridian_protocol_t*)entry->user_context : NULL;
+        if (proto != NULL) {
+            protocol_remove_stream(proto, entry);
+        }
+        meridian_stream_entry_destroy(entry);
+        break;
+    }
+
+    default:
+        break;
+    }
+
+    return QUIC_STATUS_SUCCESS;
+}
+
 static void gossip_outbound_cb(void* ctx, const uint8_t* data, size_t len,
                                 const meridian_node_t* target) {
     meridian_protocol_t* protocol = (meridian_protocol_t*)ctx;
@@ -99,6 +276,12 @@ meridian_protocol_t* meridian_protocol_create(const meridian_protocol_config_t* 
     protocol->connections = NULL;
     protocol->num_connections = 0;
     protocol->default_relay = NULL;
+
+    // Stream tracking for per-message QUIC streams
+    protocol->active_streams_cap = 16;
+    protocol->active_streams = get_clear_memory(
+        protocol->active_streams_cap * sizeof(meridian_stream_entry_t*));
+    protocol->num_active_streams = 0;
 
     platform_lock_init(&protocol->lock);
     refcounter_init(&protocol->refcounter);
@@ -181,6 +364,11 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol) {
             protocol->gossip_handle = NULL;
         }
 
+        for (size_t i = 0; i < protocol->num_active_streams; i++) {
+            meridian_stream_entry_destroy(protocol->active_streams[i]);
+        }
+        free(protocol->active_streams);
+
         platform_lock_destroy(&protocol->lock);
         free(protocol);
     }
@@ -220,12 +408,14 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
     // Configure ALPN
     QUIC_BUFFER Alpn = { sizeof("meridian") - 1, (uint8_t*)"meridian" };
 
-    // Configure settings with datagram support
+    // Configure settings for per-message streams
     QUIC_SETTINGS Settings = {0};
     Settings.IdleTimeoutMs = 30000;
     Settings.IsSet.IdleTimeoutMs = TRUE;
-    Settings.DatagramReceiveEnabled = TRUE;
-    Settings.IsSet.DatagramReceiveEnabled = TRUE;
+    Settings.PeerBidiStreamCount = MERIDIAN_MAX_CONCURRENT_STREAMS;
+    Settings.IsSet.PeerBidiStreamCount = TRUE;
+    Settings.PeerUnidiStreamCount = MERIDIAN_MAX_CONCURRENT_STREAMS;
+    Settings.IsSet.PeerUnidiStreamCount = TRUE;
 
     if (QUIC_FAILED(Status = protocol->msquic->ConfigurationOpen(
             protocol->registration,
@@ -568,18 +758,7 @@ int meridian_protocol_send_packet(meridian_protocol_t* protocol,
 
     if (Connection == NULL) return -1;
 
-    QUIC_BUFFER Buffer = {
-        .Length = (uint32_t)len,
-        .Buffer = (uint8_t*)data
-    };
-
-    QUIC_STATUS Status = protocol->msquic->DatagramSend(
-        Connection,
-        &Buffer, 1,
-        QUIC_SEND_FLAG_NONE,
-        NULL);
-
-    return QUIC_SUCCEEDED(Status) ? 0 : -1;
+    return meridian_stream_send_uni(protocol->msquic, Connection, data, len, NULL);
 }
 
 int meridian_protocol_broadcast(meridian_protocol_t* protocol,
@@ -661,7 +840,7 @@ int meridian_protocol_ring_management(meridian_protocol_t* protocol) {
 int meridian_protocol_on_packet(meridian_protocol_t* protocol,
                                  const uint8_t* data, size_t len,
                                  const meridian_node_t* from) {
-    if (protocol == NULL || data == NULL || from == NULL) return -1;
+    if (protocol == NULL || data == NULL) return -1;
 
     // Check if this is a Quasar route message (uses its own magic, not CBOR)
     if (len >= 4) {
@@ -742,7 +921,10 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
     switch (type) {
     case MERIDIAN_PACKET_TYPE_GOSSIP:
     case MERIDIAN_PACKET_TYPE_GOSSIP_PULL:
-        rc = meridian_gossip_handle_on_packet(protocol->gossip_handle, data, len, from);
+        // Gossip requires a known source node; skip for stream-received packets
+        if (from != NULL) {
+            rc = meridian_gossip_handle_on_packet(protocol->gossip_handle, data, len, from);
+        }
         break;
     case MERIDIAN_PACKET_TYPE_QUASAR_GOSSIP:
         if (protocol->callbacks.on_quasar_gossip != NULL) {
@@ -807,6 +989,21 @@ int meridian_protocol_send_measure(meridian_protocol_t* protocol,
     // Record send time for RTT computation
     gettimeofday(&req->start_time, NULL);
 
+    // Find connection for target
+    HQUIC Connection = NULL;
+    platform_lock(&protocol->lock);
+    for (size_t i = 0; i < protocol->num_connected_peers; i++) {
+        if (protocol->peer_nodes[i] &&
+            protocol->peer_nodes[i]->addr == req->target->addr &&
+            protocol->peer_nodes[i]->port == req->target->port) {
+            Connection = protocol->connected_peers[i];
+            break;
+        }
+    }
+    platform_unlock(&protocol->lock);
+
+    if (Connection == NULL) return -1;
+
     // Build a PING packet with the request's query_id
     meridian_packet_t pkt;
     pkt.type = MERIDIAN_PACKET_TYPE_PING;
@@ -815,7 +1012,6 @@ int meridian_protocol_send_measure(meridian_protocol_t* protocol,
     pkt.rendv_addr = 0;
     pkt.rendv_port = 0;
 
-    // Encode and send
     cbor_item_t* encoded = meridian_packet_encode(&pkt);
     if (encoded == NULL) return -1;
 
@@ -826,10 +1022,57 @@ int meridian_protocol_send_measure(meridian_protocol_t* protocol,
 
     if (buf == NULL) return -1;
 
-    int result = meridian_protocol_send_packet(protocol, buf, buf_len, req->target);
+    // Open bidi stream for request/response measure
+    meridian_stream_entry_t* entry = meridian_stream_entry_create(NULL, true, protocol);
+    if (entry == NULL) {
+        free(buf);
+        return -1;
+    }
+
+    HQUIC Stream = NULL;
+    QUIC_STATUS Status = protocol->msquic->StreamOpen(
+        Connection, QUIC_STREAM_OPEN_FLAG_NONE,
+        protocol_bidi_stream_callback, entry, &Stream);
+    if (QUIC_FAILED(Status)) {
+        meridian_stream_entry_destroy(entry);
+        free(buf);
+        return -1;
+    }
+    entry->stream = Stream;
+
+    Status = protocol->msquic->StreamStart(Stream, QUIC_STREAM_START_FLAG_NONE);
+    if (QUIC_FAILED(Status)) {
+        protocol->msquic->StreamClose(Stream);
+        meridian_stream_entry_destroy(entry);
+        free(buf);
+        return -1;
+    }
+
+    // Copy data into a send buffer freed in SEND_COMPLETE
+    uint8_t* send_buf = (uint8_t*)get_memory(buf_len);
+    if (send_buf == NULL) {
+        protocol->msquic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
+        free(buf);
+        return -1;
+    }
+    memcpy(send_buf, buf, buf_len);
+
+    QUIC_BUFFER send_buffer;
+    send_buffer.Buffer = send_buf;
+    send_buffer.Length = (uint32_t)buf_len;
+
+    Status = protocol->msquic->StreamSend(Stream, &send_buffer, 1,
+                                           QUIC_SEND_FLAG_FIN, send_buf);
+    if (QUIC_FAILED(Status)) {
+        free(send_buf);
+        protocol->msquic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
+        free(buf);
+        return -1;
+    }
+
     free(buf);
 
-    if (result != 0) return -1;
+    protocol_add_stream(protocol, entry);
 
     // Register the request as pending
     platform_lock(&protocol->lock);
@@ -945,19 +1188,20 @@ ConnectionCallback(HQUIC Connection, void* Context,
         // Ready for close
         return QUIC_STATUS_SUCCESS;
 
-    case QUIC_CONNECTION_EVENT_DATAGRAM_RECEIVED: {
-        // Unreliable datagram received
-        const QUIC_BUFFER* Buffer = Event->DATAGRAM_RECEIVED.Buffer;
+    case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
+        HQUIC Stream = Event->PEER_STREAM_STARTED.Stream;
+        bool is_bidi = !(Event->PEER_STREAM_STARTED.Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL);
 
-        // Find peer node for this connection and invoke callback
-        // For now, pass NULL as from - caller can use ConnectionGetParam
-        if (protocol->callbacks.on_packet) {
-            protocol->callbacks.on_packet(
-                protocol->callbacks.user_ctx,
-                protocol,
-                Buffer->Buffer,
-                Buffer->Length);
-        }
+        meridian_stream_entry_t* entry = meridian_stream_entry_create(Stream, is_bidi, protocol);
+        if (entry == NULL) return QUIC_STATUS_OUT_OF_MEMORY;
+
+        QUIC_STREAM_CALLBACK_HANDLER handler = is_bidi
+            ? protocol_bidi_stream_callback
+            : protocol_uni_stream_callback;
+
+        protocol->msquic->SetCallbackHandler(Stream, handler, entry);
+        protocol_add_stream(protocol, entry);
+
         return QUIC_STATUS_SUCCESS;
     }
 

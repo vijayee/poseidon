@@ -18,6 +18,7 @@
 #include "meridian_measure.h"
 #include "meridian_packet.h"
 #include "meridian_conn.h"
+#include "meridian_stream.h"
 #include "../../Workers/pool.h"
 #include "../../Time/wheel.h"
 #include "../../Crypto/node_id.h"
@@ -156,6 +157,11 @@ typedef struct meridian_protocol_t {
     struct poseidon_channel_manager_t* channel_manager; /**< Set by daemon for bootstrap dispatch */
 
     meridian_protocol_callbacks_t callbacks;   /**< Protocol event callbacks */
+
+    // Per-message stream tracking (replaces datagram)
+    meridian_stream_entry_t** active_streams;  /**< Array of active stream entries */
+    size_t num_active_streams;                  /**< Count of active streams */
+    size_t active_streams_cap;                  /**< Allocated capacity for stream entries */
 
     PLATFORMLOCKTYPE(lock);                    /**< Thread-safe state access */
     bool running;                              /**< True when protocol is active */
