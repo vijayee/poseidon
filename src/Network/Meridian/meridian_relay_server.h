@@ -13,6 +13,7 @@ extern "C" {
 
 #include "../../RefCounter/refcounter.h"
 #include "../../Util/threadding.h"
+#include "meridian_stream.h"
 #include "msquic.h"
 
 /**
@@ -26,6 +27,16 @@ extern "C" {
 #define MERIDIAN_RELAY_ENDPOINT_ID_NONE 0
 
 /**
+ * @brief Runtime statistics for relay server monitoring
+ */
+typedef struct meridian_relay_server_stats_t {
+    size_t num_clients;           /**< Current number of connected clients */
+    uint64_t datagrams_forwarded; /**< Total messages successfully forwarded via streams */
+    uint64_t datagrams_dropped;  /**< Total messages dropped due to errors or no route */
+    uint64_t addr_requests_served; /**< Total address discovery requests served */
+} meridian_relay_server_stats_t;
+
+/**
  * @brief Per-connected-client state in the relay server
  */
 typedef struct meridian_relay_client_t {
@@ -34,6 +45,9 @@ typedef struct meridian_relay_client_t {
     struct sockaddr_storage remote_addr; /**< Observed remote address */
     uint64_t last_activity_ms;           /**< Last activity timestamp */
     bool authenticated;                  /**< Has completed initial handshake */
+    meridian_stream_entry_t** active_streams; /**< Dynamic array of active streams */
+    size_t num_active_streams;           /**< Number of active streams */
+    size_t active_streams_cap;           /**< Capacity of active_streams array */
 } meridian_relay_client_t;
 
 /**
@@ -49,6 +63,7 @@ typedef struct meridian_relay_server_t {
     meridian_relay_client_t clients[MERIDIAN_RELAY_MAX_CLIENTS]; /**< Connected clients array */
     size_t num_clients;                                   /**< Current number of connected clients */
     uint32_t next_endpoint_id;                            /**< Next endpoint ID to assign */
+    meridian_relay_server_stats_t stats;                  /**< Runtime statistics */
     PLATFORMLOCKTYPE(lock);                               /**< Thread safety lock for client list */
 } meridian_relay_server_t;
 
@@ -64,16 +79,6 @@ typedef struct meridian_relay_server_config_t {
     const char* tls_key_path;          /**< Path to TLS private key PEM (NULL = insecure) */
     const char* tls_cert_path;         /**< Path to TLS certificate PEM (NULL = insecure) */
 } meridian_relay_server_config_t;
-
-/**
- * @brief Runtime statistics for relay server monitoring
- */
-typedef struct meridian_relay_server_stats_t {
-    size_t num_clients;        /**< Current number of connected clients */
-    uint64_t datagrams_forwarded; /**< Total datagrams successfully forwarded */
-    uint64_t datagrams_dropped;   /**< Total datagrams dropped due to errors or no route */
-    uint64_t addr_requests_served; /**< Total address discovery requests served */
-} meridian_relay_server_stats_t;
 
 /**
  * @brief Create a new relay server instance

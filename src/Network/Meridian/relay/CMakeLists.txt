@@ -68,11 +68,42 @@ endif()
 set(MERIDIAN_RELAY_SOURCES
     ${POSEIDON_SRC_DIR}/relay_main.c
     ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_relay_server.c
+    ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_stream.c
     ${POSEIDON_SRC_DIR}/Network/Meridian/msquic_singleton.c
     ${POSEIDON_SRC_DIR}/RefCounter/refcounter.c
     ${POSEIDON_SRC_DIR}/Util/allocator.c
     ${POSEIDON_SRC_DIR}/Util/log.c
     ${POSEIDON_SRC_DIR}/Util/threadding.c
+    ${POSEIDON_SRC_DIR}/Util/vec.c
+    ${POSEIDON_SRC_DIR}/Util/hash.c
+    ${POSEIDON_SRC_DIR}/Buffer/buffer.c
+    ${POSEIDON_SRC_DIR}/Workers/pool.c
+    ${POSEIDON_SRC_DIR}/Workers/work.c
+    ${POSEIDON_SRC_DIR}/Workers/promise.c
+    ${POSEIDON_SRC_DIR}/Workers/queue.c
+    ${POSEIDON_SRC_DIR}/Workers/error.c
+    ${POSEIDON_SRC_DIR}/Workers/join.c
+    ${POSEIDON_SRC_DIR}/Workers/transaction_id.c
+    ${POSEIDON_SRC_DIR}/Time/wheel.c
+    ${POSEIDON_SRC_DIR}/Time/ticker.c
+    ${POSEIDON_SRC_DIR}/Time/debouncer.c
+    ${POSEIDON_SRC_DIR}/Crypto/blake3_wrapper.c
+    ${POSEIDON_SRC_DIR}/Crypto/node_id.c
+    ${POSEIDON_SRC_DIR}/Crypto/key_pair.c
+    ${POSEIDON_SRC_DIR}/Bloom/bitset.c
+    ${POSEIDON_SRC_DIR}/Bloom/bloom_filter.c
+    ${POSEIDON_SRC_DIR}/Bloom/elastic_bloom_filter.c
+    ${POSEIDON_SRC_DIR}/Bloom/attenuated_bloom_filter.c
+    ${POSEIDON_SRC_DIR}/Network/Meridian/meridian.c
+    ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_ring.c
+    ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_packet.c
+    ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_measure.c
+    ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_query.c
+    ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_gossip.c
+    ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_rendv.c
+    ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_relay.c
+    ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_conn.c
+    ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_protocol.c
 )
 
 # ============================================================================
@@ -83,6 +114,10 @@ add_executable(meridian_relay ${MERIDIAN_RELAY_SOURCES})
 
 target_include_directories(meridian_relay PRIVATE
     ${POSEIDON_SRC_DIR}
+    ${POSEIDON_SRC_DIR}/deps/hashmap/include
+    ${POSEIDON_SRC_DIR}/deps/libcbor/src
+    ${POSEIDON_SRC_DIR}/deps/blake3/c
+    ${POSEIDON_SRC_DIR}/deps/msquic/src/inc
 )
 
 # msquic include dir — only needed when building with in-tree deps
@@ -93,6 +128,9 @@ endif()
 target_link_libraries(meridian_relay PRIVATE
     ${MSQUIC_TARGET}
     ${MSQUIC_PLATFORM_TARGET}
+    cbor
+    hashmap
+    blake3
     OpenSSL::SSL
     OpenSSL::Crypto
     Threads::Threads
