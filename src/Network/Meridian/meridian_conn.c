@@ -15,13 +15,15 @@
 // ============================================================================
 
 meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_relay_t* relay,
-                                       meridian_nat_type_t local_nat_type) {
+                                       meridian_nat_type_t local_nat_type,
+                                       const struct QUIC_API_TABLE* msquic) {
     if (peer == NULL) return NULL;
 
     meridian_conn_t* conn = (meridian_conn_t*)get_clear_memory(sizeof(meridian_conn_t));
     if (conn == NULL) return NULL;
 
     conn->peer = peer;
+    conn->msquic = msquic;
     conn->direct_connection = NULL;
     conn->relay = relay;
     conn->relay_endpoint_id = MERIDIAN_RELAY_ENDPOINT_ID_NONE;
@@ -147,14 +149,15 @@ int meridian_conn_send(meridian_conn_t* conn, const uint8_t* data, uint32_t len)
     int result = -1;
 
     // Prefer direct path if active
-    if (conn->direct_path.active && conn->direct_connection != NULL) {
-        // Would send via msquic DatagramSend on direct connection
-        // For now, indicate success
-        result = (int)len;
+    if (conn->direct_path.active && conn->direct_connection != NULL && conn->msquic != NULL) {
+        result = meridian_stream_send_uni(conn->msquic, conn->direct_connection,
+                                           data, (size_t)len, NULL);
+        if (result == 0) result = (int)len;
     } else if (conn->relay_path.active && conn->relay != NULL) {
         // Fall back to relay
         result = meridian_relay_send_datagram(conn->relay, data, (size_t)len,
                                                conn->relay_endpoint_id);
+        if (result == 0) result = (int)len;
     }
 
     platform_unlock(&conn->lock);

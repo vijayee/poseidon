@@ -12,6 +12,7 @@
 #include "../../RefCounter/refcounter.h"
 #include "../../Util/threadding.h"
 #include "msquic.h"
+#include "meridian_stream.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -73,6 +74,7 @@ typedef struct meridian_conn_path_t {
 typedef struct meridian_conn_t {
     refcounter_t refcounter;            /**< Reference counting for lifetime */
     meridian_node_t* peer;               /**< Peer we're connecting to */
+    const struct QUIC_API_TABLE* msquic;  /**< QUIC API table for stream operations */
     HQUIC direct_connection;             /**< Direct QUIC connection (NULL if relay-only) */
     struct meridian_relay_t* relay;      /**< Relay client (NULL if direct-only) */
     uint32_t relay_endpoint_id;          /**< Peer's relay endpoint ID (0 if unknown) */
@@ -99,7 +101,8 @@ typedef struct meridian_conn_t {
  * @return               New connection with refcount=1, or NULL on failure
  */
 meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_relay_t* relay,
-                                       meridian_nat_type_t local_nat_type);
+                                       meridian_nat_type_t local_nat_type,
+                                       const struct QUIC_API_TABLE* msquic);
 
 /**
  * Destroys a connection.
