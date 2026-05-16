@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "meridian_rendv.h"
+#include "meridian_stream.h"
 #include "msquic.h"
 
 #ifdef __cplusplus
@@ -82,6 +83,9 @@ typedef struct meridian_relay_t {
     void* on_datagram_ctx;                          /**< User context for datagram callback */
     meridian_relay_addr_cb_t on_addr_response;      /**< Address response callback */
     void* on_addr_response_ctx;                     /**< User context for address callback */
+    meridian_stream_entry_t** active_streams;        /**< Tracking array for open streams */
+    size_t num_active_streams;                       /**< Number of active streams */
+    size_t active_streams_cap;                       /**< Capacity of active_streams array */
     PLATFORMLOCKTYPE(lock);                         /**< Thread-safe access */
 } meridian_relay_t;
 
