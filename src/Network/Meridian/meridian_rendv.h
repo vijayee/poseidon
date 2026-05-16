@@ -85,7 +85,6 @@ typedef struct meridian_rendv_config_t {
     const char* alpn;                        /**< ALPN protocol identifier */
     QUIC_CREDENTIAL_CONFIG* cred_config;   /**< TLS credential configuration */
     uint32_t idle_timeout_ms;               /**< Connection idle timeout */
-    bool datagram_recv_enabled;              /**< Enable receiving datagrams */
 } meridian_rendv_config_t;
 
 // ============================================================================

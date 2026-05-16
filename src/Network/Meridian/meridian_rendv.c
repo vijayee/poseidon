@@ -5,6 +5,7 @@
 #include "../../Util/threadding.h"
 #include "meridian_rendv.h"
 #include "meridian_relay.h"
+#include "meridian_stream.h"
 #include "../../Util/allocator.h"
 #include <stdlib.h>
 #include <string.h>
@@ -147,8 +148,6 @@ int meridian_rendv_handle_set_msquic(meridian_rendv_handle_t* handle,
         QUIC_SETTINGS Settings = {0};
         Settings.IdleTimeoutMs = config->idle_timeout_ms ? config->idle_timeout_ms : 30000;
         Settings.IsSet.IdleTimeoutMs = TRUE;
-        Settings.DatagramReceiveEnabled = config->datagram_recv_enabled;
-        Settings.IsSet.DatagramReceiveEnabled = TRUE;
 
         QUIC_STATUS Status = handle->msquic->ConfigurationOpen(
             handle->registration,
@@ -341,6 +340,49 @@ meridian_rendv_t* meridian_rendv_handle_find_peer(meridian_rendv_handle_t* handl
 }
 
 // ============================================================================
+// TUNNEL CONNECTION CALLBACK
+// ============================================================================
+
+/**
+ * Connection callback for rendezvous tunnel connections.
+ * Handles stream events from remote peers, routing incoming streams
+ * to the appropriate stream callback (bidi or uni).
+ */
+static QUIC_STATUS QUIC_API rendv_tunnel_connection_callback(
+    HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event) {
+    meridian_rendv_handle_t* handle = (meridian_rendv_handle_t*)Context;
+
+    switch (Event->Type) {
+    case QUIC_CONNECTION_EVENT_CONNECTED:
+        log_info("meridian rendv: tunnel connected");
+        break;
+
+    case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
+        HQUIC Stream = Event->PEER_STREAM_STARTED.Stream;
+        bool is_bidi = !(Event->PEER_STREAM_STARTED.Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL);
+
+        meridian_stream_entry_t* entry = meridian_stream_entry_create(Stream, is_bidi, handle);
+        if (entry == NULL) return QUIC_STATUS_SUCCESS;
+
+        QUIC_STREAM_CALLBACK_HANDLER callback = is_bidi
+            ? meridian_bidi_stream_callback
+            : meridian_uni_stream_callback;
+        handle->msquic->SetCallbackHandler(Stream, (void*)callback, entry);
+        return QUIC_STATUS_SUCCESS;
+    }
+
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
+        log_info("meridian rendv: tunnel connection closed");
+        break;
+
+    default:
+        break;
+    }
+
+    return QUIC_STATUS_SUCCESS;
+}
+
+// ============================================================================
 // TUNNEL MANAGEMENT
 // ============================================================================
 
@@ -365,7 +407,7 @@ int meridian_rendv_handle_create_tunnel(meridian_rendv_handle_t* handle,
     HQUIC Connection;
     QUIC_STATUS Status = handle->msquic->ConnectionOpen(
         handle->registration,
-        NULL,  // No callback for tunnel connections
+        (void*)rendv_tunnel_connection_callback,
         handle,
         &Connection);
 
