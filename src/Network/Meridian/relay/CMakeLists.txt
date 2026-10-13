@@ -75,7 +75,20 @@ set(MERIDIAN_RELAY_SOURCES
     ${POSEIDON_SRC_DIR}/RefCounter/refcounter.c
     ${POSEIDON_SRC_DIR}/Util/allocator.c
     ${POSEIDON_SRC_DIR}/Util/log.c
-    ${POSEIDON_SRC_DIR}/Util/threadding.c
+    ${POSEIDON_SRC_DIR}/Util/mkdir_p.c
+    ${POSEIDON_SRC_DIR}/Util/path_join.c
+    ${POSEIDON_SRC_DIR}/Util/rm_rf.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_atomic.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_dirs.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_file.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_local.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_posix_compat.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_process.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_random.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_socket.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_socket_watcher.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_thread.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_time.c
     ${POSEIDON_SRC_DIR}/Util/vec.c
     ${POSEIDON_SRC_DIR}/Util/hash.c
     ${POSEIDON_SRC_DIR}/Util/base58.c
@@ -128,6 +141,7 @@ add_executable(meridian_relay ${MERIDIAN_RELAY_SOURCES})
 
 target_include_directories(meridian_relay PRIVATE
     ${POSEIDON_SRC_DIR}
+    ${POSEIDON_SRC_DIR}/../deps/poll-dancer/include
     ${POSEIDON_SRC_DIR}/deps/hashmap/include
     ${POSEIDON_SRC_DIR}/deps/libcbor/src
     ${POSEIDON_SRC_DIR}/deps/blake3/c

@@ -2,7 +2,7 @@
 // Created by victor on 4/19/26.
 //
 
-#include "../../Util/threadding.h"
+#include "../../Platform/platform_thread.h"
 #include "meridian_ring.h"
 #include "../../Util/allocator.h"
 #include "../../Crypto/node_id.h"
@@ -41,7 +41,7 @@ meridian_ring_set_t* meridian_ring_set_create(uint32_t primary_size,
         set->rings[i].latency_max_us = 0;
     }
 
-    platform_lock_init(&set->lock);
+    set->lock = platform_mutex_create();;
     refcounter_init(&set->refcounter);
     return set;
 }
@@ -60,7 +60,7 @@ void meridian_ring_set_destroy(meridian_ring_set_t* set) {
             vec_deinit(&set->rings[i].primary);
             vec_deinit(&set->rings[i].secondary);
         }
-        platform_lock_destroy(&set->lock);
+        platform_mutex_destroy(set->lock);;
         free(set);
     }
 }

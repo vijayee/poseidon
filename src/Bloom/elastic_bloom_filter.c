@@ -87,7 +87,7 @@ elastic_bloom_filter_t* elastic_bloom_filter_create(size_t size, uint32_t hash_c
     ebf->omega = omega;
     ebf->fp_bits = fp_bits;
     ebf->count = 0;
-    platform_lock_init(&ebf->lock);
+    ebf->lock = platform_mutex_create();;
     refcounter_init((refcounter_t*)ebf);
     return ebf;
 }
@@ -101,14 +101,14 @@ void elastic_bloom_filter_destroy(elastic_bloom_filter_t* ebf) {
             bucket_destroy(ebf->buckets[i]);
         }
         free(ebf->buckets);
-        platform_lock_destroy(&ebf->lock);
+        platform_mutex_destroy(ebf->lock);;
         free(ebf);
     }
 }
 
 int elastic_bloom_filter_add(elastic_bloom_filter_t* ebf, const uint8_t* data, size_t len) {
     if (ebf == NULL || data == NULL) return -1;
-    platform_lock(&ebf->lock);
+    platform_mutex_lock(ebf->lock);
     for (uint32_t i = 0; i < ebf->hash_count; i++) {
         uint32_t fp;
         size_t index;
@@ -121,7 +121,7 @@ int elastic_bloom_filter_add(elastic_bloom_filter_t* ebf, const uint8_t* data, s
     }
     ebf->count++;
     float ratio = elastic_bloom_filter_ratio(ebf);
-    platform_unlock(&ebf->lock);
+    platform_mutex_unlock(ebf->lock);
     if (ratio > ebf->omega) {
         elastic_bloom_filter_expand(ebf);
     }
@@ -130,23 +130,23 @@ int elastic_bloom_filter_add(elastic_bloom_filter_t* ebf, const uint8_t* data, s
 
 bool elastic_bloom_filter_contains(elastic_bloom_filter_t* ebf, const uint8_t* data, size_t len) {
     if (ebf == NULL || data == NULL) return false;
-    platform_lock(&ebf->lock);
+    platform_mutex_lock(ebf->lock);
     for (uint32_t i = 0; i < ebf->hash_count; i++) {
         uint32_t fp;
         size_t index;
         compute_hash_pair(ebf, data, len, i, &fp, &index);
         if (!bitset_get(ebf->bits, index)) {
-            platform_unlock(&ebf->lock);
+            platform_mutex_unlock(ebf->lock);
             return false;
         }
     }
-    platform_unlock(&ebf->lock);
+    platform_mutex_unlock(ebf->lock);
     return true;
 }
 
 int elastic_bloom_filter_remove(elastic_bloom_filter_t* ebf, const uint8_t* data, size_t len) {
     if (ebf == NULL || data == NULL) return -1;
-    platform_lock(&ebf->lock);
+    platform_mutex_lock(ebf->lock);
     for (uint32_t i = 0; i < ebf->hash_count; i++) {
         uint32_t fp;
         size_t index;
@@ -158,7 +158,7 @@ int elastic_bloom_filter_remove(elastic_bloom_filter_t* ebf, const uint8_t* data
     }
     if (ebf->count > 0) ebf->count--;
     float ratio = elastic_bloom_filter_ratio(ebf);
-    platform_unlock(&ebf->lock);
+    platform_mutex_unlock(ebf->lock);
     if (ratio < ebf->omega / 4.0f) {
         elastic_bloom_filter_compress(ebf);
     }
@@ -167,7 +167,7 @@ int elastic_bloom_filter_remove(elastic_bloom_filter_t* ebf, const uint8_t* data
 
 int elastic_bloom_filter_expand(elastic_bloom_filter_t* ebf) {
     if (ebf == NULL) return -1;
-    platform_lock(&ebf->lock);
+    platform_mutex_lock(ebf->lock);
     size_t old_bucket_count = ebf->bucket_count;
     size_t new_bucket_count = old_bucket_count * 2;
     size_t new_size = ebf->size * 2;
@@ -197,13 +197,13 @@ int elastic_bloom_filter_expand(elastic_bloom_filter_t* ebf) {
     ebf->bucket_count = new_bucket_count;
     ebf->size = new_size;
     rebuild_bitset(ebf);
-    platform_unlock(&ebf->lock);
+    platform_mutex_unlock(ebf->lock);
     return 0;
 }
 
 int elastic_bloom_filter_compress(elastic_bloom_filter_t* ebf) {
     if (ebf == NULL || ebf->bucket_count < 2) return -1;
-    platform_lock(&ebf->lock);
+    platform_mutex_lock(ebf->lock);
     size_t old_bucket_count = ebf->bucket_count;
     size_t new_bucket_count = old_bucket_count / 2;
     size_t new_size = ebf->size / 2;
@@ -236,14 +236,14 @@ int elastic_bloom_filter_compress(elastic_bloom_filter_t* ebf) {
     ebf_bucket_entry_t** new_arr = realloc(ebf->buckets, sizeof(ebf_bucket_entry_t*) * new_bucket_count);
     if (new_arr) ebf->buckets = new_arr;
     rebuild_bitset(ebf);
-    platform_unlock(&ebf->lock);
+    platform_mutex_unlock(ebf->lock);
     return 0;
 }
 
 int elastic_bloom_filter_merge(elastic_bloom_filter_t* dest, const elastic_bloom_filter_t* src) {
     if (dest == NULL || src == NULL) return -1;
     if (dest->size != src->size || dest->bucket_count != src->bucket_count) return -2;
-    platform_lock(&dest->lock);
+    platform_mutex_lock(dest->lock);
     bitset_t* merged_bits = bitset_or(dest->bits, src->bits);
     bitset_destroy(dest->bits);
     dest->bits = merged_bits;
@@ -257,7 +257,7 @@ int elastic_bloom_filter_merge(elastic_bloom_filter_t* dest, const elastic_bloom
         }
     }
     dest->count += src->count;
-    platform_unlock(&dest->lock);
+    platform_mutex_unlock(dest->lock);
     return 0;
 }
 
@@ -280,7 +280,7 @@ float elastic_bloom_filter_ratio(elastic_bloom_filter_t* ebf) {
 
 int elastic_bloom_filter_iterate(elastic_bloom_filter_t* ebf, ebf_entry_cb_t callback, void* ctx) {
     if (ebf == NULL || callback == NULL) return -1;
-    platform_lock(&ebf->lock);
+    platform_mutex_lock(ebf->lock);
     for (size_t i = 0; i < ebf->bucket_count; i++) {
         ebf_bucket_entry_t* curr = ebf->buckets[i];
         while (curr != NULL) {
@@ -288,46 +288,46 @@ int elastic_bloom_filter_iterate(elastic_bloom_filter_t* ebf, ebf_entry_cb_t cal
             curr = curr->next;
         }
     }
-    platform_unlock(&ebf->lock);
+    platform_mutex_unlock(ebf->lock);
     return 0;
 }
 
 int elastic_bloom_filter_bucket_insert(elastic_bloom_filter_t* ebf, size_t bucket_idx, uint32_t fingerprint) {
     if (ebf == NULL || bucket_idx >= ebf->bucket_count) return -1;
-    platform_lock(&ebf->lock);
+    platform_mutex_lock(ebf->lock);
     bitset_set(ebf->bits, bucket_idx, true);
     if (!bucket_contains(ebf->buckets[bucket_idx], fingerprint)) {
         bucket_insert(&ebf->buckets[bucket_idx], fingerprint);
     }
-    platform_unlock(&ebf->lock);
+    platform_mutex_unlock(ebf->lock);
     return 0;
 }
 
 int elastic_bloom_filter_get_bitset(elastic_bloom_filter_t* ebf, const uint8_t** out_data, size_t* out_size) {
     if (ebf == NULL || out_data == NULL || out_size == NULL) return -1;
-    platform_lock(&ebf->lock);
+    platform_mutex_lock(ebf->lock);
     *out_data = ebf->bits->data;
     *out_size = ebf->bits->size;
-    platform_unlock(&ebf->lock);
+    platform_mutex_unlock(ebf->lock);
     return 0;
 }
 
 int elastic_bloom_filter_set_bitset(elastic_bloom_filter_t* ebf, const uint8_t* data, size_t size) {
     if (ebf == NULL || data == NULL) return -1;
-    platform_lock(&ebf->lock);
+    platform_mutex_lock(ebf->lock);
     if (size != ebf->bits->size) {
-        platform_unlock(&ebf->lock);
+        platform_mutex_unlock(ebf->lock);
         return -1;
     }
     memcpy(ebf->bits->data, data, size);
-    platform_unlock(&ebf->lock);
+    platform_mutex_unlock(ebf->lock);
     return 0;
 }
 
 cbor_item_t* elastic_bloom_filter_encode(const elastic_bloom_filter_t* ebf) {
     if (ebf == NULL) return NULL;
 
-    platform_lock(&((elastic_bloom_filter_t*)ebf)->lock);
+    platform_mutex_lock(((elastic_bloom_filter_t*)ebf)->lock);
 
     /* Count occupied buckets for sparse encoding */
     size_t num_occupied = 0;
@@ -382,11 +382,11 @@ cbor_item_t* elastic_bloom_filter_encode(const elastic_bloom_filter_t* ebf) {
         goto fail;
     }
 
-    platform_unlock(&((elastic_bloom_filter_t*)ebf)->lock);
+    platform_mutex_unlock(((elastic_bloom_filter_t*)ebf)->lock);
     return arr;
 
 fail:
-    platform_unlock(&((elastic_bloom_filter_t*)ebf)->lock);
+    platform_mutex_unlock(((elastic_bloom_filter_t*)ebf)->lock);
     if (arr != NULL) cbor_decref(&arr);
     return NULL;
 }

@@ -5,7 +5,7 @@
 #include "channel_manager.h"
 #include "channel_notice.h"
 #include "../Util/allocator.h"
-#include "../Util/threadding.h"
+#include "../Platform/platform_thread.h"
 #include "../Crypto/key_pair.h"
 #include "../Network/Meridian/meridian_packet.h"
 #include "../Network/Meridian/meridian_protocol.h"
@@ -117,7 +117,7 @@ poseidon_channel_manager_t* poseidon_channel_manager_create(
     mgr->dial_channel->intercept_ctx = mgr;
     poseidon_channel_enable_quasar_message(mgr->dial_channel);
 
-    platform_lock_init(&mgr->lock);
+    mgr->lock = platform_mutex_create();;
     refcounter_init((refcounter_t*)mgr);
     return mgr;
 }
@@ -134,7 +134,7 @@ void poseidon_channel_manager_destroy(poseidon_channel_manager_t* mgr) {
                 poseidon_channel_destroy(mgr->channels[i]);
             }
         }
-        platform_lock_destroy(&mgr->lock);
+        platform_mutex_destroy(mgr->lock);;
         free(mgr);
     }
 }
@@ -156,22 +156,22 @@ poseidon_channel_t* poseidon_channel_manager_create_channel(
     const poseidon_channel_config_t* config) {
     if (mgr == NULL || config == NULL) return NULL;
 
-    platform_lock(&mgr->lock);
+    platform_mutex_lock(mgr->lock);
 
     if (mgr->num_channels >= POSEIDON_CHANNEL_MANAGER_MAX_CHANNELS) {
-        platform_unlock(&mgr->lock);
+        platform_mutex_unlock(mgr->lock);
         return NULL;
     }
 
     uint16_t port = allocate_port(mgr);
     if (port == 0) {
-        platform_unlock(&mgr->lock);
+        platform_mutex_unlock(mgr->lock);
         return NULL;
     }
 
     poseidon_key_pair_t* kp = poseidon_key_pair_create(key_type);
     if (kp == NULL) {
-        platform_unlock(&mgr->lock);
+        platform_mutex_unlock(mgr->lock);
         return NULL;
     }
 
@@ -180,12 +180,12 @@ poseidon_channel_t* poseidon_channel_manager_create_channel(
     poseidon_key_pair_destroy(kp);
 
     if (channel == NULL) {
-        platform_unlock(&mgr->lock);
+        platform_mutex_unlock(mgr->lock);
         return NULL;
     }
 
     mgr->channels[mgr->num_channels++] = channel;
-    platform_unlock(&mgr->lock);
+    platform_mutex_unlock(mgr->lock);
     return channel;
 }
 
@@ -194,21 +194,21 @@ poseidon_channel_t* poseidon_channel_manager_join_channel(
     const char* topic_str) {
     if (mgr == NULL || topic_str == NULL) return NULL;
 
-    platform_lock(&mgr->lock);
+    platform_mutex_lock(mgr->lock);
 
     if (mgr->num_channels >= POSEIDON_CHANNEL_MANAGER_MAX_CHANNELS) {
-        platform_unlock(&mgr->lock);
+        platform_mutex_unlock(mgr->lock);
         return NULL;
     }
 
     if (mgr->num_pending_bootstraps >= POSEIDON_MAX_PENDING_BOOTSTRAPS) {
-        platform_unlock(&mgr->lock);
+        platform_mutex_unlock(mgr->lock);
         return NULL;
     }
 
     uint16_t port = allocate_port(mgr);
     if (port == 0) {
-        platform_unlock(&mgr->lock);
+        platform_mutex_unlock(mgr->lock);
         return NULL;
     }
 
@@ -216,7 +216,7 @@ poseidon_channel_t* poseidon_channel_manager_join_channel(
     poseidon_channel_t* channel = poseidon_channel_create(NULL, topic_str, port,
                                                           &config, mgr->pool, mgr->wheel);
     if (channel == NULL) {
-        platform_unlock(&mgr->lock);
+        platform_mutex_unlock(mgr->lock);
         return NULL;
     }
 
@@ -236,7 +236,7 @@ poseidon_channel_t* poseidon_channel_manager_join_channel(
     mgr->num_pending_bootstraps++;
 
     mgr->channels[mgr->num_channels++] = channel;
-    platform_unlock(&mgr->lock);
+    platform_mutex_unlock(mgr->lock);
 
     // I/O operations outside lock to avoid deadlock with Quasar message callbacks
     poseidon_channel_subscribe(mgr->dial_channel,
@@ -264,7 +264,7 @@ int poseidon_channel_manager_destroy_channel(poseidon_channel_manager_t* mgr,
                                                const poseidon_node_id_t* node_id) {
     if (mgr == NULL || node_id == NULL) return -1;
 
-    platform_lock(&mgr->lock);
+    platform_mutex_lock(mgr->lock);
     for (size_t i = 0; i < mgr->num_channels; i++) {
         if (poseidon_node_id_compare(poseidon_channel_get_node_id(mgr->channels[i]),
                                       node_id) == 0) {
@@ -272,11 +272,11 @@ int poseidon_channel_manager_destroy_channel(poseidon_channel_manager_t* mgr,
             mgr->channels[i] = mgr->channels[mgr->num_channels - 1];
             mgr->channels[mgr->num_channels - 1] = NULL;
             mgr->num_channels--;
-            platform_unlock(&mgr->lock);
+            platform_mutex_unlock(mgr->lock);
             return 0;
         }
     }
-    platform_unlock(&mgr->lock);
+    platform_mutex_unlock(mgr->lock);
     return -1;
 }
 
@@ -314,7 +314,7 @@ int poseidon_channel_manager_handle_bootstrap_reply(
     meridian_protocol_t* protocol = NULL;
     bool first_reply = false;
 
-    platform_lock(&mgr->lock);
+    platform_mutex_lock(mgr->lock);
 
     pending_bootstrap_t* pending = NULL;
     size_t pending_index = 0;
@@ -328,7 +328,7 @@ int poseidon_channel_manager_handle_bootstrap_reply(
     }
 
     if (pending == NULL) {
-        platform_unlock(&mgr->lock);
+        platform_mutex_unlock(mgr->lock);
         return -1;
     }
 
@@ -353,7 +353,7 @@ int poseidon_channel_manager_handle_bootstrap_reply(
         mgr->num_pending_bootstraps--;
     }
 
-    platform_unlock(&mgr->lock);
+    platform_mutex_unlock(mgr->lock);
 
     // I/O operations outside lock
     if (first_reply && protocol != NULL) {
@@ -430,7 +430,7 @@ int poseidon_channel_manager_handle_bootstrap_request(
         return 0;
     }
 
-    platform_lock(&mgr->lock);
+    platform_mutex_lock(mgr->lock);
 
     // Check if we're a member of the requested channel
     bool is_member = false;
@@ -445,7 +445,7 @@ int poseidon_channel_manager_handle_bootstrap_request(
     }
 
     if (!is_member) {
-        platform_unlock(&mgr->lock);
+        platform_mutex_unlock(mgr->lock);
         return -1;
     }
 
@@ -456,7 +456,7 @@ int poseidon_channel_manager_handle_bootstrap_request(
     meridian_protocol_get_local_node(mgr->dial_channel->protocol, &responder_addr, &responder_port);
     poseidon_channel_t* dial_channel = mgr->dial_channel;
 
-    platform_unlock(&mgr->lock);
+    platform_mutex_unlock(mgr->lock);
 
     // Build and publish a BOOTSTRAP_REPLY outside lock
     struct timespec ts;
@@ -504,7 +504,7 @@ void poseidon_channel_manager_handle_delete_notice(
     }
 
     // If we have the channel locally, delete it
-    platform_lock(&mgr->lock);
+    platform_mutex_lock(mgr->lock);
     poseidon_channel_t* channel = NULL;
     for (size_t i = 0; i < mgr->num_channels; i++) {
         if (mgr->channels[i] != NULL) {
@@ -515,7 +515,7 @@ void poseidon_channel_manager_handle_delete_notice(
             }
         }
     }
-    platform_unlock(&mgr->lock);
+    platform_mutex_unlock(mgr->lock);
 
     if (channel != NULL) {
         const poseidon_node_id_t* nid = poseidon_channel_get_node_id(channel);
@@ -554,7 +554,7 @@ void poseidon_channel_manager_handle_modify_notice(
     }
 
     // If we have the channel locally, rejoin with new config
-    platform_lock(&mgr->lock);
+    platform_mutex_lock(mgr->lock);
     poseidon_channel_t* channel = NULL;
     for (size_t i = 0; i < mgr->num_channels; i++) {
         if (mgr->channels[i] != NULL) {
@@ -565,7 +565,7 @@ void poseidon_channel_manager_handle_modify_notice(
             }
         }
     }
-    platform_unlock(&mgr->lock);
+    platform_mutex_unlock(mgr->lock);
 
     if (channel != NULL) {
         poseidon_channel_rejoin_with_config(channel, &notice->config, mgr);
@@ -630,7 +630,7 @@ int poseidon_channel_manager_add_tombstone(poseidon_channel_manager_t* mgr,
                                             const poseidon_tombstone_t* tombstone) {
     if (mgr == NULL || tombstone == NULL) return -1;
 
-    platform_lock(&mgr->lock);
+    platform_mutex_lock(mgr->lock);
 
     // Check for duplicate topic_id
     for (size_t i = 0; i < mgr->num_tombstones; i++) {
@@ -639,18 +639,18 @@ int poseidon_channel_manager_add_tombstone(poseidon_channel_manager_t* mgr,
             if (tombstone->timestamp_us > mgr->tombstones[i].timestamp_us) {
                 mgr->tombstones[i] = *tombstone;
             }
-            platform_unlock(&mgr->lock);
+            platform_mutex_unlock(mgr->lock);
             return 0;
         }
     }
 
     if (mgr->num_tombstones >= POSEIDON_TOMBSTONE_MAX) {
-        platform_unlock(&mgr->lock);
+        platform_mutex_unlock(mgr->lock);
         return -1;
     }
 
     mgr->tombstones[mgr->num_tombstones++] = *tombstone;
-    platform_unlock(&mgr->lock);
+    platform_mutex_unlock(mgr->lock);
     return 0;
 }
 
@@ -673,7 +673,7 @@ void poseidon_channel_manager_expire_tombstones(poseidon_channel_manager_t* mgr)
     clock_gettime(CLOCK_MONOTONIC, &now);
     uint64_t now_us = (uint64_t)now.tv_sec * 1000000 + (uint64_t)now.tv_nsec / 1000;
 
-    platform_lock(&mgr->lock);
+    platform_mutex_lock(mgr->lock);
     size_t write = 0;
     for (size_t i = 0; i < mgr->num_tombstones; i++) {
         if (mgr->tombstones[i].expires_at_us > now_us) {
@@ -684,7 +684,7 @@ void poseidon_channel_manager_expire_tombstones(poseidon_channel_manager_t* mgr)
         }
     }
     mgr->num_tombstones = write;
-    platform_unlock(&mgr->lock);
+    platform_mutex_unlock(mgr->lock);
 }
 
 int poseidon_tombstone_from_delete_notice(const meridian_channel_delete_notice_t* notice,
@@ -750,28 +750,28 @@ int poseidon_tombstone_from_modify_notice(const meridian_channel_modify_notice_t
 
 int poseidon_channel_manager_register_session(poseidon_channel_manager_t* mgr, void* session) {
     if (mgr == NULL || session == NULL) return -1;
-    platform_lock(&mgr->lock);
+    platform_mutex_lock(mgr->lock);
     if (mgr->num_sessions >= POSEIDON_SESSION_REGISTRY_MAX) {
-        platform_unlock(&mgr->lock);
+        platform_mutex_unlock(mgr->lock);
         return -1;
     }
     mgr->sessions[mgr->num_sessions++] = session;
-    platform_unlock(&mgr->lock);
+    platform_mutex_unlock(mgr->lock);
     return 0;
 }
 
 int poseidon_channel_manager_unregister_session(poseidon_channel_manager_t* mgr, void* session) {
     if (mgr == NULL || session == NULL) return -1;
-    platform_lock(&mgr->lock);
+    platform_mutex_lock(mgr->lock);
     for (size_t i = 0; i < mgr->num_sessions; i++) {
         if (mgr->sessions[i] == session) {
             mgr->sessions[i] = mgr->sessions[mgr->num_sessions - 1];
             mgr->sessions[mgr->num_sessions - 1] = NULL;
             mgr->num_sessions--;
-            platform_unlock(&mgr->lock);
+            platform_mutex_unlock(mgr->lock);
             return 0;
         }
     }
-    platform_unlock(&mgr->lock);
+    platform_mutex_unlock(mgr->lock);
     return -1;
 }

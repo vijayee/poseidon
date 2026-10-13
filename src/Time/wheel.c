@@ -142,10 +142,10 @@ timer_st* timer_list_remove(timer_list_t* list, timer_list_node_t* node) {
   return timer;
 }
 
-timing_wheel_t* timing_wheel_create(uint64_t interval, size_t slot_count, work_pool_t* pool, timer_map_t* timers, PLATFORMLOCKTYPEPTR(hierarchical_lock), PLATFORMCONDITIONTYPEPTR(idle)) {
+timing_wheel_t* timing_wheel_create(uint64_t interval, size_t slot_count, work_pool_t* pool, timer_map_t* timers, platform_mutex_t* hierarchical_lock, platform_condvar_t* idle) {
   timing_wheel_t* wheel = get_clear_memory(sizeof(timing_wheel_t));
   refcounter_init((refcounter_t*) wheel);
-  platform_lock_init(&wheel->lock);
+  wheel->lock = platform_mutex_create();
   wheel->pool = (work_pool_t*) refcounter_reference((refcounter_t*) pool);
   wheel->interval = interval;
   wheel->position = slot_count - 1;
@@ -171,7 +171,7 @@ void timing_wheel_destroy(timing_wheel_t* wheel) {
     work_pool_destroy(wheel->pool);
     vec_deinit(wheel->slots);
     free(wheel->slots);
-    platform_lock_destroy(&wheel->lock);
+    platform_mutex_destroy(wheel->lock);
     free(wheel);
   }
 }
@@ -204,10 +204,10 @@ void timing_wheel_on_tick(void* ctx) {
     return;
   }
   timer_list_t* expired = NULL;
-  platform_lock(&wheel->lock);
+  platform_mutex_lock(wheel->lock);
   wheel->position = (wheel->position + 1) % wheel->slots->length;
   expired = timing_wheel_maintenance(wheel);
-  platform_unlock(&wheel->lock);
+  platform_mutex_unlock(wheel->lock);
   timing_wheel_run(wheel);
   if(expired != NULL) {
     timing_wheel_fire_expired(wheel, expired);
@@ -248,12 +248,12 @@ void timing_wheel_fire_expired(timing_wheel_t* wheel, timer_list_t* expired) {
     current = timer_list_dequeue(expired);
 
   }
-  platform_lock(wheel->hierarchical_lock);
+  platform_mutex_lock(wheel->hierarchical_lock);
   if (hashmap_size(wheel->timers) == 0) {
-    platform_unlock(wheel->hierarchical_lock);
-    platform_signal_condition(wheel->idle);
+    platform_mutex_unlock(wheel->hierarchical_lock);
+    platform_condvar_signal(wheel->idle);
   } else {
-    platform_unlock(wheel->hierarchical_lock);
+    platform_mutex_unlock(wheel->hierarchical_lock);
   }
   timer_list_destroy(expired);
 }
@@ -284,9 +284,9 @@ timer_list_t* timing_wheel_maintenance(timing_wheel_t* wheel) {
     timer_ref(timer);  // Local reference for expired list transfer
     timer_list_enqueue(expired, timer);
     next = current->next;
-    platform_lock(wheel->hierarchical_lock);
+    platform_mutex_lock(wheel->hierarchical_lock);
     timer_st* removed_from_map = hashmap_remove(wheel->timers, &timer->timerId);
-    platform_unlock(wheel->hierarchical_lock);
+    platform_mutex_unlock(wheel->hierarchical_lock);
     if (removed_from_map != NULL) {
       timer_unref(timer);  // Release hashmap reference
     }
@@ -307,7 +307,7 @@ void timing_wheel_worker_execute(void* ctx) {
 
 void timing_wheel_worker_abort(void* ctx) {
   timing_wheel_t* wheel = (timing_wheel_t*) ctx;
-  platform_lock(&wheel->lock);
+  platform_mutex_lock(wheel->lock);
   wheel->stopped = 1;
   for(size_t i = 0; i < wheel->slots->length; i++) {
     timer_list_t* list = wheel->slots->data[i];
@@ -321,24 +321,24 @@ void timing_wheel_worker_abort(void* ctx) {
       current = timer_list_dequeue(list);
     }
   }
-  platform_unlock(&wheel->lock);
+  platform_mutex_unlock(wheel->lock);
 }
 
 void timing_wheel_set_timer(timing_wheel_t* wheel, timer_st* timer) {
-  platform_lock(&wheel->lock);
+  platform_mutex_lock(wheel->lock);
   size_t steps = timer->plan.steps[timer->plan.current].delay;
   size_t position = (wheel->position + steps) % wheel->slots->length;
   timer->circle = (steps - 1) / wheel->slots->length;
   timer_list_t* list = wheel->slots->data[position];
   timer_list_enqueue(list, timer);
   timer_ref(timer);  // Slot list takes a reference
-  platform_unlock(&wheel->lock);
+  platform_mutex_unlock(wheel->lock);
 }
 
 void timing_wheel_stop(timing_wheel_t* wheel) {
-  platform_lock(&wheel->lock);
+  platform_mutex_lock(wheel->lock);
   wheel->stopped = 1;
-  platform_unlock(&wheel->lock);
+  platform_mutex_unlock(wheel->lock);
 }
 
 uint64_t hierarchical_timing_wheel_set_timer(hierarchical_timing_wheel_t* wheel, void* ctx, void (* cb)(void*), void (* abort)(void*), timer_duration_t delay) {
@@ -348,11 +348,11 @@ uint64_t hierarchical_timing_wheel_set_timer(hierarchical_timing_wheel_t* wheel,
   timer->cb = cb;
   timer->abort = abort;
   timer->ctx = ctx;
-  platform_lock(&wheel->lock);
+  platform_mutex_lock(wheel->lock);
   timer->timerId = wheel->next_id++;
   hashmap_put(&wheel->timers, &timer->timerId, timer);
   timer_ref(timer);  // Hashmap reference (count: 1→2)
-  platform_unlock(&wheel->lock);
+  platform_mutex_unlock(wheel->lock);
   if (delay.days > 0) {
     timer->plan.size = 5;
     timer->plan.steps = get_clear_memory(sizeof(timer_wheel_plan_step_t) * timer->plan.size);
@@ -414,24 +414,24 @@ uint64_t hierarchical_timing_wheel_set_timer(hierarchical_timing_wheel_t* wheel,
 }
 
 void hierarchical_timing_wheel_cancel_timer(hierarchical_timing_wheel_t* wheel, uint64_t timerId) {
-  platform_lock(&wheel->lock);
+  platform_mutex_lock(wheel->lock);
   timer_st* timer = hashmap_get(&wheel->timers, &timerId);
   if (timer != NULL) {
     timer->removed = 1;
     hashmap_remove(&wheel->timers, &timerId);
     timer_unref(timer);  // Release hashmap reference
     if (hashmap_size(&wheel->timers) == 0) {
-      platform_signal_condition(&wheel->idle);
+      platform_condvar_signal(wheel->idle);
     }
   }
-  platform_unlock(&wheel->lock);
+  platform_mutex_unlock(wheel->lock);
 }
 
 hierarchical_timing_wheel_t* hierarchical_timing_wheel_create(size_t slot_count, work_pool_t* pool) {
   hierarchical_timing_wheel_t* wheel = get_clear_memory(sizeof(hierarchical_timing_wheel_t));
   refcounter_init((refcounter_t*) wheel);
-  platform_lock_init(&wheel->lock);
-  platform_condition_init(&wheel->idle);
+  wheel->lock = platform_mutex_create();
+  wheel->idle = platform_condvar_create();
   wheel->next_id = 1;
   hashmap_init(&wheel->timers, (void*)hash_uint64, (void*)compare_uint64);
   hashmap_set_key_alloc_funcs(&wheel->timers, duplicate_uint64, (void*)free);
@@ -464,8 +464,8 @@ void hierarchical_timing_wheel_destroy(hierarchical_timing_wheel_t* wheel) {
     timing_wheel_destroy(wheel->seconds);
     timing_wheel_destroy(wheel->milliseconds);
     hashmap_cleanup(&wheel->timers);
-    platform_lock_destroy(&wheel->lock);
-    platform_condition_destroy(&wheel->idle);
+    platform_mutex_destroy(wheel->lock);
+    platform_condvar_destroy(wheel->idle);
     free(wheel);
   }
 }
@@ -505,7 +505,7 @@ void hierarchical_timing_wheel_run(hierarchical_timing_wheel_t* wheel) {
   timing_wheel_run(wheel->days);
 }
 void hierarchical_timing_wheel_stop(hierarchical_timing_wheel_t* wheel) {
-  platform_lock(&wheel->lock);
+  platform_mutex_lock(wheel->lock);
   wheel->stopped = 1;
   timing_wheel_stop(wheel->milliseconds);
   timing_wheel_stop(wheel->seconds);
@@ -533,14 +533,14 @@ void hierarchical_timing_wheel_stop(hierarchical_timing_wheel_t* wheel) {
   hashmap_init(&wheel->timers, (void*)hash_uint64, (void*)compare_uint64);
   hashmap_set_key_alloc_funcs(&wheel->timers, duplicate_uint64, (void*)free);
 
-  platform_signal_condition(&wheel->idle);
-  platform_unlock(&wheel->lock);
+  platform_condvar_signal(wheel->idle);
+  platform_mutex_unlock(wheel->lock);
 }
 
 void hierarchical_timing_wheel_wait_for_idle_signal(hierarchical_timing_wheel_t* wheel) {
-  platform_lock(&wheel->lock);
+  platform_mutex_lock(wheel->lock);
   if (hashmap_size(&wheel->timers) != 0) {
-    platform_condition_wait(&wheel->lock, &wheel->idle);
+    platform_condvar_wait(wheel->idle, wheel->lock);
   }
-  platform_unlock(&wheel->lock);
+  platform_mutex_unlock(wheel->lock);
 }

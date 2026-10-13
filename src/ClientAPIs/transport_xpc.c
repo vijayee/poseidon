@@ -62,7 +62,7 @@ poseidon_transport_t* poseidon_transport_xpc_create(
     transport->start = xpc_transport_start;
     transport->stop = xpc_transport_stop;
     transport->send = xpc_transport_send;
-    platform_lock_init(&transport->lock);
+    transport->lock = platform_mutex_create();;
 
     return transport;
 }

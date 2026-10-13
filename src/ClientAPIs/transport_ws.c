@@ -13,7 +13,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <errno.h>
-#include <pthread.h>
+#include "../Platform/platform_thread.h"
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
@@ -524,7 +524,8 @@ static int ws_transport_start(poseidon_transport_t* self) {
 
     self->running = true;
 
-    if (pthread_create(&self->thread, NULL, ws_transport_thread, self) != 0) {
+    self->thread = platform_thread_create((platform_thread_fn_t)ws_transport_thread, self);
+    if (self->thread == NULL) {
         log_error("ws transport: failed to create thread");
         pd_watcher_destroy(data->listen_watcher);
         data->listen_watcher = NULL;
@@ -546,7 +547,8 @@ static int ws_transport_stop(poseidon_transport_t* self) {
     ws_transport_data_t* data = (ws_transport_data_t*)self->loop;
 
     pd_loop_stop(data->loop);
-    platform_join(self->thread);
+    platform_thread_join(self->thread);
+    self->thread = NULL;
 
     for (size_t i = 0; i < data->num_clients; i++) {
         if (data->clients[i] != NULL) {
@@ -636,7 +638,7 @@ poseidon_transport_t* poseidon_transport_ws_create(uint16_t port,
     transport->start = ws_transport_start;
     transport->stop = ws_transport_stop;
     transport->send = ws_transport_send;
-    platform_lock_init(&transport->lock);
+    transport->lock = platform_mutex_create();;
 
     return transport;
 }

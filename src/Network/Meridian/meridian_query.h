@@ -7,8 +7,9 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <sys/time.h>
-#include "../../Util/threadding.h"
+#include "../../Platform/platform_thread.h"
 #include "meridian.h"
 
 #ifdef __cplusplus
@@ -102,7 +103,7 @@ typedef struct meridian_query_table_t {
     meridian_query_t** queries;           /**< Array of query pointers */
     size_t capacity;                      /**< Allocated capacity */
     size_t count;                         /**< Current number of queries */
-    PLATFORMLOCKTYPE(lock);              /**< Thread-safe access lock */
+    platform_mutex_t* lock;              /**< Thread-safe access lock */
 } meridian_query_table_t;
 
 // ============================================================================

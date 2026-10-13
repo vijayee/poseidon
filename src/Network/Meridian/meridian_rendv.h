@@ -7,8 +7,9 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <sys/socket.h>
-#include "../../Util/threadding.h"
+#include "../../Platform/platform_thread.h"
 #include "meridian.h"
 #include "msquic.h"
 
@@ -120,7 +121,7 @@ typedef struct meridian_rendv_handle_t {
     HQUIC configuration;                     /**< msquic configuration for tunnels */
     meridian_rendv_stream_data_cb_t on_stream_data;  /**< Stream data received callback */
     void* on_stream_data_ctx;                       /**< User context for stream data callback */
-    PLATFORMLOCKTYPE(lock);                    /**< Thread-safe access */
+    platform_mutex_t* lock;                    /**< Thread-safe access */
 } meridian_rendv_handle_t;
 
 // ============================================================================

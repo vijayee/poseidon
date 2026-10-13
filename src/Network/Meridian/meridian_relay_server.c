@@ -96,7 +96,7 @@ meridian_relay_server_t* meridian_relay_server_create(
         server->clients[i].last_activity_ms = 0;
     }
 
-    platform_lock_init(&server->lock);
+    server->lock = platform_mutex_create();;
     refcounter_init(&server->refcounter);
 
     // Create registration
@@ -107,7 +107,7 @@ meridian_relay_server_t* meridian_relay_server_create(
 
     QUIC_STATUS Status = server->msquic->RegistrationOpen(&RegConfig, &server->registration);
     if (QUIC_FAILED(Status)) {
-        platform_lock_destroy(&server->lock);
+        platform_mutex_destroy(server->lock);;
         free(server);
         return NULL;
     }
@@ -138,7 +138,7 @@ meridian_relay_server_t* meridian_relay_server_create(
 
     if (QUIC_FAILED(Status)) {
         server->msquic->RegistrationClose(server->registration);
-        platform_lock_destroy(&server->lock);
+        platform_mutex_destroy(server->lock);;
         free(server);
         return NULL;
     }
@@ -163,7 +163,7 @@ meridian_relay_server_t* meridian_relay_server_create(
     if (QUIC_FAILED(Status)) {
         server->msquic->ConfigurationClose(server->configuration);
         server->msquic->RegistrationClose(server->registration);
-        platform_lock_destroy(&server->lock);
+        platform_mutex_destroy(server->lock);;
         free(server);
         return NULL;
     }
@@ -191,7 +191,7 @@ void meridian_relay_server_destroy(meridian_relay_server_t* server) {
             server->registration = NULL;
         }
 
-        platform_lock_destroy(&server->lock);
+        platform_mutex_destroy(server->lock);;
         free(server);
     }
 }
@@ -199,7 +199,7 @@ void meridian_relay_server_destroy(meridian_relay_server_t* server) {
 int meridian_relay_server_start(meridian_relay_server_t* server) {
     if (server == NULL) return -1;
 
-    platform_lock(&server->lock);
+    platform_mutex_lock(server->lock);
 
     // Create listener
     QUIC_STATUS Status = server->msquic->ListenerOpen(
@@ -209,7 +209,7 @@ int meridian_relay_server_start(meridian_relay_server_t* server) {
         &server->listener);
 
     if (QUIC_FAILED(Status)) {
-        platform_unlock(&server->lock);
+        platform_mutex_unlock(server->lock);
         return -1;
     }
 
@@ -235,20 +235,20 @@ int meridian_relay_server_start(meridian_relay_server_t* server) {
     if (QUIC_FAILED(Status)) {
         server->msquic->ListenerClose(server->listener);
         server->listener = NULL;
-        platform_unlock(&server->lock);
+        platform_mutex_unlock(server->lock);
         return -1;
     }
 
     log_info("Relay server started on port %u", server->listen_port);
 
-    platform_unlock(&server->lock);
+    platform_mutex_unlock(server->lock);
     return 0;
 }
 
 int meridian_relay_server_stop(meridian_relay_server_t* server) {
     if (server == NULL) return -1;
 
-    platform_lock(&server->lock);
+    platform_mutex_lock(server->lock);
 
     // Disconnect all clients
     for (size_t i = 0; i < MERIDIAN_RELAY_MAX_CLIENTS; i++) {
@@ -281,7 +281,7 @@ int meridian_relay_server_stop(meridian_relay_server_t* server) {
         server->listener = NULL;
     }
 
-    platform_unlock(&server->lock);
+    platform_mutex_unlock(server->lock);
     return 0;
 }
 
@@ -295,12 +295,12 @@ int meridian_relay_server_get_stats(meridian_relay_server_t* server,
 
     memset(stats, 0, sizeof(*stats));
 
-    platform_lock(&server->lock);
+    platform_mutex_lock(server->lock);
     stats->num_clients = server->num_clients;
     stats->datagrams_forwarded = server->stats.datagrams_forwarded;
     stats->datagrams_dropped = server->stats.datagrams_dropped;
     stats->addr_requests_served = server->stats.addr_requests_served;
-    platform_unlock(&server->lock);
+    platform_mutex_unlock(server->lock);
 
     return 0;
 }
@@ -437,14 +437,14 @@ RelayServerUniStreamCallback(HQUIC Stream, void* Context,
         src_endpoint_id = ntohl(src_endpoint_id);
 
         // Look up destination client
-        platform_lock(&server->lock);
+        platform_mutex_lock(server->lock);
         int dest_slot = relay_server_find_client_by_endpoint(server, dest_endpoint_id);
 
         if (dest_slot < 0 || server->clients[dest_slot].connection == NULL) {
             log_debug("Relay: no client for endpoint %u, dropping forwarded message",
                       dest_endpoint_id);
             server->stats.datagrams_dropped++;
-            platform_unlock(&server->lock);
+            platform_mutex_unlock(server->lock);
             break;
         }
 
@@ -464,7 +464,7 @@ RelayServerUniStreamCallback(HQUIC Stream, void* Context,
                      dest_endpoint_id);
         }
 
-        platform_unlock(&server->lock);
+        platform_mutex_unlock(server->lock);
         break;
     }
 
@@ -477,12 +477,12 @@ RelayServerUniStreamCallback(HQUIC Stream, void* Context,
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
         // Remove from client's active stream list and free resources
         if (ctx != NULL && server != NULL && client_slot >= 0) {
-            platform_lock(&server->lock);
+            platform_mutex_lock(server->lock);
             if ((size_t)client_slot < MERIDIAN_RELAY_MAX_CLIENTS &&
                 server->clients[client_slot].active_streams != NULL) {
                 relay_server_remove_stream(&server->clients[client_slot], entry);
             }
-            platform_unlock(&server->lock);
+            platform_mutex_unlock(server->lock);
         }
 
         if (entry != NULL) {
@@ -566,13 +566,13 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
 
         if (dest_endpoint_id == 0) {
             // ADDR_REQUEST: Client wants to discover its reflexive address.
-            platform_lock(&server->lock);
+            platform_mutex_lock(server->lock);
 
             if ((size_t)client_slot >= MERIDIAN_RELAY_MAX_CLIENTS ||
                 server->clients[client_slot].connection == NULL) {
                 log_warn("Relay: ADDR_REQUEST from invalid client slot %d", client_slot);
                 server->stats.datagrams_dropped++;
-                platform_unlock(&server->lock);
+                platform_mutex_unlock(server->lock);
                 break;
             }
 
@@ -588,7 +588,7 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
             if (QUIC_FAILED(addr_status)) {
                 log_warn("Relay: failed to get remote address for ADDR_RESPONSE");
                 server->stats.datagrams_dropped++;
-                platform_unlock(&server->lock);
+                platform_mutex_unlock(server->lock);
                 break;
             }
 
@@ -621,7 +621,7 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
             if (resp_cbor == NULL) {
                 log_warn("Relay: failed to encode ADDR_RESPONSE");
                 server->stats.datagrams_dropped++;
-                platform_unlock(&server->lock);
+                platform_mutex_unlock(server->lock);
                 break;
             }
 
@@ -633,7 +633,7 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
             if (cbor_len == 0 || cbor_buf == NULL) {
                 log_warn("Relay: failed to serialize ADDR_RESPONSE");
                 server->stats.datagrams_dropped++;
-                platform_unlock(&server->lock);
+                platform_mutex_unlock(server->lock);
                 break;
             }
 
@@ -644,7 +644,7 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
                 log_warn("Relay: failed to allocate ADDR_RESPONSE send buffer");
                 free(cbor_buf);
                 server->stats.datagrams_dropped++;
-                platform_unlock(&server->lock);
+                platform_mutex_unlock(server->lock);
                 break;
             }
 
@@ -671,20 +671,20 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
                           server->clients[client_slot].endpoint_id);
             }
 
-            platform_unlock(&server->lock);
+            platform_mutex_unlock(server->lock);
         } else {
             // Forward to destination client via uni stream.
             // Bidi wire format: [4B dest BE] + [payload]
             // Uni wire format: [4B dest BE] + [4B src BE] + [payload]
             // Need to insert the source endpoint_id before forwarding.
-            platform_lock(&server->lock);
+            platform_mutex_lock(server->lock);
             int dest_slot = relay_server_find_client_by_endpoint(server, dest_endpoint_id);
 
             if (dest_slot < 0 || server->clients[dest_slot].connection == NULL) {
                 log_debug("Relay: no client for endpoint %u, dropping bidi forward",
                           dest_endpoint_id);
                 server->stats.datagrams_dropped++;
-                platform_unlock(&server->lock);
+                platform_mutex_unlock(server->lock);
                 break;
             }
 
@@ -696,7 +696,7 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
             uint8_t* fwd_buf = (uint8_t*)get_memory(fwd_len);
             if (fwd_buf == NULL) {
                 server->stats.datagrams_dropped++;
-                platform_unlock(&server->lock);
+                platform_mutex_unlock(server->lock);
                 break;
             }
 
@@ -722,7 +722,7 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
                          dest_endpoint_id);
             }
 
-            platform_unlock(&server->lock);
+            platform_mutex_unlock(server->lock);
         }
         break;
     }
@@ -736,12 +736,12 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
         // Remove from client's active stream list and free resources
         if (ctx != NULL && server != NULL && client_slot >= 0) {
-            platform_lock(&server->lock);
+            platform_mutex_lock(server->lock);
             if ((size_t)client_slot < MERIDIAN_RELAY_MAX_CLIENTS &&
                 server->clients[client_slot].active_streams != NULL) {
                 relay_server_remove_stream(&server->clients[client_slot], entry);
             }
-            platform_unlock(&server->lock);
+            platform_mutex_unlock(server->lock);
         }
 
         if (entry != NULL) {
@@ -790,12 +790,12 @@ RelayServerListenerCallback(HQUIC Listener, void* Context,
             return Status;
         }
 
-        platform_lock(&server->lock);
+        platform_mutex_lock(server->lock);
 
         // Find empty client slot
         int slot = relay_server_find_client_slot(server);
         if (slot < 0) {
-            platform_unlock(&server->lock);
+            platform_mutex_unlock(server->lock);
             return QUIC_STATUS_CONNECTION_REFUSED;  // Too many connections
         }
 
@@ -811,7 +811,7 @@ RelayServerListenerCallback(HQUIC Listener, void* Context,
         server->clients[slot].num_active_streams = 0;
         server->num_clients++;
 
-        platform_unlock(&server->lock);
+        platform_mutex_unlock(server->lock);
 
         log_info("Relay: New connection, assigned endpoint_id=%u",
                  server->clients[slot].endpoint_id);
@@ -844,7 +844,7 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
 
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
         // Find and clean up client slot
-        platform_lock(&server->lock);
+        platform_mutex_lock(server->lock);
         int slot = relay_server_find_client_by_connection(server, Connection);
         if (slot >= 0) {
             log_info("Relay: Client disconnected, endpoint_id=%u",
@@ -864,7 +864,7 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
             server->clients[slot].authenticated = false;
             server->num_clients--;
         }
-        platform_unlock(&server->lock);
+        platform_mutex_unlock(server->lock);
 
         return QUIC_STATUS_SUCCESS;
     }
@@ -874,10 +874,10 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
         bool is_bidi = (Event->PEER_STREAM_STARTED.Flags &
                         QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL) == 0;
 
-        platform_lock(&server->lock);
+        platform_mutex_lock(server->lock);
         int slot = relay_server_find_client_by_connection(server, Connection);
         if (slot < 0) {
-            platform_unlock(&server->lock);
+            platform_mutex_unlock(server->lock);
             log_warn("Relay: stream started on unknown connection, rejecting");
             server->msquic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0);
             return QUIC_STATUS_SUCCESS;
@@ -887,7 +887,7 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
         meridian_stream_entry_t* entry = meridian_stream_entry_create(
             Stream, is_bidi, NULL);
         if (entry == NULL) {
-            platform_unlock(&server->lock);
+            platform_mutex_unlock(server->lock);
             log_warn("Relay: failed to create stream entry, rejecting stream");
             server->msquic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0);
             return QUIC_STATUS_SUCCESS;
@@ -898,7 +898,7 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
             entry, server, slot);
         if (stream_ctx == NULL) {
             meridian_stream_entry_destroy(entry);
-            platform_unlock(&server->lock);
+            platform_mutex_unlock(server->lock);
             log_warn("Relay: failed to create stream context, rejecting stream");
             server->msquic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0);
             return QUIC_STATUS_SUCCESS;
@@ -915,7 +915,7 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
 
         // Add to client's active streams
         relay_server_add_stream(&server->clients[slot], entry);
-        platform_unlock(&server->lock);
+        platform_mutex_unlock(server->lock);
 
         log_debug("Relay: %s stream started on connection (endpoint %u)",
                   is_bidi ? "bidi" : "uni",

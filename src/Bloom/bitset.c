@@ -23,7 +23,7 @@ bitset_t* bitset_create(size_t byte_size) {
     bitset_t* set = get_clear_memory(sizeof(bitset_t));
     set->data = get_clear_memory(byte_size);
     set->size = byte_size;
-    platform_lock_init(&set->lock);
+    set->lock = platform_mutex_create();;
     refcounter_init((refcounter_t*)set);
     return set;
 }
@@ -33,7 +33,7 @@ void bitset_destroy(bitset_t* set) {
     refcounter_dereference((refcounter_t*)set);
     if (refcounter_count((refcounter_t*)set) == 0) {
         free(set->data);
-        platform_lock_destroy(&set->lock);
+        platform_mutex_destroy(set->lock);;
         free(set);
     }
 }
@@ -46,7 +46,7 @@ bool bitset_get(bitset_t* set, size_t bit_index) {
 }
 
 bool bitset_set(bitset_t* set, size_t bit_index, bool value) {
-    platform_lock(&set->lock);
+    platform_mutex_lock(set->lock);
     size_t byte_index = bit_index / 8;
     size_t bit_offset = bit_index % 8;
     bitset_ensure_capacity(set, byte_index);
@@ -56,7 +56,7 @@ bool bitset_set(bitset_t* set, size_t bit_index, bool value) {
     } else {
         set->data[byte_index] &= ~(1 << bit_offset);
     }
-    platform_unlock(&set->lock);
+    platform_mutex_unlock(set->lock);
     return old;
 }
 
@@ -131,10 +131,10 @@ size_t bitset_bit_count(bitset_t* set) {
 }
 
 void bitset_compact(bitset_t* set) {
-    platform_lock(&set->lock);
+    platform_mutex_lock(set->lock);
     while (set->size > 1 && set->data[set->size - 1] == 0) {
         set->size--;
     }
     set->data = realloc(set->data, set->size);
-    platform_unlock(&set->lock);
+    platform_mutex_unlock(set->lock);
 }

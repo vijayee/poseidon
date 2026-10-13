@@ -15,7 +15,7 @@ attenuated_bloom_filter_t* attenuated_bloom_filter_create(uint32_t levels, size_
     for (uint32_t i = 0; i < levels; i++) {
         abf->levels[i] = elastic_bloom_filter_create(size, hash_count, omega, fp_bits);
     }
-    platform_lock_init(&abf->lock);
+    abf->lock = platform_mutex_create();;
     refcounter_init((refcounter_t*)abf);
     return abf;
 }
@@ -28,51 +28,51 @@ void attenuated_bloom_filter_destroy(attenuated_bloom_filter_t* abf) {
             elastic_bloom_filter_destroy(abf->levels[i]);
         }
         free(abf->levels);
-        platform_lock_destroy(&abf->lock);
+        platform_mutex_destroy(abf->lock);;
         free(abf);
     }
 }
 
 int attenuated_bloom_filter_subscribe(attenuated_bloom_filter_t* abf, const uint8_t* topic, size_t topic_len) {
     if (abf == NULL || topic == NULL) return -1;
-    platform_lock(&abf->lock);
+    platform_mutex_lock(abf->lock);
     int result = elastic_bloom_filter_add(abf->levels[0], topic, topic_len);
-    platform_unlock(&abf->lock);
+    platform_mutex_unlock(abf->lock);
     return result;
 }
 
 int attenuated_bloom_filter_unsubscribe(attenuated_bloom_filter_t* abf, const uint8_t* topic, size_t topic_len) {
     if (abf == NULL || topic == NULL) return -1;
-    platform_lock(&abf->lock);
+    platform_mutex_lock(abf->lock);
     int result = elastic_bloom_filter_remove(abf->levels[0], topic, topic_len);
-    platform_unlock(&abf->lock);
+    platform_mutex_unlock(abf->lock);
     return result;
 }
 
 bool attenuated_bloom_filter_check(attenuated_bloom_filter_t* abf, const uint8_t* topic, size_t topic_len, uint32_t* out_hops) {
     if (abf == NULL || topic == NULL) return false;
-    platform_lock(&abf->lock);
+    platform_mutex_lock(abf->lock);
     for (uint32_t level = 0; level < abf->level_count; level++) {
         if (elastic_bloom_filter_contains(abf->levels[level], topic, topic_len)) {
             if (out_hops != NULL) {
                 *out_hops = level;
             }
-            platform_unlock(&abf->lock);
+            platform_mutex_unlock(abf->lock);
             return true;
         }
     }
-    platform_unlock(&abf->lock);
+    platform_mutex_unlock(abf->lock);
     return false;
 }
 
 int attenuated_bloom_filter_merge(attenuated_bloom_filter_t* dest, const attenuated_bloom_filter_t* src) {
     if (dest == NULL || src == NULL) return -1;
-    platform_lock(&dest->lock);
+    platform_mutex_lock(dest->lock);
     uint32_t max_levels = src->level_count < (dest->level_count - 1) ? src->level_count : (dest->level_count - 1);
     for (uint32_t i = 0; i < max_levels; i++) {
         elastic_bloom_filter_merge(dest->levels[i + 1], src->levels[i]);
     }
-    platform_unlock(&dest->lock);
+    platform_mutex_unlock(dest->lock);
     return 0;
 }
 
@@ -89,7 +89,7 @@ uint32_t attenuated_bloom_filter_level_count(attenuated_bloom_filter_t* abf) {
 cbor_item_t* attenuated_bloom_filter_encode(const attenuated_bloom_filter_t* abf) {
     if (abf == NULL) return NULL;
 
-    platform_lock(&((attenuated_bloom_filter_t*)abf)->lock);
+    platform_mutex_lock(((attenuated_bloom_filter_t*)abf)->lock);
 
     cbor_item_t* levels_arr = cbor_new_definite_array(abf->level_count);
     if (levels_arr == NULL) goto fail;
@@ -124,11 +124,11 @@ cbor_item_t* attenuated_bloom_filter_encode(const attenuated_bloom_filter_t* abf
         goto fail;
     }
 
-    platform_unlock(&((attenuated_bloom_filter_t*)abf)->lock);
+    platform_mutex_unlock(((attenuated_bloom_filter_t*)abf)->lock);
     return arr;
 
 fail:
-    platform_unlock(&((attenuated_bloom_filter_t*)abf)->lock);
+    platform_mutex_unlock(((attenuated_bloom_filter_t*)abf)->lock);
     return NULL;
 }
 
@@ -173,7 +173,7 @@ attenuated_bloom_filter_t* attenuated_bloom_filter_decode(cbor_item_t* item) {
         }
     }
 
-    platform_lock_init(&abf->lock);
+    abf->lock = platform_mutex_create();;
     refcounter_init((refcounter_t*)abf);
 
     return abf;

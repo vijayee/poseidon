@@ -4,7 +4,7 @@
 
 #include "meridian_query.h"
 #include "../../Util/allocator.h"
-#include "../../Util/threadding.h"
+#include "../../Platform/platform_thread.h"
 #include <stdlib.h>
 #include <string.h>
 #include <sys/time.h>
@@ -214,7 +214,7 @@ meridian_query_table_t* meridian_query_table_create(size_t capacity) {
 
     table->capacity = capacity;
     table->count = 0;
-    platform_lock_init(&table->lock);
+    table->lock = platform_mutex_create();;
     refcounter_init(&table->refcounter);
 
     return table;
@@ -237,7 +237,7 @@ void meridian_query_table_destroy(meridian_query_table_t* table) {
             }
         }
         free(table->queries);
-        platform_lock_destroy(&table->lock);
+        platform_mutex_destroy(table->lock);;
         free(table);
     }
 }
@@ -253,7 +253,7 @@ void meridian_query_table_destroy(meridian_query_table_t* table) {
 int meridian_query_table_insert(meridian_query_table_t* table, meridian_query_t* query) {
     if (table == NULL || query == NULL) return -1;
 
-    platform_lock(&table->lock);
+    platform_mutex_lock(table->lock);
 
     // Grow table if needed (double capacity)
     if (table->count >= table->capacity) {
@@ -262,7 +262,7 @@ int meridian_query_table_insert(meridian_query_table_t* table, meridian_query_t*
             get_clear_memory(new_capacity * sizeof(meridian_query_t*));
 
         if (new_queries == NULL) {
-            platform_unlock(&table->lock);
+            platform_mutex_unlock(table->lock);
             return -1;
         }
 
@@ -276,7 +276,7 @@ int meridian_query_table_insert(meridian_query_table_t* table, meridian_query_t*
     table->queries[table->count++] = (meridian_query_t*)
         refcounter_reference(&query->refcounter);
 
-    platform_unlock(&table->lock);
+    platform_mutex_unlock(table->lock);
     return 0;
 }
 
@@ -291,7 +291,7 @@ int meridian_query_table_insert(meridian_query_table_t* table, meridian_query_t*
 int meridian_query_table_remove(meridian_query_table_t* table, uint64_t query_id) {
     if (table == NULL) return -1;
 
-    platform_lock(&table->lock);
+    platform_mutex_lock(table->lock);
 
     for (size_t i = 0; i < table->count; i++) {
         if (table->queries[i]->query_id == query_id) {
@@ -303,12 +303,12 @@ int meridian_query_table_remove(meridian_query_table_t* table, uint64_t query_id
                 table->queries[j] = table->queries[j + 1];
             }
             table->count--;
-            platform_unlock(&table->lock);
+            platform_mutex_unlock(table->lock);
             return 0;
         }
     }
 
-    platform_unlock(&table->lock);
+    platform_mutex_unlock(table->lock);
     return -1;
 }
 
@@ -323,16 +323,16 @@ int meridian_query_table_remove(meridian_query_table_t* table, uint64_t query_id
 meridian_query_t* meridian_query_table_lookup(meridian_query_table_t* table, uint64_t query_id) {
     if (table == NULL) return NULL;
 
-    platform_lock(&table->lock);
+    platform_mutex_lock(table->lock);
 
     for (size_t i = 0; i < table->count; i++) {
         if (table->queries[i]->query_id == query_id) {
-            platform_unlock(&table->lock);
+            platform_mutex_unlock(table->lock);
             return (meridian_query_t*) refcounter_reference(&table->queries[i]->refcounter);
         }
     }
 
-    platform_unlock(&table->lock);
+    platform_mutex_unlock(table->lock);
     return NULL;
 }
 
@@ -359,7 +359,7 @@ int meridian_query_table_tick(meridian_query_table_t* table,
     *expired = NULL;
     *num_expired = 0;
 
-    platform_lock(&table->lock);
+    platform_mutex_lock(table->lock);
 
     // Phase 1: Count expired queries
     size_t count = 0;
@@ -370,14 +370,14 @@ int meridian_query_table_tick(meridian_query_table_t* table,
     }
 
     if (count == 0) {
-        platform_unlock(&table->lock);
+        platform_mutex_unlock(table->lock);
         return 0;
     }
 
     // Phase 2: Allocate output array
     *expired = (meridian_query_t**) get_clear_memory(count * sizeof(meridian_query_t*));
     if (*expired == NULL) {
-        platform_unlock(&table->lock);
+        platform_mutex_unlock(table->lock);
         return -1;
     }
 
@@ -396,7 +396,7 @@ int meridian_query_table_tick(meridian_query_table_t* table,
     }
     table->count = write_idx;  // Truncate to only non-expired
 
-    platform_unlock(&table->lock);
+    platform_mutex_unlock(table->lock);
     *num_expired = idx;
     return 0;
 }

@@ -70,7 +70,7 @@ typedef struct quic_transport_data_t {
     char* key_path;
     quic_client_t* clients[QUIC_MAX_CLIENTS];
     size_t num_clients;
-    PLATFORMLOCKTYPE(lock);
+    platform_mutex_t* lock;
     volatile bool stopping;
 } quic_transport_data_t;
 
@@ -363,10 +363,10 @@ static QUIC_STATUS QUIC_API quic_connection_callback(HQUIC connection, void* con
         client->session->client_fd = (int)client->session->session_id;
         client->session->transport = transport;
 
-        platform_lock(&data->lock);
+        platform_mutex_lock(data->lock);
         data->clients[data->num_clients++] = client;
         poseidon_channel_manager_register_session(transport->manager, client->session);
-        platform_unlock(&data->lock);
+        platform_mutex_unlock(data->lock);
 
         log_info("quic transport: stream started, client %u (total=%zu)",
                  client->session->session_id, data->num_clients);
@@ -375,7 +375,7 @@ static QUIC_STATUS QUIC_API quic_connection_callback(HQUIC connection, void* con
 
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
         // Find and remove all clients associated with this connection
-        platform_lock(&data->lock);
+        platform_mutex_lock(data->lock);
         vec_t(quic_client_t*) to_remove;
         vec_init(&to_remove);
 
@@ -392,7 +392,7 @@ static QUIC_STATUS QUIC_API quic_connection_callback(HQUIC connection, void* con
             quic_client_destroy(client);
         }
         vec_deinit(&to_remove);
-        platform_unlock(&data->lock);
+        platform_mutex_unlock(data->lock);
 
         data->api->ConnectionClose(connection);
         break;
@@ -545,29 +545,29 @@ static int quic_transport_stop(poseidon_transport_t* self) {
     }
 
     // Signal all clients to stop accepting data, then shutdown connections
-    platform_lock(&data->lock);
+    platform_mutex_lock(data->lock);
     for (size_t i = 0; i < data->num_clients; i++) {
         if (data->clients[i] != NULL) {
             data->clients[i]->shutting_down = true;
         }
     }
-    platform_unlock(&data->lock);
+    platform_mutex_unlock(data->lock);
 
     // Shutdown all connections (may trigger SHUTDOWN_COMPLETE callbacks)
-    platform_lock(&data->lock);
+    platform_mutex_lock(data->lock);
     for (size_t i = 0; i < data->num_clients; i++) {
         if (data->clients[i] != NULL && data->clients[i]->connection != NULL) {
             api->ConnectionShutdown(data->clients[i]->connection,
                                     QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, 0);
         }
     }
-    platform_unlock(&data->lock);
+    platform_mutex_unlock(data->lock);
 
     // Wait for msquic to deliver SHUTDOWN_COMPLETE callbacks
-    platform_usleep(100000);
+    platform_sleep_ms(100);
 
     // Destroy remaining clients that weren't cleaned up by callbacks
-    platform_lock(&data->lock);
+    platform_mutex_lock(data->lock);
     for (size_t i = 0; i < data->num_clients; i++) {
         if (data->clients[i] != NULL) {
             quic_client_destroy(data->clients[i]);
@@ -575,7 +575,7 @@ static int quic_transport_stop(poseidon_transport_t* self) {
         }
     }
     data->num_clients = 0;
-    platform_unlock(&data->lock);
+    platform_mutex_unlock(data->lock);
 
     if (data->configuration != NULL) {
         api->ConfigurationClose(data->configuration);
@@ -595,9 +595,9 @@ static int quic_transport_send(poseidon_transport_t* self, int client_id,
 
     // Find the client by session_id stored in client_fd
     quic_client_t* target = NULL;
-    platform_lock(&data->lock);
+    platform_mutex_lock(data->lock);
     target = quic_find_client_by_id(data, (uint32_t)client_id);
-    platform_unlock(&data->lock);
+    platform_mutex_unlock(data->lock);
 
     if (target == NULL || !target->stream_ready || target->shutting_down) {
         return -1;
@@ -639,11 +639,11 @@ static void quic_transport_destroy(poseidon_transport_t* transport) {
 
         free(data->cert_path);
         free(data->key_path);
-        platform_lock_destroy(&data->lock);
+        platform_mutex_destroy(data->lock);;
         free(data);
     }
 
-    platform_lock_destroy(&transport->lock);
+    platform_mutex_destroy(transport->lock);;
     free(transport);
 
     poseidon_msquic_close();
@@ -692,7 +692,7 @@ poseidon_transport_t* poseidon_transport_quic_create(uint16_t port,
     }
     data->num_clients = 0;
     data->stopping = false;
-    platform_lock_init(&data->lock);
+    data->lock = platform_mutex_create();;
 
     transport->name = "quic";
     transport->type = POSEIDON_TRANSPORT_QUIC;
@@ -702,7 +702,7 @@ poseidon_transport_t* poseidon_transport_quic_create(uint16_t port,
     transport->stop = quic_transport_stop;
     transport->send = quic_transport_send;
     transport->destroy = quic_transport_destroy;
-    platform_lock_init(&transport->lock);
+    transport->lock = platform_mutex_create();;
 
     return transport;
 }

@@ -5,7 +5,7 @@
 #include "channel.h"
 #include "channel_manager.h"
 #include "../Util/allocator.h"
-#include "../Util/threadding.h"
+#include "../Platform/platform_thread.h"
 #include "../Crypto/key_pair.h"
 #include "../Network/Meridian/meridian_packet.h"
 #include "channel_message.h"
@@ -172,7 +172,7 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
         channel->name[POSEIDON_CHANNEL_MAX_NAME - 1] = '\0';
     }
 
-    platform_lock_init(&channel->lock);
+    channel->lock = platform_mutex_create();;
     refcounter_init((refcounter_t*)channel);
     return channel;
 }
@@ -195,7 +195,7 @@ void poseidon_channel_destroy(poseidon_channel_t* channel) {
         unlink(key_path);
         unlink(cert_path);
 
-        platform_lock_destroy(&channel->lock);
+        platform_mutex_destroy(channel->lock);;
         free(channel);
     }
 }
@@ -422,9 +422,9 @@ int poseidon_channel_update_config(poseidon_channel_t* channel,
     // Verify ownership: the provided key_pair must be the channel's key_pair
     if (key_pair != channel->key_pair) return -1;
 
-    platform_lock(&channel->lock);
+    platform_mutex_lock(channel->lock);
     channel->config = *new_config;
-    platform_unlock(&channel->lock);
+    platform_mutex_unlock(channel->lock);
     return 0;
 }
 

@@ -6,7 +6,7 @@
 #ifndef WAVEDB_JOIN_H
 #define WAVEDB_JOIN_H
 
-#include "../Util/threadding.h"
+#include "../Platform/platform_thread.h"
 #include "../Util/atomic_compat.h"
 
 #ifdef __cplusplus
@@ -14,8 +14,8 @@ extern "C" {
 #endif
 
 typedef struct {
-    PLATFORMLOCKTYPE(lock);
-    PLATFORMCONDITIONTYPE(condition);
+    platform_mutex_t* lock;
+    platform_condvar_t* condition;
     ATOMIC(int) pending;    // Number of outstanding operations (uses poseidon's src/Util/atomic_compat.h, which now exposes ATOMIC(T) per the B4 liboffs vendoring)
     void** results;             // Array[index] = result payload from each op
     int count;                 // Total number of operations

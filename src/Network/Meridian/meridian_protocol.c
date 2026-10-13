@@ -2,7 +2,7 @@
 // Created by victor on 4/19/26.
 //
 
-#include "../../Util/threadding.h"
+#include "../../Platform/platform_thread.h"
 #include "meridian_protocol.h"
 #include "msquic_singleton.h"
 #include "../Quasar/quasar_route.h"
@@ -44,20 +44,20 @@ static int protocol_add_stream(meridian_protocol_t* protocol,
                                 meridian_stream_entry_t* entry) {
     if (protocol == NULL || entry == NULL) return -1;
 
-    platform_lock(&protocol->lock);
+    platform_mutex_lock(protocol->lock);
     if (protocol->num_active_streams >= protocol->active_streams_cap) {
         size_t new_cap = protocol->active_streams_cap * 2;
         meridian_stream_entry_t** new_arr = (meridian_stream_entry_t**)
             realloc(protocol->active_streams, new_cap * sizeof(meridian_stream_entry_t*));
         if (new_arr == NULL) {
-            platform_unlock(&protocol->lock);
+            platform_mutex_unlock(protocol->lock);
             return -1;
         }
         protocol->active_streams = new_arr;
         protocol->active_streams_cap = new_cap;
     }
     protocol->active_streams[protocol->num_active_streams++] = entry;
-    platform_unlock(&protocol->lock);
+    platform_mutex_unlock(protocol->lock);
     return 0;
 }
 
@@ -65,7 +65,7 @@ static void protocol_remove_stream(meridian_protocol_t* protocol,
                                     meridian_stream_entry_t* entry) {
     if (protocol == NULL || entry == NULL) return;
 
-    platform_lock(&protocol->lock);
+    platform_mutex_lock(protocol->lock);
     for (size_t i = 0; i < protocol->num_active_streams; i++) {
         if (protocol->active_streams[i] == entry) {
             protocol->active_streams[i] =
@@ -74,7 +74,7 @@ static void protocol_remove_stream(meridian_protocol_t* protocol,
             break;
         }
     }
-    platform_unlock(&protocol->lock);
+    platform_mutex_unlock(protocol->lock);
 }
 
 // ============================================================================
@@ -286,7 +286,7 @@ meridian_protocol_t* meridian_protocol_create(const meridian_protocol_config_t* 
         protocol->active_streams_cap * sizeof(meridian_stream_entry_t*));
     protocol->num_active_streams = 0;
 
-    platform_lock_init(&protocol->lock);
+    protocol->lock = platform_mutex_create();;
     refcounter_init(&protocol->refcounter);
 
     return protocol;
@@ -372,7 +372,7 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol) {
         }
         free(protocol->active_streams);
 
-        platform_lock_destroy(&protocol->lock);
+        platform_mutex_destroy(protocol->lock);;
         free(protocol);
     }
 }
@@ -380,10 +380,10 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol) {
 int meridian_protocol_start(meridian_protocol_t* protocol) {
     if (protocol == NULL) return -1;
 
-    platform_lock(&protocol->lock);
+    platform_mutex_lock(protocol->lock);
 
     if (protocol->running) {
-        platform_unlock(&protocol->lock);
+        platform_mutex_unlock(protocol->lock);
         return 0;
     }
 
@@ -391,7 +391,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
     QUIC_STATUS Status;
     protocol->msquic = poseidon_msquic_open();
     if (protocol->msquic == NULL) {
-        platform_unlock(&protocol->lock);
+        platform_mutex_unlock(protocol->lock);
         return -1;
     }
 
@@ -404,7 +404,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
     if (QUIC_FAILED(Status = protocol->msquic->RegistrationOpen(&RegConfig, &protocol->registration))) {
         poseidon_msquic_close();
         protocol->msquic = NULL;
-        platform_unlock(&protocol->lock);
+        platform_mutex_unlock(protocol->lock);
         return -1;
     }
 
@@ -430,7 +430,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
         poseidon_msquic_close();
         protocol->msquic = NULL;
         protocol->registration = NULL;
-        platform_unlock(&protocol->lock);
+        platform_mutex_unlock(protocol->lock);
         return -1;
     }
 
@@ -456,7 +456,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
         protocol->msquic = NULL;
         protocol->registration = NULL;
         protocol->configuration = NULL;
-        platform_unlock(&protocol->lock);
+        platform_mutex_unlock(protocol->lock);
         return -1;
     }
 
@@ -472,7 +472,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
         protocol->msquic = NULL;
         protocol->registration = NULL;
         protocol->configuration = NULL;
-        platform_unlock(&protocol->lock);
+        platform_mutex_unlock(protocol->lock);
         return -1;
     }
 
@@ -500,7 +500,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
         protocol->registration = NULL;
         protocol->configuration = NULL;
         protocol->listener = NULL;
-        platform_unlock(&protocol->lock);
+        platform_mutex_unlock(protocol->lock);
         return -1;
     }
 
@@ -538,24 +538,24 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
         protocol->registration = NULL;
         protocol->configuration = NULL;
         protocol->listener = NULL;
-        platform_unlock(&protocol->lock);
+        platform_mutex_unlock(protocol->lock);
         return -1;
     }
 
     protocol->state = MERIDIAN_PROTOCOL_STATE_BOOTSTRAPPING;
     protocol->running = true;
 
-    platform_unlock(&protocol->lock);
+    platform_mutex_unlock(protocol->lock);
     return 0;
 }
 
 int meridian_protocol_stop(meridian_protocol_t* protocol) {
     if (protocol == NULL) return -1;
 
-    platform_lock(&protocol->lock);
+    platform_mutex_lock(protocol->lock);
 
     if (!protocol->running) {
-        platform_unlock(&protocol->lock);
+        platform_mutex_unlock(protocol->lock);
         return 0;
     }
 
@@ -605,7 +605,7 @@ int meridian_protocol_stop(meridian_protocol_t* protocol) {
         protocol->registration = NULL;
     }
 
-    platform_unlock(&protocol->lock);
+    platform_mutex_unlock(protocol->lock);
     return 0;
 }
 
@@ -687,11 +687,11 @@ int meridian_protocol_connect(meridian_protocol_t* protocol,
     }
 
     // Add to connected peers
-    platform_lock(&protocol->lock);
+    platform_mutex_lock(protocol->lock);
     protocol->connected_peers[protocol->num_connected_peers] = Connection;
     protocol->peer_nodes[protocol->num_connected_peers] = node;
     protocol->num_connected_peers++;
-    platform_unlock(&protocol->lock);
+    platform_mutex_unlock(protocol->lock);
 
     return 0;
 }
@@ -701,7 +701,7 @@ int meridian_protocol_disconnect(meridian_protocol_t* protocol,
     if (protocol == NULL) return -1;
     if (!protocol->running) return -1;
 
-    platform_lock(&protocol->lock);
+    platform_mutex_lock(protocol->lock);
     for (size_t i = 0; i < protocol->num_connected_peers; i++) {
         if (protocol->peer_nodes[i] &&
             protocol->peer_nodes[i]->addr == addr &&
@@ -728,11 +728,11 @@ int meridian_protocol_disconnect(meridian_protocol_t* protocol,
                 protocol->peer_nodes[j] = protocol->peer_nodes[j + 1];
             }
             protocol->num_connected_peers--;
-            platform_unlock(&protocol->lock);
+            platform_mutex_unlock(protocol->lock);
             return 0;
         }
     }
-    platform_unlock(&protocol->lock);
+    platform_mutex_unlock(protocol->lock);
     return -1;
 }
 
@@ -748,7 +748,7 @@ int meridian_protocol_send_packet(meridian_protocol_t* protocol,
 
     // Find connection for target
     HQUIC Connection = NULL;
-    platform_lock(&protocol->lock);
+    platform_mutex_lock(protocol->lock);
     for (size_t i = 0; i < protocol->num_connected_peers; i++) {
         if (protocol->peer_nodes[i] &&
             protocol->peer_nodes[i]->addr == target->addr &&
@@ -757,7 +757,7 @@ int meridian_protocol_send_packet(meridian_protocol_t* protocol,
             break;
         }
     }
-    platform_unlock(&protocol->lock);
+    platform_mutex_unlock(protocol->lock);
 
     if (Connection == NULL) return -1;
 
@@ -866,7 +866,7 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
     if (meridian_packet_decode(item, &pkt) == 0) {
         if (pkt.type == MERIDIAN_PACKET_TYPE_RET_PING) {
             // PONG response: find matching pending measure and compute RTT
-            platform_lock(&protocol->lock);
+            platform_mutex_lock(protocol->lock);
             for (size_t i = 0; i < protocol->num_pending_measures; i++) {
                 meridian_measure_request_t* req = protocol->pending_measures[i];
                 if (req != NULL && req->query_id == pkt.query_id) {
@@ -894,7 +894,7 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
                     protocol->pending_measures[protocol->num_pending_measures - 1] = NULL;
                     protocol->num_pending_measures--;
 
-                    platform_unlock(&protocol->lock);
+                    platform_mutex_unlock(protocol->lock);
 
                     // Insert into latency cache and invoke callback
                     meridian_latency_cache_insert(protocol->latency_cache, node, rtt_us);
@@ -908,7 +908,7 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
                     return 0;
                 }
             }
-            platform_unlock(&protocol->lock);
+            platform_mutex_unlock(protocol->lock);
         }
     }
 
@@ -994,7 +994,7 @@ int meridian_protocol_send_measure(meridian_protocol_t* protocol,
 
     // Find connection for target
     HQUIC Connection = NULL;
-    platform_lock(&protocol->lock);
+    platform_mutex_lock(protocol->lock);
     for (size_t i = 0; i < protocol->num_connected_peers; i++) {
         if (protocol->peer_nodes[i] &&
             protocol->peer_nodes[i]->addr == req->target->addr &&
@@ -1003,7 +1003,7 @@ int meridian_protocol_send_measure(meridian_protocol_t* protocol,
             break;
         }
     }
-    platform_unlock(&protocol->lock);
+    platform_mutex_unlock(protocol->lock);
 
     if (Connection == NULL) return -1;
 
@@ -1078,21 +1078,21 @@ int meridian_protocol_send_measure(meridian_protocol_t* protocol,
     protocol_add_stream(protocol, entry);
 
     // Register the request as pending
-    platform_lock(&protocol->lock);
+    platform_mutex_lock(protocol->lock);
     if (protocol->num_pending_measures >= protocol->pending_measures_capacity) {
         size_t new_cap = protocol->pending_measures_capacity == 0 ? 8 :
                          protocol->pending_measures_capacity * 2;
         meridian_measure_request_t** new_arr = (meridian_measure_request_t**)
             realloc(protocol->pending_measures, new_cap * sizeof(meridian_measure_request_t*));
         if (new_arr == NULL) {
-            platform_unlock(&protocol->lock);
+            platform_mutex_unlock(protocol->lock);
             return -1;
         }
         protocol->pending_measures = new_arr;
         protocol->pending_measures_capacity = new_cap;
     }
     protocol->pending_measures[protocol->num_pending_measures++] = req;
-    platform_unlock(&protocol->lock);
+    platform_mutex_unlock(protocol->lock);
 
     return 0;
 }
@@ -1148,7 +1148,7 @@ ListenerCallback(HQUIC Listener, void* Context,
         }
 
         // Add to connected peers
-        platform_lock(&protocol->lock);
+        platform_mutex_lock(protocol->lock);
         if (protocol->num_connected_peers < 64) {
             // Get peer address - need to query connection params
             uint32_t addr = 0;
@@ -1159,7 +1159,7 @@ ListenerCallback(HQUIC Listener, void* Context,
             protocol->peer_nodes[protocol->num_connected_peers] = NULL;
             protocol->num_connected_peers++;
         }
-        platform_unlock(&protocol->lock);
+        platform_mutex_unlock(protocol->lock);
 
         return QUIC_STATUS_SUCCESS;
     }

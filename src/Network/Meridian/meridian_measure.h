@@ -7,8 +7,9 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <sys/time.h>
-#include "../../Util/threadding.h"
+#include "../../Platform/platform_thread.h"
 #include "meridian.h"
 #include "../../Util/allocator.h"
 
@@ -62,7 +63,7 @@ typedef struct meridian_latency_cache_t {
     meridian_measure_entry_t* entries;    /**< Array of cache entries */
     size_t capacity;                      /**< Maximum entries */
     size_t count;                         /**< Current number of entries */
-    PLATFORMLOCKTYPE(lock);             /**< Thread-safe access */
+    platform_mutex_t* lock;             /**< Thread-safe access */
 } meridian_latency_cache_t;
 
 // ============================================================================

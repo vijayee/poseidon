@@ -9,8 +9,9 @@
 #include "../RefCounter/refcounter.h"
 #include "ticker.h"
 #include "../Workers/pool.h"
-#include "../Util/threadding.h"
+#include "../Platform/platform_thread.h"
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef _WIN32
 #define Time_Milliseconds 1
@@ -82,9 +83,9 @@ typedef vec_t(timer_list_t*) slots_t;
 
 struct timing_wheel_t {
   refcounter_t refcounter;
-  PLATFORMLOCKTYPE(lock);
-  PLATFORMLOCKTYPEPTR(hierarchical_lock);
-  PLATFORMCONDITIONTYPEPTR(idle);
+  platform_mutex_t* lock;
+  platform_mutex_t* hierarchical_lock;
+  platform_condvar_t* idle;
   size_t position;
   timer_map_t* timers;
   timing_wheel_t* wheel;
@@ -97,8 +98,8 @@ struct timing_wheel_t {
 
 typedef struct {
   refcounter_t refcounter;
-  PLATFORMLOCKTYPE(lock);
-  PLATFORMCONDITIONTYPE(idle);
+  platform_mutex_t* lock;
+  platform_condvar_t* idle;
   timer_map_t timers;
   size_t next_id;
   uint8_t stopped;
@@ -117,7 +118,7 @@ void hierarchical_timing_wheel_stop(hierarchical_timing_wheel_t* wheel);
 void hierarchical_timing_wheel_run(hierarchical_timing_wheel_t* wheel);
 void hierarchical_timing_wheel_simulate(hierarchical_timing_wheel_t* wheel);
 
-timing_wheel_t* timing_wheel_create(uint64_t interval, size_t slot_count, work_pool_t* pool, timer_map_t* timers, PLATFORMLOCKTYPEPTR(hierarchical_lock), PLATFORMCONDITIONTYPEPTR(idle));
+timing_wheel_t* timing_wheel_create(uint64_t interval, size_t slot_count, work_pool_t* pool, timer_map_t* timers, platform_mutex_t* hierarchical_lock, platform_condvar_t* idle);
 void timing_wheel_destroy(timing_wheel_t* wheel);
 void timing_wheel_set_timer(timing_wheel_t* wheel, timer_st* timer);
 void timing_wheel_stop(timing_wheel_t* wheel);

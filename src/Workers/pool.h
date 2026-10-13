@@ -4,7 +4,9 @@
 
 #ifndef WAVEDB_POOL_H
 #define WAVEDB_POOL_H
-#include "../Util/threadding.h"
+#include <stddef.h>
+#include <stdint.h>
+#include "../Platform/platform_thread.h"
 #include "../RefCounter/refcounter.h"
 #include "queue.h"
 
@@ -14,14 +16,14 @@ extern "C" {
 
 typedef struct {
   refcounter_t refcounter;
-  PLATFORMLOCKTYPE(lock);
-  PLATFORMCONDITIONTYPE(condition);
-  PLATFORMBARRIERTYPE(barrier);
-  PLATFORMCONDITIONTYPE(shutdown);
-  PLATFORMCONDITIONTYPE(idle);
+  platform_mutex_t* lock;
+  platform_condvar_t* condition;
+  platform_barrier_t* barrier;
+  platform_condvar_t* shutdown;
+  platform_condvar_t* idle;
   size_t idleCount;
   sharded_work_queue_t sharded_queue;
-  PLATFORMTHREADTYPE* workers;
+  platform_thread_t** workers;
 #if _WIN32
   DWORD* workerIds;
 #endif

@@ -12,7 +12,7 @@
 #include "../../Buffer/buffer.h"
 #include "../../Util/vec.h"
 #include "../../RefCounter/refcounter.h"
-#include "../../Util/threadding.h"
+#include "../../Platform/platform_thread.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -76,7 +76,7 @@ typedef struct quasar_route_message_t {
     uint16_t* pub_ports;               /**< Publisher node ports (network byte order) */
     uint32_t pub_count;                /**< Number of publishers in the list */
     uint32_t pub_capacity;             /**< Allocated capacity for publisher list */
-    PLATFORMLOCKTYPE(lock);            /**< Thread-safe access */
+    platform_mutex_t* lock;            /**< Thread-safe access */
 } quasar_route_message_t;
 
 /**
@@ -198,7 +198,7 @@ typedef struct quasar_t {
     uint32_t seen_hashes;                    /**< Dedup filter hash count */
     quasar_message_cb_t on_message;              /**< Called when a message is delivered to a local subscriber */
     void* message_ctx;                            /**< User context for message callback */
-    PLATFORMLOCKTYPE(lock);                        /**< Thread-safe access to subscriptions and filter */
+    platform_mutex_t* lock;                        /**< Thread-safe access to subscriptions and filter */
 } quasar_t;
 
 // ============================================================================

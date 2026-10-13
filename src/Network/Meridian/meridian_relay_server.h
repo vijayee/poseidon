@@ -12,7 +12,7 @@ extern "C" {
 #include <time.h>
 
 #include "../../RefCounter/refcounter.h"
-#include "../../Util/threadding.h"
+#include "../../Platform/platform_thread.h"
 #include "meridian_stream.h"
 #include "msquic.h"
 
@@ -64,7 +64,7 @@ typedef struct meridian_relay_server_t {
     size_t num_clients;                                   /**< Current number of connected clients */
     uint32_t next_endpoint_id;                            /**< Next endpoint ID to assign */
     meridian_relay_server_stats_t stats;                  /**< Runtime statistics */
-    PLATFORMLOCKTYPE(lock);                               /**< Thread safety lock for client list */
+    platform_mutex_t* lock;                               /**< Thread safety lock for client list */
 } meridian_relay_server_t;
 
 /**

@@ -64,7 +64,7 @@ poseidon_transport_t* poseidon_transport_binder_create(
     transport->start = binder_transport_start;
     transport->stop = binder_transport_stop;
     transport->send = binder_transport_send;
-    platform_lock_init(&transport->lock);
+    transport->lock = platform_mutex_create();;
 
     return transport;
 }

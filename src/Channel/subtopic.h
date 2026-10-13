@@ -5,7 +5,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-#include "Util/threadding.h"
+#include "Platform/platform_thread.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -52,7 +52,7 @@ typedef struct subtopic_entry_t {
 typedef struct subtopic_table_t {
     subtopic_entry_t entries[SUBTOPIC_TABLE_MAX_SUBS];
     size_t count;
-    PLATFORMLOCKTYPE(lock);
+    platform_mutex_t* lock;
 } subtopic_table_t;
 
 subtopic_table_t* subtopic_table_create(size_t capacity);

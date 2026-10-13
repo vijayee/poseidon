@@ -55,7 +55,7 @@ meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_rel
         conn->state = MERIDIAN_CONN_STATE_RELAY;
     }
 
-    platform_lock_init(&conn->lock);
+    conn->lock = platform_mutex_create();;
     refcounter_init(&conn->refcounter);
     return conn;
 }
@@ -70,7 +70,7 @@ void meridian_conn_destroy(meridian_conn_t* conn) {
             conn->direct_connection = NULL;
         }
         // relay is borrowed — don't destroy it here
-        platform_lock_destroy(&conn->lock);
+        platform_mutex_destroy(conn->lock);;
         free(conn);
     }
 }
@@ -82,7 +82,7 @@ void meridian_conn_destroy(meridian_conn_t* conn) {
 int meridian_conn_connect(meridian_conn_t* conn) {
     if (conn == NULL) return -1;
 
-    platform_lock(&conn->lock);
+    platform_mutex_lock(conn->lock);
 
     switch (conn->state) {
         case MERIDIAN_CONN_STATE_RELAY_ONLY:
@@ -124,14 +124,14 @@ int meridian_conn_connect(meridian_conn_t* conn) {
             break;
     }
 
-    platform_unlock(&conn->lock);
+    platform_mutex_unlock(conn->lock);
     return 0;
 }
 
 void meridian_conn_disconnect(meridian_conn_t* conn) {
     if (conn == NULL) return;
 
-    platform_lock(&conn->lock);
+    platform_mutex_lock(conn->lock);
 
     // Shut down and close the direct QUIC connection if active
     if (conn->direct_connection != NULL && conn->msquic != NULL) {
@@ -145,13 +145,13 @@ void meridian_conn_disconnect(meridian_conn_t* conn) {
     conn->relay_path.active = false;
     conn->state = MERIDIAN_CONN_STATE_RELAY;
 
-    platform_unlock(&conn->lock);
+    platform_mutex_unlock(conn->lock);
 }
 
 int meridian_conn_send(meridian_conn_t* conn, const uint8_t* data, uint32_t len) {
     if (conn == NULL || data == NULL || len == 0) return -1;
 
-    platform_lock(&conn->lock);
+    platform_mutex_lock(conn->lock);
 
     int result = -1;
 
@@ -167,31 +167,31 @@ int meridian_conn_send(meridian_conn_t* conn, const uint8_t* data, uint32_t len)
         if (result == 0) result = (int)len;
     }
 
-    platform_unlock(&conn->lock);
+    platform_mutex_unlock(conn->lock);
     return result;
 }
 
 int meridian_conn_upgrade_to_direct(meridian_conn_t* conn) {
     if (conn == NULL) return -1;
 
-    platform_lock(&conn->lock);
+    platform_mutex_lock(conn->lock);
 
     // Only upgrade from RELAY state
     if (conn->state != MERIDIAN_CONN_STATE_RELAY) {
-        platform_unlock(&conn->lock);
+        platform_mutex_unlock(conn->lock);
         return (conn->state == MERIDIAN_CONN_STATE_DIRECT) ? 0 : -1;
     }
 
     // Don't upgrade if peer has symmetric NAT
     if (conn->peer_nat_type == MERIDIAN_NAT_TYPE_SYMMETRIC ||
         conn->local_nat_type == MERIDIAN_NAT_TYPE_SYMMETRIC) {
-        platform_unlock(&conn->lock);
+        platform_mutex_unlock(conn->lock);
         return -1;
     }
 
     // Need reflexive address to attempt direct
     if (conn->direct_path.reflexive_addr == 0) {
-        platform_unlock(&conn->lock);
+        platform_mutex_unlock(conn->lock);
         return -1;
     }
 
@@ -199,7 +199,7 @@ int meridian_conn_upgrade_to_direct(meridian_conn_t* conn) {
     conn->direct_attempts++;
     conn->last_direct_attempt_ms = 0;
 
-    platform_unlock(&conn->lock);
+    platform_mutex_unlock(conn->lock);
     return 0;
 }
 
@@ -210,7 +210,7 @@ int meridian_conn_upgrade_to_direct(meridian_conn_t* conn) {
 void meridian_conn_set_peer_nat_type(meridian_conn_t* conn, meridian_nat_type_t type) {
     if (conn == NULL) return;
 
-    platform_lock(&conn->lock);
+    platform_mutex_lock(conn->lock);
     conn->peer_nat_type = type;
 
     // If peer has symmetric NAT, downgrade to relay-only
@@ -219,16 +219,16 @@ void meridian_conn_set_peer_nat_type(meridian_conn_t* conn, meridian_nat_type_t 
         conn->state = MERIDIAN_CONN_STATE_RELAY_ONLY;
     }
 
-    platform_unlock(&conn->lock);
+    platform_mutex_unlock(conn->lock);
 }
 
 void meridian_conn_set_peer_reflexive(meridian_conn_t* conn, uint32_t addr, uint16_t port) {
     if (conn == NULL) return;
 
-    platform_lock(&conn->lock);
+    platform_mutex_lock(conn->lock);
     conn->direct_path.reflexive_addr = addr;
     conn->direct_path.reflexive_port = port;
-    platform_unlock(&conn->lock);
+    platform_mutex_unlock(conn->lock);
 }
 
 // ============================================================================

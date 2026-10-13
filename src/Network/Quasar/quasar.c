@@ -62,7 +62,7 @@ quasar_route_message_t* quasar_route_message_create(const uint8_t* topic, size_t
     msg->pub_ports = NULL;
     msg->pub_count = 0;
     msg->pub_capacity = 0;
-    platform_lock_init(&msg->lock);
+    msg->lock = platform_mutex_create();;
     refcounter_init((refcounter_t*)msg);
     return msg;
 }
@@ -76,7 +76,7 @@ void quasar_route_message_destroy(quasar_route_message_t* msg) {
         bloom_filter_destroy(msg->visited);
         free(msg->pub_addrs);
         free(msg->pub_ports);
-        platform_lock_destroy(&msg->lock);
+        platform_mutex_destroy(msg->lock);;
         free(msg);
     }
 }
@@ -88,9 +88,9 @@ int quasar_route_message_add_visited(quasar_route_message_t* msg, const meridian
     uint8_t node_key[6];
     memcpy(node_key, &node->addr, sizeof(node->addr));
     memcpy(node_key + sizeof(node->addr), &node->port, sizeof(node->port));
-    platform_lock(&msg->lock);
+    platform_mutex_lock(msg->lock);
     int result = bloom_filter_add(msg->visited, node_key, sizeof(node_key));
-    platform_unlock(&msg->lock);
+    platform_mutex_unlock(msg->lock);
     return result;
 }
 
@@ -99,15 +99,15 @@ bool quasar_route_message_has_visited(quasar_route_message_t* msg, const meridia
     uint8_t node_key[6];
     memcpy(node_key, &node->addr, sizeof(node->addr));
     memcpy(node_key + sizeof(node->addr), &node->port, sizeof(node->port));
-    platform_lock(&msg->lock);
+    platform_mutex_lock(msg->lock);
     bool result = bloom_filter_contains(msg->visited, node_key, sizeof(node_key));
-    platform_unlock(&msg->lock);
+    platform_mutex_unlock(msg->lock);
     return result;
 }
 
 int quasar_route_message_add_publisher(quasar_route_message_t* msg, const meridian_node_t* node) {
     if (msg == NULL || node == NULL) return -1;
-    platform_lock(&msg->lock);
+    platform_mutex_lock(msg->lock);
     if (msg->pub_count >= msg->pub_capacity) {
         uint32_t new_cap = msg->pub_capacity == 0 ? 4 : msg->pub_capacity * 2;
         uint32_t* new_addrs = realloc(msg->pub_addrs, sizeof(uint32_t) * new_cap);
@@ -115,7 +115,7 @@ int quasar_route_message_add_publisher(quasar_route_message_t* msg, const meridi
         if (new_addrs == NULL || new_ports == NULL) {
             free(new_addrs);
             free(new_ports);
-            platform_unlock(&msg->lock);
+            platform_mutex_unlock(msg->lock);
             return -1;
         }
         msg->pub_addrs = new_addrs;
@@ -125,20 +125,20 @@ int quasar_route_message_add_publisher(quasar_route_message_t* msg, const meridi
     msg->pub_addrs[msg->pub_count] = node->addr;
     msg->pub_ports[msg->pub_count] = node->port;
     msg->pub_count++;
-    platform_unlock(&msg->lock);
+    platform_mutex_unlock(msg->lock);
     return 0;
 }
 
 bool quasar_route_message_has_publisher(quasar_route_message_t* msg, const meridian_node_t* node) {
     if (msg == NULL || node == NULL) return false;
-    platform_lock(&msg->lock);
+    platform_mutex_lock(msg->lock);
     for (uint32_t i = 0; i < msg->pub_count; i++) {
         if (msg->pub_addrs[i] == node->addr && msg->pub_ports[i] == node->port) {
-            platform_unlock(&msg->lock);
+            platform_mutex_unlock(msg->lock);
             return true;
         }
     }
-    platform_unlock(&msg->lock);
+    platform_mutex_unlock(msg->lock);
     return false;
 }
 
@@ -169,7 +169,7 @@ quasar_t* quasar_create(struct meridian_protocol_t* protocol, uint32_t max_hops,
     quasar->seen_hashes = seen_hashes;
     quasar->on_message = NULL;
     quasar->message_ctx = NULL;
-    platform_lock_init(&quasar->lock);
+    quasar->lock = platform_mutex_create();;
     refcounter_init((refcounter_t*)quasar);
     return quasar;
 }
@@ -192,17 +192,17 @@ void quasar_destroy(quasar_t* quasar) {
             attenuated_bloom_filter_destroy(quasar->neighbor_filters.data[i].filter);
         }
         vec_deinit(&quasar->neighbor_filters);
-        platform_lock_destroy(&quasar->lock);
+        platform_mutex_destroy(quasar->lock);;
         free(quasar);
     }
 }
 
 void quasar_set_message_callback(quasar_t* quasar, quasar_message_cb_t cb, void* ctx) {
     if (quasar == NULL) return;
-    platform_lock(&quasar->lock);
+    platform_mutex_lock(quasar->lock);
     quasar->on_message = cb;
     quasar->message_ctx = ctx;
-    platform_unlock(&quasar->lock);
+    platform_mutex_unlock(quasar->lock);
 }
 
 attenuated_bloom_filter_t* quasar_get_neighbor_filter(quasar_t* quasar, const meridian_node_t* node) {
@@ -218,10 +218,10 @@ attenuated_bloom_filter_t* quasar_get_neighbor_filter(quasar_t* quasar, const me
 
 attenuated_bloom_filter_t* quasar_get_or_create_neighbor_filter(quasar_t* quasar, const meridian_node_t* node) {
     if (quasar == NULL || node == NULL) return NULL;
-    platform_lock(&quasar->lock);
+    platform_mutex_lock(quasar->lock);
     attenuated_bloom_filter_t* existing = quasar_get_neighbor_filter(quasar, node);
     if (existing != NULL) {
-        platform_unlock(&quasar->lock);
+        platform_mutex_unlock(quasar->lock);
         return existing;
     }
     quasar_neighbor_filter_t nf;
@@ -235,27 +235,27 @@ attenuated_bloom_filter_t* quasar_get_or_create_neighbor_filter(quasar_t* quasar
         QUASAR_DEFAULT_FP_BITS
     );
     if (nf.filter == NULL) {
-        platform_unlock(&quasar->lock);
+        platform_mutex_unlock(quasar->lock);
         return NULL;
     }
     vec_push(&quasar->neighbor_filters, nf);
-    platform_unlock(&quasar->lock);
+    platform_mutex_unlock(quasar->lock);
     return nf.filter;
 }
 
 int quasar_remove_neighbor_filter(quasar_t* quasar, const meridian_node_t* node) {
     if (quasar == NULL || node == NULL) return -1;
-    platform_lock(&quasar->lock);
+    platform_mutex_lock(quasar->lock);
     for (int i = 0; i < quasar->neighbor_filters.length; i++) {
         if (quasar->neighbor_filters.data[i].addr == node->addr &&
             quasar->neighbor_filters.data[i].port == node->port) {
             attenuated_bloom_filter_destroy(quasar->neighbor_filters.data[i].filter);
             vec_splice(&quasar->neighbor_filters, i, 1);
-            platform_unlock(&quasar->lock);
+            platform_mutex_unlock(quasar->lock);
             return 0;
         }
     }
-    platform_unlock(&quasar->lock);
+    platform_mutex_unlock(quasar->lock);
     return -1;
 }
 
@@ -265,7 +265,7 @@ int quasar_remove_neighbor_filter(quasar_t* quasar, const meridian_node_t* node)
 
 int quasar_subscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len, uint32_t ttl) {
     if (quasar == NULL || topic == NULL) return -1;
-    platform_lock(&quasar->lock);
+    platform_mutex_lock(quasar->lock);
 
     // Add topic to level 0 of the routing filter (local subscription)
     int result = attenuated_bloom_filter_subscribe(quasar->routing, topic, topic_len);
@@ -293,13 +293,13 @@ int quasar_subscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len, u
         }
     }
 
-    platform_unlock(&quasar->lock);
+    platform_mutex_unlock(quasar->lock);
     return result;
 }
 
 int quasar_unsubscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len) {
     if (quasar == NULL || topic == NULL) return -1;
-    platform_lock(&quasar->lock);
+    platform_mutex_lock(quasar->lock);
 
     // Remove topic from level 0 of the routing filter
     int result = attenuated_bloom_filter_unsubscribe(quasar->routing, topic, topic_len);
@@ -316,7 +316,7 @@ int quasar_unsubscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len)
         }
     }
 
-    platform_unlock(&quasar->lock);
+    platform_mutex_unlock(quasar->lock);
     return result;
 }
 
@@ -330,7 +330,7 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
 
     // Check if locally subscribed
     bool locally_subscribed = false;
-    platform_lock(&quasar->lock);
+    platform_mutex_lock(quasar->lock);
     for (int i = 0; i < quasar->local_subs.length; i++) {
         if (quasar->local_subs.data[i].topic != NULL &&
             quasar->local_subs.data[i].topic->size == topic_len &&
@@ -346,9 +346,9 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
         if (quasar->on_message != NULL) {
             quasar_message_cb_t cb = quasar->on_message;
             void* ctx = quasar->message_ctx;
-            platform_unlock(&quasar->lock);
+            platform_mutex_unlock(quasar->lock);
             cb(ctx, topic, topic_len, data, data_len);
-            platform_lock(&quasar->lock);
+            platform_mutex_lock(quasar->lock);
         }
 
         // Re-publish to all overlay neighbors
@@ -382,14 +382,14 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
                 }
             }
         }
-        platform_unlock(&quasar->lock);
+        platform_mutex_unlock(quasar->lock);
         return 0;
     }
-    platform_unlock(&quasar->lock);
+    platform_mutex_unlock(quasar->lock);
 
     // Algorithm 2, lines 10-19: Directed walk
     if (quasar->protocol != NULL) {
-        platform_lock(&quasar->lock);
+        platform_mutex_lock(quasar->lock);
 
         uint32_t local_addr = 0;
         uint16_t local_port = 0;
@@ -440,12 +440,12 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
                         quasar_route_message_destroy(fwd);
                     }
                     meridian_node_destroy(target);
-                    platform_unlock(&quasar->lock);
+                    platform_mutex_unlock(quasar->lock);
                     return 0;
                 }
             }
         }
-        platform_unlock(&quasar->lock);
+        platform_mutex_unlock(quasar->lock);
     }
 
     // Algorithm 2, lines 20-21: Random walk
@@ -457,9 +457,9 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
     );
     if (msg == NULL) return -1;
 
-    platform_lock(&quasar->lock);
+    platform_mutex_lock(quasar->lock);
     bloom_filter_add(quasar->seen, (const uint8_t*)&msg->id, sizeof(msg->id));
-    platform_unlock(&quasar->lock);
+    platform_mutex_unlock(quasar->lock);
 
     // Add local node as publisher and to visited filter
     if (quasar->protocol != NULL) {
@@ -506,9 +506,9 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
     if (quasar == NULL || msg == NULL) return -1;
 
     // Algorithm 2, line 1: Dedup check
-    platform_lock(&quasar->lock);
+    platform_mutex_lock(quasar->lock);
     if (bloom_filter_contains(quasar->seen, (const uint8_t*)&msg->id, sizeof(msg->id))) {
-        platform_unlock(&quasar->lock);
+        platform_mutex_unlock(quasar->lock);
         return 0;
     }
     bloom_filter_add(quasar->seen, (const uint8_t*)&msg->id, sizeof(msg->id));
@@ -544,9 +544,9 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
         if (quasar->on_message != NULL) {
             quasar_message_cb_t cb = quasar->on_message;
             void* ctx = quasar->message_ctx;
-            platform_unlock(&quasar->lock);
+            platform_mutex_unlock(quasar->lock);
             cb(ctx, msg->topic->data, msg->topic->size, msg->data->data, msg->data->size);
-            platform_lock(&quasar->lock);
+            platform_mutex_lock(quasar->lock);
         }
 
         // Re-publish to all overlay neighbors
@@ -564,25 +564,25 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
         }
 
         if (local_node != NULL) meridian_node_destroy(local_node);
-        platform_unlock(&quasar->lock);
+        platform_mutex_unlock(quasar->lock);
         return 0;
     }
 
-    platform_unlock(&quasar->lock);
+    platform_mutex_unlock(quasar->lock);
 
     // Algorithm 2, line 9: Check TTL
-    platform_lock(&msg->lock);
+    platform_mutex_lock(msg->lock);
     if (msg->hops_remaining == 0) {
-        platform_unlock(&msg->lock);
+        platform_mutex_unlock(msg->lock);
         if (local_node != NULL) meridian_node_destroy(local_node);
         return 0;
     }
     msg->hops_remaining--;
-    platform_unlock(&msg->lock);
+    platform_mutex_unlock(msg->lock);
 
     // Algorithm 2, lines 10-19: Directed walk
     if (quasar != NULL) {
-        platform_lock(&quasar->lock);
+        platform_mutex_lock(quasar->lock);
         uint32_t level_count = attenuated_bloom_filter_level_count(quasar->routing);
 
         for (uint32_t level = 0; level < level_count; level++) {
@@ -617,12 +617,12 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
                     }
                     meridian_node_destroy(target);
                     if (local_node != NULL) meridian_node_destroy(local_node);
-                    platform_unlock(&quasar->lock);
+                    platform_mutex_unlock(quasar->lock);
                     return 0;
                 }
             }
         }
-        platform_unlock(&quasar->lock);
+        platform_mutex_unlock(quasar->lock);
     }
 
     // Algorithm 2, lines 20-21: Random walk
@@ -702,7 +702,7 @@ int quasar_on_gossip(quasar_t* quasar, const uint8_t* data, size_t len, const st
 
     // Store the incoming filter in the per-neighbor slot for directed routing (Algorithm 2)
     if (from != NULL) {
-        platform_lock(&quasar->lock);
+        platform_mutex_lock(quasar->lock);
         // Remove old filter for this neighbor if it exists
         for (int i = 0; i < quasar->neighbor_filters.length; i++) {
             if (quasar->neighbor_filters.data[i].addr == from->addr &&
@@ -720,7 +720,7 @@ int quasar_on_gossip(quasar_t* quasar, const uint8_t* data, size_t len, const st
         vec_push(&quasar->neighbor_filters, nf);
         // Also merge into the aggregated routing filter for local checks
         attenuated_bloom_filter_merge(quasar->routing, decoded);
-        platform_unlock(&quasar->lock);
+        platform_mutex_unlock(quasar->lock);
     } else {
         // No sender info — just merge into routing and destroy
         int result = attenuated_bloom_filter_merge(quasar->routing, decoded);
@@ -737,19 +737,19 @@ int quasar_propagate(quasar_t* quasar) {
     if (quasar == NULL) return -1;
     if (quasar->protocol == NULL) return -1;
 
-    platform_lock(&quasar->lock);
+    platform_mutex_lock(quasar->lock);
 
     // Encode the attenuated bloom filter to CBOR
     cbor_item_t* encoded_filter = attenuated_bloom_filter_encode(quasar->routing);
     if (encoded_filter == NULL) {
-        platform_unlock(&quasar->lock);
+        platform_mutex_unlock(quasar->lock);
         return -1;
     }
 
     // Read level_count under lock since it reads quasar->routing
     uint32_t level_count = attenuated_bloom_filter_level_count(quasar->routing);
 
-    platform_unlock(&quasar->lock);
+    platform_mutex_unlock(quasar->lock);
 
     // Build the QUASAR_GOSSIP packet: [type, level_count, encoded_filter]
     cbor_item_t* packet = cbor_new_definite_array(3);
@@ -807,7 +807,7 @@ int quasar_propagate(quasar_t* quasar) {
 
 int quasar_tick(quasar_t* quasar) {
     if (quasar == NULL) return -1;
-    platform_lock(&quasar->lock);
+    platform_mutex_lock(quasar->lock);
 
     // Walk through all local subscriptions and decrement their TTL.
     // Expired subscriptions are removed from both the local list and the
@@ -835,6 +835,6 @@ int quasar_tick(quasar_t* quasar) {
         i++;
     }
 
-    platform_unlock(&quasar->lock);
+    platform_mutex_unlock(quasar->lock);
     return 0;
 }

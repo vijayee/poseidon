@@ -54,7 +54,7 @@ typedef struct meridian_ring_set_t {
     uint32_t secondary_ring_size;       /**< Max nodes in each secondary ring */
     int32_t exponent_base;             /**< Logarithmic base for latency bucketing */
     meridian_ring_t rings[MERIDIAN_MAX_RINGS]; /**< Array of latency rings */
-    PLATFORMLOCKTYPE(lock);          /**< Thread-safe access */
+    platform_mutex_t* lock;          /**< Thread-safe access */
 } meridian_ring_set_t;
 
 // ============================================================================

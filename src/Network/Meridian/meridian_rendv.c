@@ -2,7 +2,7 @@
 // Created by victor on 4/19/26.
 //
 
-#include "../../Util/threadding.h"
+#include "../../Platform/platform_thread.h"
 #include "meridian_rendv.h"
 #include "meridian_relay.h"
 #include "meridian_stream.h"
@@ -123,7 +123,7 @@ meridian_rendv_handle_t* meridian_rendv_handle_create(void) {
 
     vec_init(&handle->peer_rendvs);
     vec_init(&handle->connections);
-    platform_lock_init(&handle->lock);
+    handle->lock = platform_mutex_create();;
     refcounter_init(&handle->refcounter);
     handle->msquic = NULL;
     handle->registration = NULL;
@@ -223,7 +223,7 @@ void meridian_rendv_handle_destroy(meridian_rendv_handle_t* handle) {
         // Do NOT close configuration/registration here — they are borrowed from
         // the protocol. The protocol owns and closes them in stop/destroy.
 
-        platform_lock_destroy(&handle->lock);
+        platform_mutex_destroy(handle->lock);;
         free(handle);
     }
 }
@@ -233,10 +233,10 @@ void meridian_rendv_handle_on_stream_data(meridian_rendv_handle_t* handle,
                                            void* ctx) {
     if (handle == NULL) return;
 
-    platform_lock(&handle->lock);
+    platform_mutex_lock(handle->lock);
     handle->on_stream_data = callback;
     handle->on_stream_data_ctx = ctx;
-    platform_unlock(&handle->lock);
+    platform_mutex_unlock(handle->lock);
 }
 
 /**
@@ -250,7 +250,7 @@ void meridian_rendv_handle_on_stream_data(meridian_rendv_handle_t* handle,
 int meridian_rendv_handle_set_local(meridian_rendv_handle_t* handle, meridian_rendv_t* rendv) {
     if (handle == NULL || rendv == NULL) return -1;
 
-    platform_lock(&handle->lock);
+    platform_mutex_lock(handle->lock);
 
     // Release previous local rendezvous if any
     if (handle->local_rendv) {
@@ -261,7 +261,7 @@ int meridian_rendv_handle_set_local(meridian_rendv_handle_t* handle, meridian_re
     }
 
     handle->local_rendv = (meridian_rendv_t*) refcounter_reference(&rendv->refcounter);
-    platform_unlock(&handle->lock);
+    platform_mutex_unlock(handle->lock);
     return 0;
 }
 
@@ -276,13 +276,13 @@ int meridian_rendv_handle_set_local(meridian_rendv_handle_t* handle, meridian_re
 int meridian_rendv_handle_add_peer(meridian_rendv_handle_t* handle, meridian_rendv_t* rendv) {
     if (handle == NULL || rendv == NULL) return -1;
 
-    platform_lock(&handle->lock);
+    platform_mutex_lock(handle->lock);
 
     // Check if already exists
     for (size_t i = 0; i < handle->peer_rendvs.length; i++) {
         if (handle->peer_rendvs.data[i]->addr == rendv->addr &&
             handle->peer_rendvs.data[i]->port == rendv->port) {
-            platform_unlock(&handle->lock);
+            platform_mutex_unlock(handle->lock);
             return 0;  // Already exists, no-op
         }
     }
@@ -291,7 +291,7 @@ int meridian_rendv_handle_add_peer(meridian_rendv_handle_t* handle, meridian_ren
     int result = vec_push(&handle->peer_rendvs,
         (meridian_rendv_t*) refcounter_reference(&rendv->refcounter));
 
-    platform_unlock(&handle->lock);
+    platform_mutex_unlock(handle->lock);
     return result;
 }
 
@@ -307,7 +307,7 @@ int meridian_rendv_handle_remove_peer(meridian_rendv_handle_t* handle,
                                       uint32_t addr, uint16_t port) {
     if (handle == NULL) return -1;
 
-    platform_lock(&handle->lock);
+    platform_mutex_lock(handle->lock);
 
     for (size_t i = 0; i < handle->peer_rendvs.length; i++) {
         if (handle->peer_rendvs.data[i]->addr == addr &&
@@ -317,12 +317,12 @@ int meridian_rendv_handle_remove_peer(meridian_rendv_handle_t* handle,
                 free(handle->peer_rendvs.data[i]);
             }
             vec_splice(&handle->peer_rendvs, i, 1);
-            platform_unlock(&handle->lock);
+            platform_mutex_unlock(handle->lock);
             return 0;
         }
     }
 
-    platform_unlock(&handle->lock);
+    platform_mutex_unlock(handle->lock);
     return -1;
 }
 
@@ -339,18 +339,18 @@ meridian_rendv_t* meridian_rendv_handle_find_peer(meridian_rendv_handle_t* handl
                                                   uint32_t addr, uint16_t port) {
     if (handle == NULL) return NULL;
 
-    platform_lock(&handle->lock);
+    platform_mutex_lock(handle->lock);
 
     for (size_t i = 0; i < handle->peer_rendvs.length; i++) {
         if (handle->peer_rendvs.data[i]->addr == addr &&
             handle->peer_rendvs.data[i]->port == port) {
-            platform_unlock(&handle->lock);
+            platform_mutex_unlock(handle->lock);
             return (meridian_rendv_t*) refcounter_reference(
                 &handle->peer_rendvs.data[i]->refcounter);
         }
     }
 
-    platform_unlock(&handle->lock);
+    platform_mutex_unlock(handle->lock);
     return NULL;
 }
 
@@ -390,10 +390,10 @@ rendv_uni_stream_callback(HQUIC Stream, void* Context,
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
         if (entry != NULL && entry->user_context != NULL) {
             meridian_rendv_handle_t* handle = (meridian_rendv_handle_t*)entry->user_context;
-            platform_lock(&handle->lock);
+            platform_mutex_lock(handle->lock);
             meridian_rendv_stream_data_cb_t cb = handle->on_stream_data;
             void* ctx = handle->on_stream_data_ctx;
-            platform_unlock(&handle->lock);
+            platform_mutex_unlock(handle->lock);
 
             if (cb != NULL) {
                 cb(ctx, entry->recv_buf, entry->recv_len, false);
@@ -461,10 +461,10 @@ rendv_bidi_stream_callback(HQUIC Stream, void* Context,
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
         if (entry != NULL && entry->user_context != NULL) {
             meridian_rendv_handle_t* handle = (meridian_rendv_handle_t*)entry->user_context;
-            platform_lock(&handle->lock);
+            platform_mutex_lock(handle->lock);
             meridian_rendv_stream_data_cb_t cb = handle->on_stream_data;
             void* ctx = handle->on_stream_data_ctx;
-            platform_unlock(&handle->lock);
+            platform_mutex_unlock(handle->lock);
 
             if (cb != NULL) {
                 cb(ctx, entry->recv_buf, entry->recv_len, true);
@@ -643,7 +643,7 @@ int meridian_rendv_handle_detect_nat(meridian_rendv_handle_t* handle,
     if (handle == NULL || callback == NULL) return -1;
     if (handle->local_rendv == NULL) return -1;
 
-    platform_lock(&handle->lock);
+    platform_mutex_lock(handle->lock);
 
     // Send address requests to relay servers
     if (relay_a != NULL) {
@@ -675,7 +675,7 @@ int meridian_rendv_handle_detect_nat(meridian_rendv_handle_t* handle,
     handle->local_rendv->nat_type = nat_type;
     meridian_nat_type_t result_type = nat_type;
 
-    platform_unlock(&handle->lock);
+    platform_mutex_unlock(handle->lock);
 
     callback(ctx, reflexive_addr, reflexive_port, result_type);
     return 0;

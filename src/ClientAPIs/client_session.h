@@ -7,10 +7,11 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "client_protocol.h"
 #include "../Channel/channel_manager.h"
+#include "../Platform/platform_thread.h"
 #include "../RefCounter/refcounter.h"
-#include "../Util/threadding.h"
 
 typedef struct poseidon_transport_t poseidon_transport_t;
 
@@ -35,7 +36,7 @@ typedef struct client_session_t {
     client_subscription_t subscriptions[CLIENT_SESSION_MAX_SUBSCRIPTIONS];
     size_t num_subscriptions;
     uint32_t next_request_id;
-    PLATFORMLOCKTYPE(lock);
+    platform_mutex_t* lock;
 } client_session_t;
 
 client_session_t* client_session_create(uint32_t session_id,

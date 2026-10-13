@@ -11,8 +11,9 @@ extern "C" {
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <sys/time.h>
-#include "../../Util/threadding.h"
+#include "../../Platform/platform_thread.h"
 #include "meridian.h"
 #include "meridian_query.h"
 #include "meridian_packet.h"
@@ -66,7 +67,7 @@ typedef struct meridian_gossip_scheduler_t {
     uint32_t interval_idx;            /**< Current interval index (init phase) */
     bool is_initial_phase;            /**< true = init phase, false = steady-state */
     struct timeval last_gossip;        /**< Timestamp of last gossip sent */
-    PLATFORMLOCKTYPE(lock);          /**< Thread-safe access */
+    platform_mutex_t* lock;          /**< Thread-safe access */
 } meridian_gossip_scheduler_t;
 
 // ============================================================================
@@ -217,7 +218,7 @@ typedef struct meridian_gossip_handle_t {
     meridian_gossip_config_t config;    /**< Configuration and callbacks */
     meridian_gossip_scheduler_t* scheduler; /**< Timing scheduler */
     meridian_query_table_t* query_table;   /**< Tracks in-flight gossip queries */
-    PLATFORMLOCKTYPE(lock);           /**< Thread-safe access */
+    platform_mutex_t* lock;           /**< Thread-safe access */
     vec_t(meridian_gossip_t*) active_gossips; /**< Currently active gossip exchanges */
     bool running;                      /**< Whether handle is active */
 } meridian_gossip_handle_t;

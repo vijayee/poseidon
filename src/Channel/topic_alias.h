@@ -3,7 +3,7 @@
 
 #include <stdint.h>
 #include <stddef.h>
-#include "Util/threadding.h"
+#include "Platform/platform_thread.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -21,7 +21,7 @@ typedef struct topic_alias_registry_t {
     topic_alias_entry_t* entries;
     size_t capacity;
     size_t count;
-    PLATFORMLOCKTYPE(lock);
+    platform_mutex_t* lock;
 } topic_alias_registry_t;
 
 topic_alias_registry_t* topic_alias_registry_create(size_t capacity);

@@ -10,7 +10,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include "../Util/threadding.h"
+#include "../Platform/platform_thread.h"
 
 #ifndef container_of
 #define container_of(ptr, type, member) \
@@ -66,7 +66,7 @@ typedef struct memory_pool_block_t {
 
 // Per-size-class pool
 typedef struct {
-    PLATFORMLOCKTYPE(lock);
+    platform_mutex_t* lock;
     memory_pool_block_t* free_list;  // Head of free blocks
     uint8_t* pool_start;              // Start of memory region
     size_t block_size;                // Size of each block

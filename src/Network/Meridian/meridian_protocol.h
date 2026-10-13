@@ -7,9 +7,10 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
-#include "../../Util/threadding.h"
+#include "../../Platform/platform_thread.h"
 #include "meridian.h"
 #include "meridian_ring.h"
 #include "meridian_query.h"
@@ -163,7 +164,7 @@ typedef struct meridian_protocol_t {
     size_t num_active_streams;                  /**< Count of active streams */
     size_t active_streams_cap;                  /**< Allocated capacity for stream entries */
 
-    PLATFORMLOCKTYPE(lock);                    /**< Thread-safe state access */
+    platform_mutex_t* lock;                    /**< Thread-safe state access */
     bool running;                              /**< True when protocol is active */
 } meridian_protocol_t;
 

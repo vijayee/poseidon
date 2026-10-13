@@ -7,9 +7,10 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include "client_session.h"
+#include "../Platform/platform_thread.h"
 #include "../RefCounter/refcounter.h"
-#include "../Util/threadding.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -66,11 +67,11 @@ typedef void (*poseidon_transport_on_message_cb)(poseidon_transport_t* transport
 struct poseidon_transport_t {
     const char* name;
     poseidon_transport_type_t type;
-    PLATFORMTHREADTYPE thread;
+    platform_thread_t* thread;
     void* loop;
     poseidon_channel_manager_t* manager;
     poseidon_transport_on_message_cb on_message;
-    PLATFORMLOCKTYPE(lock);
+    platform_mutex_t* lock;
     volatile bool running;
 
     int (*start)(poseidon_transport_t* self);

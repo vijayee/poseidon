@@ -13,7 +13,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <errno.h>
-#include <pthread.h>
+#include "../Platform/platform_thread.h"
 
 #define UNIX_MAX_CLIENTS 128
 #define UNIX_READ_BUF_SIZE 65536
@@ -353,7 +353,8 @@ static int unix_transport_start(poseidon_transport_t* self) {
     self->running = true;
 
     // Create thread
-    if (pthread_create(&self->thread, NULL, unix_transport_thread, self) != 0) {
+    self->thread = platform_thread_create((platform_thread_fn_t)unix_transport_thread, self);
+    if (self->thread == NULL) {
         log_error("unix transport: failed to create thread");
         pd_watcher_destroy(data->listen_watcher);
         data->listen_watcher = NULL;
@@ -379,7 +380,8 @@ static int unix_transport_stop(poseidon_transport_t* self) {
     pd_loop_stop(data->loop);
 
     // Wait for thread to finish
-    platform_join(self->thread);
+    platform_thread_join(self->thread);
+    self->thread = NULL;
 
     // Clean up clients
     for (size_t i = 0; i < data->num_clients; i++) {
@@ -464,7 +466,7 @@ poseidon_transport_t* poseidon_transport_unix_create(const char* socket_path,
     transport->start = unix_transport_start;
     transport->stop = unix_transport_stop;
     transport->send = unix_transport_send;
-    platform_lock_init(&transport->lock);
+    transport->lock = platform_mutex_create();;
 
     return transport;
 }
@@ -489,6 +491,6 @@ void poseidon_transport_destroy(poseidon_transport_t* transport) {
         free(data);
     }
 
-    platform_lock_destroy(&transport->lock);
+    platform_mutex_destroy(transport->lock);;
     free(transport);
 }

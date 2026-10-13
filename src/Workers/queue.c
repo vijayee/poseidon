@@ -3,7 +3,6 @@
 //
 #include "queue.h"
 #include "../Util/allocator.h"
-#include "../Util/threadding.h"
 
 
 void work_queue_init(work_queue_t* queue) {
@@ -49,7 +48,7 @@ work_t* work_dequeue(work_queue_t* queue) {
 void sharded_work_queue_init(sharded_work_queue_t* sq) {
   for (size_t i = 0; i < QUEUE_SHARDS; i++) {
     work_queue_init(&sq->queues[i]);
-    platform_lock_init(&sq->locks[i]);
+    sq->locks[i] = platform_mutex_create();
   }
   atomic_init(&sq->next_shard, 0);
 }
@@ -57,9 +56,9 @@ void sharded_work_queue_init(sharded_work_queue_t* sq) {
 void sharded_work_enqueue(sharded_work_queue_t* sq, work_t* work) {
   size_t shard = atomic_fetch_add(&sq->next_shard, 1) % QUEUE_SHARDS;
 
-  platform_lock(&sq->locks[shard]);
+  platform_mutex_lock(sq->locks[shard]);
   work_enqueue(&sq->queues[shard], work);
-  platform_unlock(&sq->locks[shard]);
+  platform_mutex_unlock(sq->locks[shard]);
 }
 
 work_t* sharded_work_dequeue(sharded_work_queue_t* sq) {
@@ -70,9 +69,9 @@ work_t* sharded_work_dequeue(sharded_work_queue_t* sq) {
 
   for (size_t i = 0; i < QUEUE_SHARDS; i++) {
     size_t idx = (shard + i) % QUEUE_SHARDS;
-    platform_lock(&sq->locks[idx]);
+    platform_mutex_lock(sq->locks[idx]);
     work_t* work = work_dequeue(&sq->queues[idx]);
-    platform_unlock(&sq->locks[idx]);
+    platform_mutex_unlock(sq->locks[idx]);
 
     if (work) return work;
   }
@@ -82,7 +81,7 @@ work_t* sharded_work_dequeue(sharded_work_queue_t* sq) {
 void sharded_work_queue_destroy(sharded_work_queue_t* sq) {
   for (size_t i = 0; i < QUEUE_SHARDS; i++) {
     // Drain and abort remaining work items in this shard
-    platform_lock(&sq->locks[i]);
+    platform_mutex_lock(sq->locks[i]);
     work_t* work;
     while ((work = work_dequeue(&sq->queues[i])) != NULL) {
       // Consume yield from original enqueue and abort the work
@@ -90,7 +89,7 @@ void sharded_work_queue_destroy(sharded_work_queue_t* sq) {
       work_abort(work);
       work_destroy(work);
     }
-    platform_unlock(&sq->locks[i]);
-    platform_lock_destroy(&sq->locks[i]);
+    platform_mutex_unlock(sq->locks[i]);
+    platform_mutex_destroy(sq->locks[i]);
   }
 }

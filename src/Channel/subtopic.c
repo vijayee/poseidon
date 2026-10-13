@@ -74,31 +74,31 @@ subtopic_table_t* subtopic_table_create(size_t capacity) {
     (void)capacity;
     subtopic_table_t* table = get_clear_memory(sizeof(subtopic_table_t));
     if (table == NULL) return NULL;
-    platform_lock_init(&table->lock);
+    table->lock = platform_mutex_create();
     return table;
 }
 
 void subtopic_table_destroy(subtopic_table_t* table) {
     if (table == NULL) return;
-    platform_lock_destroy(&table->lock);
+    platform_mutex_destroy(table->lock);
     free(table);
 }
 
 int subtopic_table_subscribe(subtopic_table_t* table, const char* path, uint32_t ttl) {
     if (table == NULL || path == NULL) return -1;
-    platform_lock(&table->lock);
+    platform_mutex_lock(table->lock);
 
     // Update existing entry if present
     for (size_t i = 0; i < table->count; i++) {
         if (strcmp(table->entries[i].path, path) == 0) {
             table->entries[i].ttl = ttl;
-            platform_unlock(&table->lock);
+            platform_mutex_unlock(table->lock);
             return 0;
         }
     }
 
     if (table->count >= SUBTOPIC_TABLE_MAX_SUBS) {
-        platform_unlock(&table->lock);
+        platform_mutex_unlock(table->lock);
         return -1;
     }
 
@@ -106,29 +106,29 @@ int subtopic_table_subscribe(subtopic_table_t* table, const char* path, uint32_t
             sizeof(table->entries[table->count].path) - 1);
     table->entries[table->count].ttl = ttl;
     table->count++;
-    platform_unlock(&table->lock);
+    platform_mutex_unlock(table->lock);
     return 0;
 }
 
 int subtopic_table_unsubscribe(subtopic_table_t* table, const char* path) {
     if (table == NULL || path == NULL) return -1;
-    platform_lock(&table->lock);
+    platform_mutex_lock(table->lock);
     for (size_t i = 0; i < table->count; i++) {
         if (strcmp(table->entries[i].path, path) == 0) {
             table->entries[i] = table->entries[table->count - 1];
             table->count--;
-            platform_unlock(&table->lock);
+            platform_mutex_unlock(table->lock);
             return 0;
         }
     }
-    platform_unlock(&table->lock);
+    platform_mutex_unlock(table->lock);
     return -1;
 }
 
 bool subtopic_table_is_subscribed(const subtopic_table_t* table, const char* path) {
     if (table == NULL || path == NULL) return false;
     subtopic_table_t* mut = (subtopic_table_t*)table;
-    platform_lock(&mut->lock);
+    platform_mutex_lock(mut->lock);
     bool found = false;
     for (size_t i = 0; i < table->count; i++) {
         if (strcmp(table->entries[i].path, path) == 0) {
@@ -136,14 +136,14 @@ bool subtopic_table_is_subscribed(const subtopic_table_t* table, const char* pat
             break;
         }
     }
-    platform_unlock(&mut->lock);
+    platform_mutex_unlock(mut->lock);
     return found;
 }
 
 bool subtopic_table_should_deliver(const subtopic_table_t* table, const char* message_subtopic) {
     if (table == NULL || message_subtopic == NULL) return false;
     subtopic_table_t* mut = (subtopic_table_t*)table;
-    platform_lock(&mut->lock);
+    platform_mutex_lock(mut->lock);
     bool deliver = false;
     for (size_t i = 0; i < table->count; i++) {
         if (subtopic_matches(message_subtopic, table->entries[i].path)) {
@@ -151,13 +151,13 @@ bool subtopic_table_should_deliver(const subtopic_table_t* table, const char* me
             break;
         }
     }
-    platform_unlock(&mut->lock);
+    platform_mutex_unlock(mut->lock);
     return deliver;
 }
 
 void subtopic_table_tick(subtopic_table_t* table) {
     if (table == NULL) return;
-    platform_lock(&table->lock);
+    platform_mutex_lock(table->lock);
     size_t write = 0;
     for (size_t read = 0; read < table->count; read++) {
         if (table->entries[read].ttl > 0) {
@@ -171,5 +171,5 @@ void subtopic_table_tick(subtopic_table_t* table) {
         }
     }
     table->count = write;
-    platform_unlock(&table->lock);
+    platform_mutex_unlock(table->lock);
 }

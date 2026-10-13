@@ -262,7 +262,7 @@ int main(int argc, char* argv[]) {
 
     // Main loop — tick channels and gossip
     while (g_running) {
-        platform_usleep(100000);
+        platform_sleep_ms(100);
         poseidon_channel_manager_tick_all(mgr);
         poseidon_channel_manager_gossip_all(mgr);
     }

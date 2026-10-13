@@ -7,7 +7,7 @@
 
 #include "elastic_bloom_filter.h"
 #include "../RefCounter/refcounter.h"
-#include "../Util/threadding.h"
+#include "../Platform/platform_thread.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -20,7 +20,7 @@ typedef struct attenuated_bloom_filter_t {
     refcounter_t refcounter;
     uint32_t level_count;
     elastic_bloom_filter_t** levels;
-    PLATFORMLOCKTYPE(lock);
+    platform_mutex_t* lock;
 } attenuated_bloom_filter_t;
 
 attenuated_bloom_filter_t* attenuated_bloom_filter_create(uint32_t levels, size_t size, uint32_t hash_count, float omega, uint32_t fp_bits);

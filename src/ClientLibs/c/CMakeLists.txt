@@ -84,7 +84,20 @@ set(POSEIDON_CLIENT_SOURCES
     ${POSEIDON_SRC_DIR}/Channel/channel_config_defaults.c
     ${POSEIDON_SRC_DIR}/Util/allocator.c
     ${POSEIDON_SRC_DIR}/Util/log.c
-    ${POSEIDON_SRC_DIR}/Util/threadding.c
+    ${POSEIDON_SRC_DIR}/Util/mkdir_p.c
+    ${POSEIDON_SRC_DIR}/Util/path_join.c
+    ${POSEIDON_SRC_DIR}/Util/rm_rf.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_atomic.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_dirs.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_file.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_local.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_posix_compat.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_process.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_random.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_socket.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_socket_watcher.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_thread.c
+    ${POSEIDON_SRC_DIR}/Platform/platform_time.c
     ${POSEIDON_SRC_DIR}/Crypto/key_pair.c
     ${POSEIDON_SRC_DIR}/RefCounter/refcounter.c
     ${POSEIDON_SRC_DIR}/Network/Meridian/msquic_singleton.c
@@ -99,6 +112,7 @@ set_target_properties(poseidon_client_objects PROPERTIES POSITION_INDEPENDENT_CO
 target_include_directories(poseidon_client_objects PUBLIC
     ${POSEIDON_SRC_DIR}
     ${POSEIDON_INCLUDE_DIR}
+    ${POSEIDON_SRC_DIR}/../deps/poll-dancer/include
 )
 
 # msquic include directory

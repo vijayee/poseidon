@@ -86,7 +86,7 @@ typedef struct meridian_relay_t {
     meridian_stream_entry_t** active_streams;        /**< Tracking array for open streams */
     size_t num_active_streams;                       /**< Number of active streams */
     size_t active_streams_cap;                       /**< Capacity of active_streams array */
-    PLATFORMLOCKTYPE(lock);                         /**< Thread-safe access */
+    platform_mutex_t* lock;                         /**< Thread-safe access */
 } meridian_relay_t;
 
 // ============================================================================

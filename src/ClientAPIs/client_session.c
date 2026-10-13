@@ -8,7 +8,7 @@
 #include "../Channel/channel_manager.h"
 #include "../Crypto/key_pair.h"
 #include "../Util/allocator.h"
-#include "../Util/threadding.h"
+#include "../Platform/platform_thread.h"
 #include <cbor.h>
 #include <string.h>
 #include "../Util/vec.h"
@@ -36,7 +36,7 @@ client_session_t* client_session_create(uint32_t session_id,
     session->num_subscriptions = 0;
     session->next_request_id = 1;
 
-    platform_lock_init(&session->lock);
+    session->lock = platform_mutex_create();
     refcounter_init(&session->refcounter);
     return session;
 }
@@ -45,7 +45,7 @@ void client_session_destroy(client_session_t* session) {
     if (session == NULL) return;
     refcounter_dereference(&session->refcounter);
     if (refcounter_count(&session->refcounter) == 0) {
-        platform_lock_destroy(&session->lock);
+        platform_mutex_destroy(session->lock);
         free(session);
     }
 }
@@ -434,19 +434,19 @@ int client_session_handle_request(client_session_t* session,
 int client_session_subscribe(client_session_t* session, const char* topic_path, bool loopback) {
     if (session == NULL || topic_path == NULL) return -1;
 
-    platform_lock(&session->lock);
+    platform_mutex_lock(session->lock);
 
     for (size_t i = 0; i < session->num_subscriptions; i++) {
         if (session->subscriptions[i].active &&
             strcmp(session->subscriptions[i].topic_path, topic_path) == 0) {
             session->subscriptions[i].loopback = loopback;
-            platform_unlock(&session->lock);
+            platform_mutex_unlock(session->lock);
             return 0;
         }
     }
 
     if (session->num_subscriptions >= CLIENT_SESSION_MAX_SUBSCRIPTIONS) {
-        platform_unlock(&session->lock);
+        platform_mutex_unlock(session->lock);
         return -1;
     }
 
@@ -457,7 +457,7 @@ int client_session_subscribe(client_session_t* session, const char* topic_path, 
     session->subscriptions[session->num_subscriptions].loopback = loopback;
     session->num_subscriptions++;
 
-    platform_unlock(&session->lock);
+    platform_mutex_unlock(session->lock);
 
     // Wire subscription to the Quasar overlay
     if (session->manager != NULL) {
@@ -480,7 +480,7 @@ int client_session_subscribe(client_session_t* session, const char* topic_path, 
 int client_session_unsubscribe(client_session_t* session, const char* topic_path) {
     if (session == NULL || topic_path == NULL) return -1;
 
-    platform_lock(&session->lock);
+    platform_mutex_lock(session->lock);
 
     for (size_t i = 0; i < session->num_subscriptions; i++) {
         if (session->subscriptions[i].active &&
@@ -490,7 +490,7 @@ int client_session_unsubscribe(client_session_t* session, const char* topic_path
                 session->subscriptions[j] = session->subscriptions[j + 1];
             }
             session->num_subscriptions--;
-            platform_unlock(&session->lock);
+            platform_mutex_unlock(session->lock);
 
             // Unsubscribe from Quasar if this was the last local subscriber
             if (session->manager != NULL &&
@@ -506,36 +506,36 @@ int client_session_unsubscribe(client_session_t* session, const char* topic_path
         }
     }
 
-    platform_unlock(&session->lock);
+    platform_mutex_unlock(session->lock);
     return -1;
 }
 
 bool client_session_is_subscribed(client_session_t* session, const char* topic_path) {
     if (session == NULL || topic_path == NULL) return false;
-    platform_lock(&session->lock);
+    platform_mutex_lock(session->lock);
     for (size_t i = 0; i < session->num_subscriptions; i++) {
         if (session->subscriptions[i].active &&
             strcmp(session->subscriptions[i].topic_path, topic_path) == 0) {
-            platform_unlock(&session->lock);
+            platform_mutex_unlock(session->lock);
             return true;
         }
     }
-    platform_unlock(&session->lock);
+    platform_mutex_unlock(session->lock);
     return false;
 }
 
 bool client_session_has_loopback(client_session_t* session, const char* topic_path) {
     if (session == NULL || topic_path == NULL) return false;
-    platform_lock(&session->lock);
+    platform_mutex_lock(session->lock);
     for (size_t i = 0; i < session->num_subscriptions; i++) {
         if (session->subscriptions[i].active &&
             strcmp(session->subscriptions[i].topic_path, topic_path) == 0) {
             bool lb = session->subscriptions[i].loopback;
-            platform_unlock(&session->lock);
+            platform_mutex_unlock(session->lock);
             return lb;
         }
     }
-    platform_unlock(&session->lock);
+    platform_mutex_unlock(session->lock);
     return false;
 }
 
@@ -550,12 +550,12 @@ static bool manager_has_other_subscriber(poseidon_channel_manager_t* mgr,
     // taking session->lock (prevents deadlock with dispatch path)
     vec_t(client_session_t*) snap;
     vec_init(&snap);
-    platform_lock(&mgr->lock);
+    platform_mutex_lock(mgr->lock);
     for (size_t i = 0; i < mgr->num_sessions; i++) {
         client_session_t* s = (client_session_t*)mgr->sessions[i];
         if (s != NULL && s != exclude) vec_push(&snap, s);
     }
-    platform_unlock(&mgr->lock);
+    platform_mutex_unlock(mgr->lock);
 
     bool found = false;
     for (int i = 0; i < snap.length; i++) {
@@ -574,14 +574,14 @@ void client_session_cleanup_subscriptions(client_session_t* session) {
     vec_t(char*) topics;
     vec_init(&topics);
 
-    platform_lock(&session->lock);
+    platform_mutex_lock(session->lock);
     for (size_t i = 0; i < session->num_subscriptions; i++) {
         if (session->subscriptions[i].active) {
             char* topic = strdup(session->subscriptions[i].topic_path);
             if (topic != NULL) vec_push(&topics, topic);
         }
     }
-    platform_unlock(&session->lock);
+    platform_mutex_unlock(session->lock);
 
     for (int i = 0; i < topics.length; i++) {
         if (!manager_has_other_subscriber(session->manager, topics.data[i], session)) {
@@ -633,12 +633,12 @@ static void session_dispatch_message(void* ctx, const uint8_t* topic, size_t top
     // manager->lock while taking session->lock (prevents deadlock)
     vec_t(client_session_t*) snap;
     vec_init(&snap);
-    platform_lock(&manager->lock);
+    platform_mutex_lock(manager->lock);
     for (size_t i = 0; i < manager->num_sessions; i++) {
         client_session_t* s = (client_session_t*)manager->sessions[i];
         if (s != NULL) vec_push(&snap, s);
     }
-    platform_unlock(&manager->lock);
+    platform_mutex_unlock(manager->lock);
 
     // Deliver to each subscribed session (no manager lock held)
     for (int i = 0; i < snap.length; i++) {

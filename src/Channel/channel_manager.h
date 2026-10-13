@@ -66,7 +66,7 @@ typedef struct poseidon_channel_manager_t {
     uint16_t port_range_end;
     work_pool_t* pool;
     hierarchical_timing_wheel_t* wheel;
-    PLATFORMLOCKTYPE(lock);
+    platform_mutex_t* lock;
     pending_bootstrap_t pending_bootstraps[POSEIDON_MAX_PENDING_BOOTSTRAPS];
     size_t num_pending_bootstraps;
     poseidon_tombstone_t tombstones[POSEIDON_TOMBSTONE_MAX];

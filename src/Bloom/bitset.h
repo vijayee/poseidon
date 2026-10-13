@@ -6,7 +6,7 @@
 #define POSEIDON_BITSET_H
 
 #include "../RefCounter/refcounter.h"
-#include "../Util/threadding.h"
+#include "../Platform/platform_thread.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -19,7 +19,7 @@ typedef struct bitset_t {
     refcounter_t refcounter;
     uint8_t* data;
     size_t size;          // bytes (not bits)
-    PLATFORMLOCKTYPE(lock);
+    platform_mutex_t* lock;
 } bitset_t;
 
 bitset_t* bitset_create(size_t byte_size);

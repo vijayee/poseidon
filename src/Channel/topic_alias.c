@@ -16,24 +16,24 @@ topic_alias_registry_t* topic_alias_registry_create(size_t capacity) {
 
     reg->capacity = capacity;
     reg->count = 0;
-    platform_lock_init(&reg->lock);
+    reg->lock = platform_mutex_create();
     return reg;
 }
 
 void topic_alias_registry_destroy(topic_alias_registry_t* reg) {
     if (reg == NULL) return;
     if (reg->entries) free(reg->entries);
-    platform_lock_destroy(&reg->lock);
+    platform_mutex_destroy(reg->lock);
     free(reg);
 }
 
 int topic_alias_register(topic_alias_registry_t* reg, const char* name, const char* topic) {
     if (reg == NULL || name == NULL || topic == NULL) return -1;
 
-    platform_lock(&reg->lock);
+    platform_mutex_lock(reg->lock);
 
     if (reg->count >= reg->capacity) {
-        platform_unlock(&reg->lock);
+        platform_mutex_unlock(reg->lock);
         return -1;
     }
 
@@ -41,23 +41,23 @@ int topic_alias_register(topic_alias_registry_t* reg, const char* name, const ch
     strncpy(reg->entries[reg->count].topic, topic, TOPIC_ALIAS_MAX_TOPIC - 1);
     reg->count++;
 
-    platform_unlock(&reg->lock);
+    platform_mutex_unlock(reg->lock);
     return 0;
 }
 
 int topic_alias_unregister(topic_alias_registry_t* reg, const char* name) {
     if (reg == NULL || name == NULL) return -1;
 
-    platform_lock(&reg->lock);
+    platform_mutex_lock(reg->lock);
     for (size_t i = 0; i < reg->count; i++) {
         if (strcmp(reg->entries[i].name, name) == 0) {
             reg->entries[i] = reg->entries[reg->count - 1];
             reg->count--;
-            platform_unlock(&reg->lock);
+            platform_mutex_unlock(reg->lock);
             return 0;
         }
     }
-    platform_unlock(&reg->lock);
+    platform_mutex_unlock(reg->lock);
     return -1;
 }
 
@@ -65,7 +65,7 @@ const char* topic_alias_resolve(const topic_alias_registry_t* reg, const char* n
     if (reg == NULL || name == NULL) return NULL;
 
     topic_alias_registry_t* mut = (topic_alias_registry_t*)reg;
-    platform_lock(&mut->lock);
+    platform_mutex_lock(mut->lock);
     const char* result = NULL;
     for (size_t i = 0; i < reg->count; i++) {
         if (strcmp(reg->entries[i].name, name) == 0) {
@@ -73,7 +73,7 @@ const char* topic_alias_resolve(const topic_alias_registry_t* reg, const char* n
             break;
         }
     }
-    platform_unlock(&mut->lock);
+    platform_mutex_unlock(mut->lock);
     return result;
 }
 
@@ -82,7 +82,7 @@ int topic_alias_resolve_ex(topic_alias_registry_t* reg, const char* name,
     if (reg == NULL || name == NULL || out == NULL) return -1;
     memset(out, 0, sizeof(*out));
 
-    platform_lock(&reg->lock);
+    platform_mutex_lock(reg->lock);
 
     size_t match_count = 0;
     for (size_t i = 0; i < reg->count; i++) {
@@ -98,7 +98,7 @@ int topic_alias_resolve_ex(topic_alias_registry_t* reg, const char* name,
         }
     }
 
-    platform_unlock(&reg->lock);
+    platform_mutex_unlock(reg->lock);
 
     out->num_candidates = match_count;
     if (match_count == 0) {

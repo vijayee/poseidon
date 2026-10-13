@@ -5,7 +5,7 @@
 #ifndef WAVEDB_QUEUE_H
 #define WAVEDB_QUEUE_H
 #include "work.h"
-#include "../Util/threadding.h"
+#include "../Platform/platform_thread.h"
 #include "../Util/atomic_compat.h"
 
 
@@ -25,7 +25,7 @@ typedef struct {
 // Sharded work queue for 16-way parallelism
 typedef struct {
   work_queue_t queues[QUEUE_SHARDS];
-  PLATFORMLOCKTYPE(locks[QUEUE_SHARDS]);
+  platform_mutex_t* locks[QUEUE_SHARDS];
   ATOMIC(uint64_t) next_shard;   // Round-robin counter (uses poseidon's src/Util/atomic_compat.h, which now exposes ATOMIC(T) per the B4 liboffs vendoring)
 } sharded_work_queue_t;
 

@@ -8,7 +8,7 @@
 #include "bitset.h"
 #include "bloom_filter.h"
 #include "../RefCounter/refcounter.h"
-#include "../Util/threadding.h"
+#include "../Platform/platform_thread.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -36,7 +36,7 @@ typedef struct elastic_bloom_filter_t {
     float omega;                         // Expansion threshold
     uint32_t fp_bits;                    // Fingerprint bit width
     size_t count;
-    PLATFORMLOCKTYPE(lock);
+    platform_mutex_t* lock;
 } elastic_bloom_filter_t;
 
 elastic_bloom_filter_t* elastic_bloom_filter_create(size_t size, uint32_t hash_count, float omega, uint32_t fp_bits);

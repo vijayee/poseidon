@@ -7,14 +7,15 @@
 #include <string.h>
 #include <stdatomic.h>
 #include <arpa/inet.h>
-#include "../Util/threadding.h"
+#include <pthread.h>
+#include "../Platform/platform_thread.h"
 
 // Thread-local pool size (number of IDs per batch)
 #define TXN_ID_BATCH_SIZE 1000
 
 // Global state for transaction ID generation
 static transaction_id_t g_current_txn_id = {0, 0, 0};
-static PLATFORMLOCKTYPE(g_txn_id_lock);
+static platform_mutex_t* g_txn_id_lock = NULL;
 static atomic_uint_fast64_t g_global_count = ATOMIC_VAR_INIT(0);
 
 // One-time initialization control
@@ -26,7 +27,7 @@ static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
 
 // Actual initialization function (called once)
 static void transaction_id_do_init(void) {
-    platform_lock_init(&g_txn_id_lock);
+    g_txn_id_lock = platform_mutex_create();
 }
 
 // Initialize global transaction ID generator (safe to call multiple times)
@@ -129,9 +130,9 @@ void transaction_id_advance_to(const transaction_id_t* target) {
     while (new_count > current) {
         if (atomic_compare_exchange_weak(&g_global_count, &current, new_count)) {
             // Successfully updated
-            platform_lock(&g_txn_id_lock);
+            platform_mutex_lock(g_txn_id_lock);
             g_current_txn_id = *target;
-            platform_unlock(&g_txn_id_lock);
+            platform_mutex_unlock(g_txn_id_lock);
             break;
         }
         // Another thread updated current, retry the comparison

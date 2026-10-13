@@ -10,7 +10,7 @@
 #include "Network/Meridian/msquic_singleton.h"
 #include "Util/allocator.h"
 #include "Util/log.h"
-#include "Util/threadding.h"
+#include "../../Platform/platform_thread.h"
 #include <cbor.h>
 #include <string.h>
 #include <stdio.h>
@@ -36,8 +36,8 @@ struct poseidon_client_t {
     void* event_cb_ctx;
     poseidon_response_cb_t response_cb;
     void* response_cb_ctx;
-    PLATFORMLOCKTYPE(lock);
-    PLATFORMTHREADTYPE(recv_thread);
+    platform_mutex_t* lock;
+    platform_thread_t* recv_thread;
     volatile bool running;
     uint8_t read_buf[CLIENT_READ_BUF_SIZE];
     size_t read_len;
@@ -49,8 +49,8 @@ struct poseidon_client_t {
     HQUIC quic_connection;
     HQUIC quic_stream;
     volatile bool quic_stream_ready;
-    PLATFORMCONDITIONTYPE(quic_handshake_done);
-    PLATFORMLOCKTYPE(quic_lock);
+    platform_condvar_t* quic_handshake_done;
+    platform_mutex_t* quic_lock;
 };
 
 // ============================================================================
@@ -99,18 +99,18 @@ static int send_frame(poseidon_client_t* client, const uint8_t* data, size_t len
     uint8_t header[FRAME_HEADER_SIZE];
     write_frame_header(header, (uint32_t)len);
 
-    platform_lock(&client->lock);
+    platform_mutex_lock(client->lock);
     ssize_t h = send(client->fd, header, FRAME_HEADER_SIZE, MSG_NOSIGNAL);
     ssize_t d = send(client->fd, data, len, MSG_NOSIGNAL);
-    platform_unlock(&client->lock);
+    platform_mutex_unlock(client->lock);
 
     return (h == FRAME_HEADER_SIZE && (size_t)d == len) ? 0 : -1;
 }
 
 static uint32_t next_id(poseidon_client_t* client) {
-    platform_lock(&client->lock);
+    platform_mutex_lock(client->lock);
     uint32_t id = client->next_request_id++;
-    platform_unlock(&client->lock);
+    platform_mutex_unlock(client->lock);
     return id;
 }
 
@@ -170,10 +170,10 @@ static QUIC_STATUS QUIC_API quic_client_stream_callback(HQUIC stream, void* cont
 
     switch (event->Type) {
     case QUIC_STREAM_EVENT_START_COMPLETE:
-        platform_lock(&client->quic_lock);
+        platform_mutex_lock(client->quic_lock);
         client->quic_stream_ready = true;
-        platform_unlock(&client->quic_lock);
-        platform_signal_condition(&client->quic_handshake_done);
+        platform_mutex_unlock(client->quic_lock);
+        platform_condvar_signal(client->quic_handshake_done);
         break;
 
     case QUIC_STREAM_EVENT_RECEIVE: {
@@ -268,7 +268,7 @@ static QUIC_STATUS QUIC_API quic_client_connection_callback(HQUIC connection, vo
             if (QUIC_FAILED(status)) {
                 log_error("quic client: StreamOpen failed: 0x%x", status);
                 client->connected = false;
-                platform_signal_condition(&client->quic_handshake_done);
+                platform_condvar_signal(client->quic_handshake_done);
                 return QUIC_STATUS_SUCCESS;
             }
 
@@ -277,7 +277,7 @@ static QUIC_STATUS QUIC_API quic_client_connection_callback(HQUIC connection, vo
                 log_error("quic client: StreamStart failed: 0x%x", status);
                 client->quic_api->StreamClose(stream);
                 client->connected = false;
-                platform_signal_condition(&client->quic_handshake_done);
+                platform_condvar_signal(client->quic_handshake_done);
                 return QUIC_STATUS_SUCCESS;
             }
 
@@ -287,7 +287,7 @@ static QUIC_STATUS QUIC_API quic_client_connection_callback(HQUIC connection, vo
 
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
         client->connected = false;
-        platform_signal_condition(&client->quic_handshake_done);
+        platform_condvar_signal(client->quic_handshake_done);
         client->quic_api->ConnectionClose(connection);
         break;
 
@@ -403,18 +403,18 @@ poseidon_client_t* poseidon_client_connect(const char* transport_url) {
         client->next_request_id = 1;
         client->connected = false; // Set true in CONNECTED callback
         client->running = true;
-        platform_lock_init(&client->lock);
-        platform_lock_init(&client->quic_lock);
-        platform_condition_init(&client->quic_handshake_done);
+        client->lock = platform_mutex_create();;
+        client->quic_lock = platform_mutex_create();;
+        client->quic_handshake_done = platform_condvar_create();;
 
         // Open registration
         HQUIC registration = NULL;
         QUIC_STATUS status = api->RegistrationOpen(NULL, &registration);
         if (QUIC_FAILED(status)) {
             log_error("quic client: RegistrationOpen failed: 0x%x", status);
-            platform_condition_destroy(&client->quic_handshake_done);
-            platform_lock_destroy(&client->quic_lock);
-            platform_lock_destroy(&client->lock);
+            platform_condvar_destroy(client->quic_handshake_done);;
+            platform_mutex_destroy(client->quic_lock);;
+            platform_mutex_destroy(client->lock);;
             free(client);
             poseidon_msquic_close();
             return NULL;
@@ -432,9 +432,9 @@ poseidon_client_t* poseidon_client_connect(const char* transport_url) {
         if (QUIC_FAILED(status)) {
             log_error("quic client: ConfigurationOpen failed: 0x%x", status);
             api->RegistrationClose(registration);
-            platform_condition_destroy(&client->quic_handshake_done);
-            platform_lock_destroy(&client->quic_lock);
-            platform_lock_destroy(&client->lock);
+            platform_condvar_destroy(client->quic_handshake_done);;
+            platform_mutex_destroy(client->quic_lock);;
+            platform_mutex_destroy(client->lock);;
             free(client);
             poseidon_msquic_close();
             return NULL;
@@ -453,9 +453,9 @@ poseidon_client_t* poseidon_client_connect(const char* transport_url) {
             log_error("quic client: ConfigurationLoadCredential failed: 0x%x", status);
             api->ConfigurationClose(configuration);
             api->RegistrationClose(registration);
-            platform_condition_destroy(&client->quic_handshake_done);
-            platform_lock_destroy(&client->quic_lock);
-            platform_lock_destroy(&client->lock);
+            platform_condvar_destroy(client->quic_handshake_done);;
+            platform_mutex_destroy(client->quic_lock);;
+            platform_mutex_destroy(client->lock);;
             free(client);
             poseidon_msquic_close();
             return NULL;
@@ -470,9 +470,9 @@ poseidon_client_t* poseidon_client_connect(const char* transport_url) {
             log_error("quic client: ConnectionOpen failed: 0x%x", status);
             api->ConfigurationClose(configuration);
             api->RegistrationClose(registration);
-            platform_condition_destroy(&client->quic_handshake_done);
-            platform_lock_destroy(&client->quic_lock);
-            platform_lock_destroy(&client->lock);
+            platform_condvar_destroy(client->quic_handshake_done);;
+            platform_mutex_destroy(client->quic_lock);;
+            platform_mutex_destroy(client->lock);;
             free(client);
             poseidon_msquic_close();
             return NULL;
@@ -487,20 +487,20 @@ poseidon_client_t* poseidon_client_connect(const char* transport_url) {
             api->ConnectionClose(connection);
             api->ConfigurationClose(configuration);
             api->RegistrationClose(registration);
-            platform_condition_destroy(&client->quic_handshake_done);
-            platform_lock_destroy(&client->quic_lock);
-            platform_lock_destroy(&client->lock);
+            platform_condvar_destroy(client->quic_handshake_done);;
+            platform_mutex_destroy(client->quic_lock);;
+            platform_mutex_destroy(client->lock);;
             free(client);
             poseidon_msquic_close();
             return NULL;
         }
 
         // Wait for handshake + stream to be ready
-        platform_lock(&client->quic_lock);
+        platform_mutex_lock(client->quic_lock);
         while (!client->quic_stream_ready && client->connected) {
-            platform_condition_wait(&client->quic_lock, &client->quic_handshake_done);
+            platform_condvar_wait(client->quic_handshake_done, client->quic_lock);
         }
-        platform_unlock(&client->quic_lock);
+        platform_mutex_unlock(client->quic_lock);
 
         if (!client->quic_stream_ready) {
             log_error("quic client: failed to establish stream");
@@ -508,9 +508,9 @@ poseidon_client_t* poseidon_client_connect(const char* transport_url) {
             api->ConnectionClose(connection);
             api->ConfigurationClose(configuration);
             api->RegistrationClose(registration);
-            platform_condition_destroy(&client->quic_handshake_done);
-            platform_lock_destroy(&client->quic_lock);
-            platform_lock_destroy(&client->lock);
+            platform_condvar_destroy(client->quic_handshake_done);;
+            platform_mutex_destroy(client->quic_lock);;
+            platform_mutex_destroy(client->lock);;
             free(client);
             poseidon_msquic_close();
             return NULL;
@@ -580,10 +580,10 @@ poseidon_client_t* poseidon_client_connect(const char* transport_url) {
     client->connected = true;
     client->next_request_id = 1;
     client->running = true;
-    platform_lock_init(&client->lock);
+    client->lock = platform_mutex_create();;
 
-    if (pthread_create(&client->recv_thread, NULL, recv_thread_func, client) != 0) {
-        platform_lock_destroy(&client->lock);
+    if (client->recv_thread = platform_thread_create((platform_thread_fn_t)recv_thread_func, client) != 0) {
+        platform_mutex_destroy(client->lock);;
         free(client);
         close(fd);
         return NULL;
@@ -620,15 +620,16 @@ void poseidon_client_disconnect(poseidon_client_t* client) {
             client->quic_registration = NULL;
         }
         poseidon_msquic_close();
-        platform_condition_destroy(&client->quic_handshake_done);
-        platform_lock_destroy(&client->quic_lock);
+        platform_condvar_destroy(client->quic_handshake_done);;
+        platform_mutex_destroy(client->quic_lock);;
     } else {
         shutdown(client->fd, SHUT_RDWR);
-        pthread_join(client->recv_thread, NULL);
+        platform_thread_join(client->recv_thread);
+        client->recv_thread = NULL;
         close(client->fd);
     }
 
-    platform_lock_destroy(&client->lock);
+    platform_mutex_destroy(client->lock);;
     free(client);
 }
 

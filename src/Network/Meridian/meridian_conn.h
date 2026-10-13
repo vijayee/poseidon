@@ -10,7 +10,7 @@
 #include "meridian.h"
 #include "meridian_rendv.h"
 #include "../../RefCounter/refcounter.h"
-#include "../../Util/threadding.h"
+#include "../../Platform/platform_thread.h"
 #include "msquic.h"
 #include "meridian_stream.h"
 
@@ -85,7 +85,7 @@ typedef struct meridian_conn_t {
     meridian_nat_type_t peer_nat_type;   /**< Peer's NAT type */
     uint32_t direct_attempts;            /**< Count of direct connection attempts */
     uint64_t last_direct_attempt_ms;     /**< Timestamp of last direct attempt */
-    PLATFORMLOCKTYPE(lock);              /**< Thread-safe access */
+    platform_mutex_t* lock;              /**< Thread-safe access */
 } meridian_conn_t;
 
 // ============================================================================

@@ -111,7 +111,7 @@ meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
         relay->config.keepalive_interval_ms = 10000;
     }
 
-    platform_lock_init(&relay->lock);
+    relay->lock = platform_mutex_create();;
     refcounter_init(&relay->refcounter);
 
     // Create QUIC configuration if ALPN is set
@@ -140,7 +140,7 @@ meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
 
         if (QUIC_FAILED(Status)) {
             free(relay->active_streams);
-            platform_lock_destroy(&relay->lock);
+            platform_mutex_destroy(relay->lock);;
             free(relay);
             return NULL;
         }
@@ -167,7 +167,7 @@ meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
             relay->msquic->ConfigurationClose(relay->configuration);
             relay->configuration = NULL;
             free(relay->active_streams);
-            platform_lock_destroy(&relay->lock);
+            platform_mutex_destroy(relay->lock);;
             free(relay);
             return NULL;
         }
@@ -198,7 +198,7 @@ void meridian_relay_destroy(meridian_relay_t* relay) {
             relay->configuration = NULL;
         }
 
-        platform_lock_destroy(&relay->lock);
+        platform_mutex_destroy(relay->lock);;
         free(relay);
     }
 }
@@ -210,7 +210,7 @@ void meridian_relay_destroy(meridian_relay_t* relay) {
 int meridian_relay_connect(meridian_relay_t* relay) {
     if (relay == NULL || relay->connected) return -1;
 
-    platform_lock(&relay->lock);
+    platform_mutex_lock(relay->lock);
 
     // Open QUIC connection
     QUIC_STATUS Status = relay->msquic->ConnectionOpen(
@@ -220,7 +220,7 @@ int meridian_relay_connect(meridian_relay_t* relay) {
         &relay->connection);
 
     if (QUIC_FAILED(Status)) {
-        platform_unlock(&relay->lock);
+        platform_mutex_unlock(relay->lock);
         return -1;
     }
 
@@ -248,21 +248,21 @@ int meridian_relay_connect(meridian_relay_t* relay) {
     if (QUIC_FAILED(Status)) {
         relay->msquic->ConnectionClose(relay->connection);
         relay->connection = NULL;
-        platform_unlock(&relay->lock);
+        platform_mutex_unlock(relay->lock);
         return -1;
     }
 
-    platform_unlock(&relay->lock);
+    platform_mutex_unlock(relay->lock);
     return 0;
 }
 
 int meridian_relay_disconnect(meridian_relay_t* relay) {
     if (relay == NULL) return -1;
 
-    platform_lock(&relay->lock);
+    platform_mutex_lock(relay->lock);
 
     if (!relay->connected && relay->connection == NULL) {
-        platform_unlock(&relay->lock);
+        platform_mutex_unlock(relay->lock);
         return 0;
     }
 
@@ -277,7 +277,7 @@ int meridian_relay_disconnect(meridian_relay_t* relay) {
 
     relay->connected = false;
 
-    platform_unlock(&relay->lock);
+    platform_mutex_unlock(relay->lock);
     return 0;
 }
 
@@ -383,9 +383,9 @@ int meridian_relay_send_addr_request(meridian_relay_t* relay) {
 
     entry->stream = stream;
 
-    platform_lock(&relay->lock);
+    platform_mutex_lock(relay->lock);
     relay_track_stream(relay, entry);
-    platform_unlock(&relay->lock);
+    platform_mutex_unlock(relay->lock);
 
     // Copy data into send buffer for SEND_COMPLETE callback
     uint8_t* send_buf = (uint8_t*)get_memory(msg_len);
@@ -422,20 +422,20 @@ void meridian_relay_on_datagram(meridian_relay_t* relay,
                                  meridian_relay_datagram_cb_t callback, void* ctx) {
     if (relay == NULL) return;
 
-    platform_lock(&relay->lock);
+    platform_mutex_lock(relay->lock);
     relay->on_datagram = callback;
     relay->on_datagram_ctx = ctx;
-    platform_unlock(&relay->lock);
+    platform_mutex_unlock(relay->lock);
 }
 
 void meridian_relay_on_addr_response(meridian_relay_t* relay,
                                       meridian_relay_addr_cb_t callback, void* ctx) {
     if (relay == NULL) return;
 
-    platform_lock(&relay->lock);
+    platform_mutex_lock(relay->lock);
     relay->on_addr_response = callback;
     relay->on_addr_response_ctx = ctx;
-    platform_unlock(&relay->lock);
+    platform_mutex_unlock(relay->lock);
 }
 
 // ============================================================================
@@ -505,9 +505,9 @@ static void relay_process_uni_message(meridian_relay_t* relay,
             cbor_decref(&item);
 
             if (addr_resp != NULL) {
-                platform_lock(&relay->lock);
+                platform_mutex_lock(relay->lock);
                 relay->local_endpoint_id = addr_resp->endpoint_id;
-                platform_unlock(&relay->lock);
+                platform_mutex_unlock(relay->lock);
 
                 if (relay->on_addr_response != NULL) {
                     relay->on_addr_response(
@@ -584,9 +584,9 @@ static void relay_process_bidi_message(meridian_relay_t* relay,
         cbor_decref(&item);
 
         if (addr_resp != NULL) {
-            platform_lock(&relay->lock);
+            platform_mutex_lock(relay->lock);
             relay->local_endpoint_id = addr_resp->endpoint_id;
-            platform_unlock(&relay->lock);
+            platform_mutex_unlock(relay->lock);
 
             if (relay->on_addr_response != NULL) {
                 relay->on_addr_response(
@@ -652,9 +652,9 @@ relay_uni_stream_callback(HQUIC Stream, void* Context,
             ? (meridian_relay_t*)entry->user_context : NULL;
         if (entry != NULL) {
             if (relay_ctx != NULL) {
-                platform_lock(&relay_ctx->lock);
+                platform_mutex_lock(relay_ctx->lock);
                 relay_remove_stream(relay_ctx, entry);
-                platform_unlock(&relay_ctx->lock);
+                platform_mutex_unlock(relay_ctx->lock);
             }
             meridian_stream_entry_destroy(entry);
         }
@@ -730,9 +730,9 @@ relay_bidi_stream_callback(HQUIC Stream, void* Context,
             ? (meridian_relay_t*)entry->user_context : NULL;
         if (entry != NULL) {
             if (relay_ctx != NULL) {
-                platform_lock(&relay_ctx->lock);
+                platform_mutex_lock(relay_ctx->lock);
                 relay_remove_stream(relay_ctx, entry);
-                platform_unlock(&relay_ctx->lock);
+                platform_mutex_unlock(relay_ctx->lock);
             }
             meridian_stream_entry_destroy(entry);
         }
@@ -761,9 +761,9 @@ RelayConnectionCallback(HQUIC Connection, void* Context,
 
     switch (Event->Type) {
     case QUIC_CONNECTION_EVENT_CONNECTED:
-        platform_lock(&relay->lock);
+        platform_mutex_lock(relay->lock);
         relay->connected = true;
-        platform_unlock(&relay->lock);
+        platform_mutex_unlock(relay->lock);
 
         // Send initial address request on a bidi stream
         meridian_relay_send_addr_request(relay);
@@ -771,16 +771,16 @@ RelayConnectionCallback(HQUIC Connection, void* Context,
 
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
-        platform_lock(&relay->lock);
+        platform_mutex_lock(relay->lock);
         relay->connected = false;
-        platform_unlock(&relay->lock);
+        platform_mutex_unlock(relay->lock);
         return QUIC_STATUS_SUCCESS;
 
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
-        platform_lock(&relay->lock);
+        platform_mutex_lock(relay->lock);
         relay->connected = false;
         relay->connection = NULL;
-        platform_unlock(&relay->lock);
+        platform_mutex_unlock(relay->lock);
         return QUIC_STATUS_SUCCESS;
 
     case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
@@ -801,9 +801,9 @@ RelayConnectionCallback(HQUIC Connection, void* Context,
 
         relay->msquic->SetCallbackHandler(stream, callback, entry);
 
-        platform_lock(&relay->lock);
+        platform_mutex_lock(relay->lock);
         relay_track_stream(relay, entry);
-        platform_unlock(&relay->lock);
+        platform_mutex_unlock(relay->lock);
 
         return QUIC_STATUS_SUCCESS;
     }

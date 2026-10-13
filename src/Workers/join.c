@@ -13,13 +13,13 @@ async_join_t* async_join_create(int count) {
     async_join_t* join = get_clear_memory(sizeof(async_join_t));
     if (join == NULL) return NULL;
 
-    platform_lock_init(&join->lock);
-    platform_condition_init(&join->condition);
+    join->lock = platform_mutex_create();
+    join->condition = platform_condvar_create();
 
     join->results = calloc(count, sizeof(void*));
     if (join->results == NULL) {
-        platform_lock_destroy(&join->lock);
-        platform_condition_destroy(&join->condition);
+        platform_mutex_destroy(join->lock);
+        platform_condvar_destroy(join->condition);
         free(join);
         return NULL;
     }
@@ -33,8 +33,8 @@ async_join_t* async_join_create(int count) {
 void async_join_destroy(async_join_t* join) {
     if (join == NULL) return;
 
-    platform_lock_destroy(&join->lock);
-    platform_condition_destroy(&join->condition);
+    platform_mutex_destroy(join->lock);
+    platform_condvar_destroy(join->condition);
     free(join->results);
     free(join);
 }
@@ -42,20 +42,20 @@ void async_join_destroy(async_join_t* join) {
 void async_join_complete(async_join_t* join, int index, void* result) {
     if (join == NULL || index < 0 || index >= join->count) return;
 
-    platform_lock(&join->lock);
+    platform_mutex_lock(join->lock);
     join->results[index] = result;
     join->pending--;
-    platform_unlock(&join->lock);
+    platform_mutex_unlock(join->lock);
 
-    platform_signal_condition(&join->condition);
+    platform_condvar_signal(join->condition);
 }
 
 void async_join_wait(async_join_t* join) {
     if (join == NULL) return;
 
-    platform_lock(&join->lock);
+    platform_mutex_lock(join->lock);
     while (join->pending > 0) {
-        platform_condition_wait(&join->lock, &join->condition);
+        platform_condvar_wait(join->condition, join->lock);
     }
-    platform_unlock(&join->lock);
+    platform_mutex_unlock(join->lock);
 }

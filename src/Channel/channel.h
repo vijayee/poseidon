@@ -69,7 +69,7 @@ typedef struct poseidon_channel_t {
     void* publisher_session;    /**< Set before publish for self-delivery filtering */
     poseidon_channel_intercept_cb_t intercept_cb;  /**< Intercepts Quasar messages (e.g. bootstrap) */
     void* intercept_ctx;
-    PLATFORMLOCKTYPE(lock);
+    platform_mutex_t* lock;
 } poseidon_channel_t;
 
 // ============================================================================

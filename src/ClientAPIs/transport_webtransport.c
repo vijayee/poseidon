@@ -67,7 +67,7 @@ struct wt_transport_data_t {
     char* key_path;
     wt_client_t* clients[WT_MAX_CLIENTS];
     size_t num_clients;
-    PLATFORMLOCKTYPE(lock);
+    platform_mutex_t* lock;
     volatile bool stopping;
 };
 
@@ -144,9 +144,9 @@ static wt_client_t* wt_client_create(wtf_session_t* session,
     client->client_session->transport = transport;
 
     // Add to client list and register with channel manager
-    platform_lock(&data->lock);
+    platform_mutex_lock(data->lock);
     data->clients[data->num_clients++] = client;
-    platform_unlock(&data->lock);
+    platform_mutex_unlock(data->lock);
 
     poseidon_channel_manager_register_session(transport->manager,
                                               client->client_session);
@@ -388,10 +388,10 @@ static void wt_session_callback(const wtf_session_event_t* event) {
         // remaining clients — avoid double-destroy
         if (data->stopping) break;
 
-        platform_lock(&data->lock);
+        platform_mutex_lock(data->lock);
         wt_remove_client(data, client);
         wt_client_destroy(client);
-        platform_unlock(&data->lock);
+        platform_mutex_unlock(data->lock);
         break;
     }
 
@@ -540,13 +540,13 @@ static int webtransport_stop(poseidon_transport_t* self) {
     data->stopping = true;
 
     // Signal all clients to stop
-    platform_lock(&data->lock);
+    platform_mutex_lock(data->lock);
     for (size_t i = 0; i < data->num_clients; i++) {
         if (data->clients[i] != NULL) {
             data->clients[i]->shutting_down = true;
         }
     }
-    platform_unlock(&data->lock);
+    platform_mutex_unlock(data->lock);
 
     // Stop server — libwtf handles closing sessions
     if (data->server != NULL) {
@@ -554,7 +554,7 @@ static int webtransport_stop(poseidon_transport_t* self) {
     }
 
     // Destroy remaining clients that weren't cleaned up by session callbacks
-    platform_lock(&data->lock);
+    platform_mutex_lock(data->lock);
     for (size_t i = 0; i < data->num_clients; i++) {
         if (data->clients[i] != NULL) {
             wt_client_destroy(data->clients[i]);
@@ -562,7 +562,7 @@ static int webtransport_stop(poseidon_transport_t* self) {
         }
     }
     data->num_clients = 0;
-    platform_unlock(&data->lock);
+    platform_mutex_unlock(data->lock);
 
     if (data->server != NULL) {
         wtf_server_destroy(data->server);
@@ -582,9 +582,9 @@ static int webtransport_send(poseidon_transport_t* self, int client_id,
 
     // Find the client by session_id stored in client_fd
     wt_client_t* target = NULL;
-    platform_lock(&data->lock);
+    platform_mutex_lock(data->lock);
     target = wt_find_client_by_id(data, (uint32_t)client_id);
-    platform_unlock(&data->lock);
+    platform_mutex_unlock(data->lock);
 
     if (target == NULL || target->stream == NULL || target->shutting_down) {
         return -1;
@@ -627,11 +627,11 @@ static void webtransport_transport_destroy(poseidon_transport_t* transport) {
 
         free(data->cert_path);
         free(data->key_path);
-        platform_lock_destroy(&data->lock);
+        platform_mutex_destroy(data->lock);;
         free(data);
     }
 
-    platform_lock_destroy(&transport->lock);
+    platform_mutex_destroy(transport->lock);;
     free(transport);
 }
 
@@ -667,7 +667,7 @@ poseidon_transport_t* poseidon_transport_webtransport_create(
     data->stopping = false;
     data->context = NULL;
     data->server = NULL;
-    platform_lock_init(&data->lock);
+    data->lock = platform_mutex_create();;
 
     transport->name = "webtransport";
     transport->type = POSEIDON_TRANSPORT_WEBTRANSPORT;
@@ -677,7 +677,7 @@ poseidon_transport_t* poseidon_transport_webtransport_create(
     transport->stop = webtransport_stop;
     transport->send = webtransport_send;
     transport->destroy = webtransport_transport_destroy;
-    platform_lock_init(&transport->lock);
+    transport->lock = platform_mutex_create();;
 
     return transport;
 }

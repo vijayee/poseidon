@@ -58,6 +58,7 @@ set(CRYPTO_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Crypto)
 set(CHANNEL_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Channel)
 set(CLIENT_APIS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/ClientAPIs)
 set(CLIENT_LIBS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/ClientLibs/c)
+set(PLATFORM_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Platform)
 
 # Poseidon Library
 set(POSEIDON_SOURCES
@@ -81,7 +82,6 @@ set(POSEIDON_SOURCES
     ${UTIL_SRC_DIR}/mkdir_p.c
     ${UTIL_SRC_DIR}/path_join.c
     ${UTIL_SRC_DIR}/rm_rf.c
-    ${UTIL_SRC_DIR}/threadding.c
     ${REFCOUNTER_SRC_DIR}/refcounter.c
     ${WORKERS_SRC_DIR}/pool.c
     ${WORKERS_SRC_DIR}/work.c
@@ -121,6 +121,17 @@ set(POSEIDON_SOURCES
     ${CLIENT_APIS_SRC_DIR}/transport_quic.c
     ${CLIENT_APIS_SRC_DIR}/transport_webtransport.c
     ${CLIENT_LIBS_SRC_DIR}/poseidon_client.c
+    ${PLATFORM_SRC_DIR}/platform_atomic.c
+    ${PLATFORM_SRC_DIR}/platform_dirs.c
+    ${PLATFORM_SRC_DIR}/platform_file.c
+    ${PLATFORM_SRC_DIR}/platform_local.c
+    ${PLATFORM_SRC_DIR}/platform_posix_compat.c
+    ${PLATFORM_SRC_DIR}/platform_process.c
+    ${PLATFORM_SRC_DIR}/platform_random.c
+    ${PLATFORM_SRC_DIR}/platform_socket.c
+    ${PLATFORM_SRC_DIR}/platform_socket_watcher.c
+    ${PLATFORM_SRC_DIR}/platform_thread.c
+    ${PLATFORM_SRC_DIR}/platform_time.c
 )
 
 # Platform-specific transport stubs
