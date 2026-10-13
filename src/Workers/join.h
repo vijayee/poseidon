@@ -16,7 +16,7 @@ extern "C" {
 typedef struct {
     PLATFORMLOCKTYPE(lock);
     PLATFORMCONDITIONTYPE(condition);
-    ATOMIC_TYPE(int) pending;    // Number of outstanding operations
+    ATOMIC(int) pending;    // Number of outstanding operations (uses poseidon's src/Util/atomic_compat.h, which now exposes ATOMIC(T) per the B4 liboffs vendoring)
     void** results;             // Array[index] = result payload from each op
     int count;                 // Total number of operations
 } async_join_t;

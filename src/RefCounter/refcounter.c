@@ -6,9 +6,14 @@
 //      path is strictly stronger (single 32-bit CAS transferring count/yield/
 //      pending atomically vs. the original yield-CAS-then-count-add race).
 //   2. No OFFS_ATOMIC macro is needed because the lock branch is gone.
-//   3. The struct field is ATOMIC_TYPE(uint32_t) — poseidon's
-//      src/Util/atomic_compat.h uses ATOMIC_TYPE(T), not liboffs's ATOMIC(T).
-//      The C11 atomic_*_explicit functions are unchanged.
+//   3. The struct field is ATOMIC(uint32_t) from poseidon's
+//      src/Util/atomic_compat.h. Poseidon's prior local copy of that
+//      header defined ATOMIC_TYPE(T); the B4 vendoring (commit 1.1,
+//      see docs/actor-migration.md § 6.1) replaced it with the liboffs
+//      version (now under guard POSEIDON_ATOMIC_COMPAT_H) which exposes
+//      ATOMIC(T). The three call sites that used ATOMIC_TYPE were
+//      cascaded to ATOMIC in the same commit. The C11
+//      atomic_*_explicit functions are unchanged.
 //   4. Added <stddef.h> for NULL (liboffs got it transitively via
 //      Platform/platform.h; that header does not exist in poseidon).
 //

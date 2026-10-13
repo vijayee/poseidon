@@ -2,13 +2,17 @@
 // Vendored from liboffs/src/RefCounter/refcounter.h
 // Local modifications:
 //   - include guard renamed LIBOFFS_REFCOUNTER_H -> POSEIDON_REFCOUNTER_H
-//   - ATOMIC(uint32_t) -> ATOMIC_TYPE(uint32_t) to match poseidon's
-//     src/Util/atomic_compat.h, which exposes ATOMIC_TYPE(T) instead of
-//     liboffs's ATOMIC(T)
 //   - dropped #include "../Platform/platform.h": unreachable once the
 //     lock-based #else branch is removed (poseidon has no native
 //     src/Platform/platform.h; the dep subset is a private liboffs detail
 //     that does not need to be re-vendored just to satisfy this header)
+//   - the struct field uses ATOMIC(uint32_t) from poseidon's
+//     src/Util/atomic_compat.h. Poseidon's prior local copy of that
+//     header defined ATOMIC_TYPE(T); the B4 vendoring (commit 1.1,
+//     see docs/actor-migration.md § 6.1) replaced it with the liboffs
+//     version (now under guard POSEIDON_ATOMIC_COMPAT_H) which exposes
+//     ATOMIC(T). The three call sites that used ATOMIC_TYPE were
+//     cascaded to ATOMIC in the same commit.
 //
 // The single-32-bit-CAS refcounter is the canonical refcounter. It is what
 // every other subsystem in poseidon now expects; the older split-atomics
@@ -33,7 +37,7 @@
    debug/introspection only and no longer branches behavior.
    See docs/actor-migration.md § 2. */
 typedef struct refcounter_t {
-  ATOMIC_TYPE(uint32_t) packed_state;
+  ATOMIC(uint32_t) packed_state;
   uint8_t is_actor;
 } refcounter_t;
 
