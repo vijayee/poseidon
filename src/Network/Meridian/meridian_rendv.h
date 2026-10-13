@@ -24,6 +24,21 @@ extern "C" {
 #define MERIDIAN_RENDV_MAX_CONNECTIONS 16
 
 // ============================================================================
+// CALLBACK TYPES
+// ============================================================================
+
+/**
+ * Callback invoked when a complete message is received on a tunnel stream.
+ *
+ * @param ctx    User context from meridian_rendv_handle_on_stream_data
+ * @param data   Received message data (complete, FIN-delimited)
+ * @param len    Length of received data in bytes
+ * @param is_bidi True if received on a bidirectional stream
+ */
+typedef void (*meridian_rendv_stream_data_cb_t)(void* ctx, const uint8_t* data,
+                                                  size_t len, bool is_bidi);
+
+// ============================================================================
 // NAT TYPES
 // ============================================================================
 
@@ -103,6 +118,8 @@ typedef struct meridian_rendv_handle_t {
     const struct QUIC_API_TABLE* msquic;     /**< msquic function table */
     HQUIC registration;                       /**< msquic registration for tunnels */
     HQUIC configuration;                     /**< msquic configuration for tunnels */
+    meridian_rendv_stream_data_cb_t on_stream_data;  /**< Stream data received callback */
+    void* on_stream_data_ctx;                       /**< User context for stream data callback */
     PLATFORMLOCKTYPE(lock);                    /**< Thread-safe access */
 } meridian_rendv_handle_t;
 
@@ -205,6 +222,17 @@ int meridian_rendv_handle_set_msquic(meridian_rendv_handle_t* handle,
                                     const struct QUIC_API_TABLE* msquic,
                                     HQUIC registration,
                                     const meridian_rendv_config_t* config);
+
+/**
+ * Registers a handler for stream data received on tunnel connections.
+ *
+ * @param handle    Rendezvous handle
+ * @param callback  Function to call when a complete stream message is received
+ * @param ctx       User context passed to callback
+ */
+void meridian_rendv_handle_on_stream_data(meridian_rendv_handle_t* handle,
+                                           meridian_rendv_stream_data_cb_t callback,
+                                           void* ctx);
 
 /**
  * Destroys a rendezvous handle.

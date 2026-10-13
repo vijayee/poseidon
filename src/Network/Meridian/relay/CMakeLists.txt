@@ -14,6 +14,9 @@ endif()
 # Dependencies
 # ============================================================================
 
+# Project deps/ directory (always needed for xxhash includes)
+set(_RELAY_DEPS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../deps)
+
 # msquic — required QUIC library.
 # In-tree build: target already exists from parent project's add_subdirectory(deps/msquic).
 # Standalone build: set MSQUIC_DIR to the directory containing msquic-config.cmake,
@@ -21,7 +24,6 @@ endif()
 
 if(NOT TARGET msquic::msquic)
     # Check for in-tree deps/msquic first
-    set(_RELAY_DEPS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../../../deps)
 
     if(EXISTS ${_RELAY_DEPS_DIR}/msquic/CMakeLists.txt AND NOT MSQUIC_DIR)
         # Build msquic from source as part of this project
@@ -76,6 +78,8 @@ set(MERIDIAN_RELAY_SOURCES
     ${POSEIDON_SRC_DIR}/Util/threadding.c
     ${POSEIDON_SRC_DIR}/Util/vec.c
     ${POSEIDON_SRC_DIR}/Util/hash.c
+    ${POSEIDON_SRC_DIR}/Util/base58.c
+    ${POSEIDON_SRC_DIR}/Util/memory_pool.c
     ${POSEIDON_SRC_DIR}/Buffer/buffer.c
     ${POSEIDON_SRC_DIR}/Workers/pool.c
     ${POSEIDON_SRC_DIR}/Workers/work.c
@@ -94,6 +98,16 @@ set(MERIDIAN_RELAY_SOURCES
     ${POSEIDON_SRC_DIR}/Bloom/bloom_filter.c
     ${POSEIDON_SRC_DIR}/Bloom/elastic_bloom_filter.c
     ${POSEIDON_SRC_DIR}/Bloom/attenuated_bloom_filter.c
+    ${POSEIDON_SRC_DIR}/Channel/channel.c
+    ${POSEIDON_SRC_DIR}/Channel/channel_manager.c
+    ${POSEIDON_SRC_DIR}/Channel/channel_message.c
+    ${POSEIDON_SRC_DIR}/Channel/channel_notice.c
+    ${POSEIDON_SRC_DIR}/Channel/subtopic.c
+    ${POSEIDON_SRC_DIR}/Channel/topic_alias.c
+    ${POSEIDON_SRC_DIR}/Channel/topic_id.c
+    ${POSEIDON_SRC_DIR}/Network/Quasar/quasar.c
+    ${POSEIDON_SRC_DIR}/Network/Quasar/quasar_message_id.c
+    ${POSEIDON_SRC_DIR}/Network/Quasar/quasar_route.c
     ${POSEIDON_SRC_DIR}/Network/Meridian/meridian.c
     ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_ring.c
     ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_packet.c
@@ -118,6 +132,7 @@ target_include_directories(meridian_relay PRIVATE
     ${POSEIDON_SRC_DIR}/deps/libcbor/src
     ${POSEIDON_SRC_DIR}/deps/blake3/c
     ${POSEIDON_SRC_DIR}/deps/msquic/src/inc
+    ${_RELAY_DEPS_DIR}/xxhash
 )
 
 # msquic include dir — only needed when building with in-tree deps
@@ -131,9 +146,12 @@ target_link_libraries(meridian_relay PRIVATE
     cbor
     hashmap
     blake3
+    poll_dancer
+    wtf
     OpenSSL::SSL
     OpenSSL::Crypto
     Threads::Threads
+    m
 )
 
 # ============================================================================

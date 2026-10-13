@@ -6,6 +6,7 @@ import 'src/models/email.dart';
 import 'src/models/topic.dart';
 import 'src/models/contact.dart';
 import 'src/widgets/email_card.dart';
+import 'src/widgets/gooey_bubble_effect.dart';
 
 void main() {
   runApp(const WaveApp());
@@ -1613,7 +1614,7 @@ class TopicList extends StatelessWidget {
   }
 }
 
-class ChatArea extends StatelessWidget {
+class ChatArea extends StatefulWidget {
   final String topicName;
 
   const ChatArea({
@@ -1622,116 +1623,145 @@ class ChatArea extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: AppColors.surface,
-      child: Column(
-        children: [
-          // Chat messages
-          Expanded(
-            child: ListView(
-              padding: const EdgeInsets.all(16),
-              children: [
-                _buildMessage(
-                  avatarColor: Colors.purple[100]!,
-                  avatarText: 'C',
-                  textColor: Colors.purple,
-                  name: 'Calo',
-                  time: '5:03 PM',
-                  message: 'Check out this new design concept I just finished!',
-                  isSent: false,
-                ),
-                const SizedBox(height: 16),
-                _buildMessage(
-                  avatarColor: Colors.orange,
-                  avatarText: 'M',
-                  textColor: Colors.white,
-                  name: 'Michael',
-                  time: '5:12 PM',
-                  message: 'Looks great! Can you share the Figma link?',
-                  isSent: true,
-                ),
-                const SizedBox(height: 16),
-                _buildMessage(
-                  avatarColor: Colors.green[100]!,
-                  avatarText: 'I',
-                  textColor: Colors.green,
-                  name: 'iceberg_ssj',
-                  time: '5:30 PM',
-                  message: 'Who would do that?',
-                  isSent: false,
-                ),
-                const SizedBox(height: 16),
-                _buildMessage(
-                  avatarColor: Colors.blue[100]!,
-                  avatarText: 'S',
-                  textColor: Colors.blue,
-                  name: 'Superman',
-                  time: '6:41 PM',
-                  message: 'https://www.instagram.com/reel/DU_S98hkZvz/',
-                  isSent: false,
-                  isLink: true,
-                ),
-                const SizedBox(height: 16),
-                _buildMessage(
-                  avatarColor: Colors.blue[100]!,
-                  avatarText: 'S',
-                  textColor: Colors.blue,
-                  name: 'Superman',
-                  time: '7:18 PM',
-                  message: 'https://www.instagram.com/p/DXU6RxUDJWb/',
-                  isSent: false,
-                  isLink: true,
-                ),
-                const SizedBox(height: 16),
-                _buildMessage(
-                  avatarColor: Colors.orange,
-                  avatarText: 'M',
-                  textColor: Colors.white,
-                  name: 'Michael',
-                  time: '7:45 PM',
-                  message: 'Nice find! Let me check these out.',
-                  isSent: true,
-                ),
-              ],
-            ),
-          ),
+  State<ChatArea> createState() => _ChatAreaState();
+}
 
-          // Message Input
-          Container(
-            padding: const EdgeInsets.all(16),
-            decoration: const BoxDecoration(
-              color: Color(0xFFC9E0EC),
-              border: Border(top: BorderSide(color: AppColors.border)),
+class _ChatAreaState extends State<ChatArea> {
+  final GlobalKey<GooeyBubbleEffectState> _gooeyKey = GlobalKey();
+
+  void _triggerSendEffect() {
+    final renderBox = context.findRenderObject() as RenderBox?;
+    if (renderBox == null) return;
+    final size = renderBox.size;
+    // Start near the input bar, end up in the message list area
+    _gooeyKey.currentState?.spawnTransition(
+      start: Offset(size.width * 0.75, size.height - 40),
+      end: Offset(size.width * 0.75, size.height * 0.4),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return GooeyBubbleEffect(
+      key: _gooeyKey,
+      bubbleColor: AppColors.primary,
+      child: Container(
+        color: AppColors.surface,
+        child: Column(
+          children: [
+            // Chat messages
+            Expanded(
+              child: ListView(
+                padding: const EdgeInsets.all(16),
+                children: [
+                  _buildMessage(
+                    avatarColor: Colors.purple[100]!,
+                    avatarText: 'C',
+                    textColor: Colors.purple,
+                    name: 'Calo',
+                    time: '5:03 PM',
+                    message: 'Check out this new design concept I just finished!',
+                    isSent: false,
+                  ),
+                  const SizedBox(height: 16),
+                  _buildMessage(
+                    avatarColor: Colors.orange,
+                    avatarText: 'M',
+                    textColor: Colors.white,
+                    name: 'Michael',
+                    time: '5:12 PM',
+                    message: 'Looks great! Can you share the Figma link?',
+                    isSent: true,
+                  ),
+                  const SizedBox(height: 16),
+                  _buildMessage(
+                    avatarColor: Colors.green[100]!,
+                    avatarText: 'I',
+                    textColor: Colors.green,
+                    name: 'iceberg_ssj',
+                    time: '5:30 PM',
+                    message: 'Who would do that?',
+                    isSent: false,
+                  ),
+                  const SizedBox(height: 16),
+                  _buildMessage(
+                    avatarColor: Colors.blue[100]!,
+                    avatarText: 'S',
+                    textColor: Colors.blue,
+                    name: 'Superman',
+                    time: '6:41 PM',
+                    message: 'https://www.instagram.com/reel/DU_S98hkZvz/',
+                    isSent: false,
+                    isLink: true,
+                  ),
+                  const SizedBox(height: 16),
+                  _buildMessage(
+                    avatarColor: Colors.blue[100]!,
+                    avatarText: 'S',
+                    textColor: Colors.blue,
+                    name: 'Superman',
+                    time: '7:18 PM',
+                    message: 'https://www.instagram.com/p/DXU6RxUDJWb/',
+                    isSent: false,
+                    isLink: true,
+                  ),
+                  const SizedBox(height: 16),
+                  _buildMessage(
+                    avatarColor: Colors.orange,
+                    avatarText: 'M',
+                    textColor: Colors.white,
+                    name: 'Michael',
+                    time: '7:45 PM',
+                    message: 'Nice find! Let me check these out.',
+                    isSent: true,
+                  ),
+                ],
+              ),
             ),
-            child: Row(
-              children: [
-                Icon(Icons.add_circle_outline, size: 24, color: AppColors.textMuted.withValues(alpha: 0.6)),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    decoration: BoxDecoration(
-                      color: AppColors.background,
-                      borderRadius: BorderRadius.circular(24),
-                    ),
-                    child: const TextField(
-                      decoration: InputDecoration(
-                        hintText: 'Message #topic',
-                        hintStyle: TextStyle(fontSize: 14, color: AppColors.textMuted),
-                        border: InputBorder.none,
-                        isDense: true,
-                        contentPadding: EdgeInsets.symmetric(vertical: 12),
+
+            // Message Input
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: const BoxDecoration(
+                color: Color(0xFFC9E0EC),
+                border: Border(top: BorderSide(color: AppColors.border)),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.add_circle_outline, size: 24, color: AppColors.textMuted.withValues(alpha: 0.6)),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      decoration: BoxDecoration(
+                        color: AppColors.background,
+                        borderRadius: BorderRadius.circular(24),
+                      ),
+                      child: const TextField(
+                        decoration: InputDecoration(
+                          hintText: 'Message #topic',
+                          hintStyle: TextStyle(fontSize: 14, color: AppColors.textMuted),
+                          border: InputBorder.none,
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(vertical: 12),
+                        ),
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(width: 12),
-                Icon(Icons.emoji_emotions_outlined, size: 22, color: AppColors.textMuted.withValues(alpha: 0.6)),
-              ],
+                  const SizedBox(width: 12),
+                  GestureDetector(
+                    onTap: _triggerSendEffect,
+                    child: Icon(
+                      Icons.emoji_emotions_outlined,
+                      size: 22,
+                      color: AppColors.textMuted.withValues(alpha: 0.6),
+                    ),
+                  ),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

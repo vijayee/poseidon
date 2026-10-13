@@ -148,6 +148,10 @@ int meridian_rendv_handle_set_msquic(meridian_rendv_handle_t* handle,
         QUIC_SETTINGS Settings = {0};
         Settings.IdleTimeoutMs = config->idle_timeout_ms ? config->idle_timeout_ms : 30000;
         Settings.IsSet.IdleTimeoutMs = TRUE;
+        Settings.PeerBidiStreamCount = MERIDIAN_MAX_CONCURRENT_STREAMS;
+        Settings.IsSet.PeerBidiStreamCount = TRUE;
+        Settings.PeerUnidiStreamCount = MERIDIAN_MAX_CONCURRENT_STREAMS;
+        Settings.IsSet.PeerUnidiStreamCount = TRUE;
 
         QUIC_STATUS Status = handle->msquic->ConfigurationOpen(
             handle->registration,
@@ -222,6 +226,17 @@ void meridian_rendv_handle_destroy(meridian_rendv_handle_t* handle) {
         platform_lock_destroy(&handle->lock);
         free(handle);
     }
+}
+
+void meridian_rendv_handle_on_stream_data(meridian_rendv_handle_t* handle,
+                                           meridian_rendv_stream_data_cb_t callback,
+                                           void* ctx) {
+    if (handle == NULL) return;
+
+    platform_lock(&handle->lock);
+    handle->on_stream_data = callback;
+    handle->on_stream_data_ctx = ctx;
+    platform_unlock(&handle->lock);
 }
 
 /**
@@ -340,6 +355,155 @@ meridian_rendv_t* meridian_rendv_handle_find_peer(meridian_rendv_handle_t* handl
 }
 
 // ============================================================================
+// TUNNEL STREAM CALLBACKS
+// ============================================================================
+
+/**
+ * Unidirectional stream callback for rendezvous tunnel connections.
+ * Accumulates data until PEER_SEND_SHUTDOWN, then dispatches to
+ * the registered on_stream_data callback.
+ */
+static QUIC_STATUS QUIC_API
+rendv_uni_stream_callback(HQUIC Stream, void* Context,
+                           QUIC_STREAM_EVENT* Event) {
+    (void)Stream;
+    meridian_stream_entry_t* entry = (meridian_stream_entry_t*)Context;
+
+    switch (Event->Type) {
+    case QUIC_STREAM_EVENT_RECEIVE: {
+        if (entry == NULL) break;
+
+        const QUIC_BUFFER* buffers = Event->RECEIVE.Buffers;
+        uint32_t buffer_count = Event->RECEIVE.BufferCount;
+
+        for (uint32_t i = 0; i < buffer_count; i++) {
+            if (meridian_stream_entry_append(entry, buffers[i].Buffer,
+                                              buffers[i].Length) != 0) {
+                log_warn("meridian rendv: uni stream buffer overflow, dropping data");
+                break;
+            }
+        }
+        Event->RECEIVE.TotalBufferLength = 0;
+        break;
+    }
+
+    case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
+        if (entry != NULL && entry->user_context != NULL) {
+            meridian_rendv_handle_t* handle = (meridian_rendv_handle_t*)entry->user_context;
+            platform_lock(&handle->lock);
+            meridian_rendv_stream_data_cb_t cb = handle->on_stream_data;
+            void* ctx = handle->on_stream_data_ctx;
+            platform_unlock(&handle->lock);
+
+            if (cb != NULL) {
+                cb(ctx, entry->recv_buf, entry->recv_len, false);
+            }
+        }
+        break;
+    }
+
+    case QUIC_STREAM_EVENT_SEND_COMPLETE:
+        if (Event->SEND_COMPLETE.ClientContext != NULL) {
+            free(Event->SEND_COMPLETE.ClientContext);
+        }
+        break;
+
+    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
+        meridian_rendv_handle_t* handle = (entry != NULL && entry->user_context != NULL)
+            ? (meridian_rendv_handle_t*)entry->user_context : NULL;
+        if (entry != NULL) {
+            meridian_stream_entry_destroy(entry);
+        }
+        if (Stream != NULL && handle != NULL && handle->msquic != NULL) {
+            handle->msquic->StreamClose(Stream);
+        }
+        break;
+    }
+
+    default:
+        break;
+    }
+
+    return QUIC_STATUS_SUCCESS;
+}
+
+/**
+ * Bidirectional stream callback for rendezvous tunnel connections.
+ * Accumulates data until PEER_SEND_SHUTDOWN, then dispatches to
+ * the registered on_stream_data callback and shuts down our send side.
+ */
+static QUIC_STATUS QUIC_API
+rendv_bidi_stream_callback(HQUIC Stream, void* Context,
+                            QUIC_STREAM_EVENT* Event) {
+    meridian_stream_entry_t* entry = (meridian_stream_entry_t*)Context;
+
+    switch (Event->Type) {
+    case QUIC_STREAM_EVENT_START_COMPLETE:
+        break;
+
+    case QUIC_STREAM_EVENT_RECEIVE: {
+        if (entry == NULL) break;
+
+        const QUIC_BUFFER* buffers = Event->RECEIVE.Buffers;
+        uint32_t buffer_count = Event->RECEIVE.BufferCount;
+
+        for (uint32_t i = 0; i < buffer_count; i++) {
+            if (meridian_stream_entry_append(entry, buffers[i].Buffer,
+                                              buffers[i].Length) != 0) {
+                log_warn("meridian rendv: bidi stream buffer overflow, dropping data");
+                break;
+            }
+        }
+        Event->RECEIVE.TotalBufferLength = 0;
+        break;
+    }
+
+    case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
+        if (entry != NULL && entry->user_context != NULL) {
+            meridian_rendv_handle_t* handle = (meridian_rendv_handle_t*)entry->user_context;
+            platform_lock(&handle->lock);
+            meridian_rendv_stream_data_cb_t cb = handle->on_stream_data;
+            void* ctx = handle->on_stream_data_ctx;
+            platform_unlock(&handle->lock);
+
+            if (cb != NULL) {
+                cb(ctx, entry->recv_buf, entry->recv_len, true);
+            }
+
+            // Shut down our send side
+            if (Stream != NULL && handle->msquic != NULL) {
+                handle->msquic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
+            }
+        }
+        break;
+    }
+
+    case QUIC_STREAM_EVENT_SEND_COMPLETE:
+        if (Event->SEND_COMPLETE.ClientContext != NULL) {
+            free(Event->SEND_COMPLETE.ClientContext);
+        }
+        break;
+
+    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
+        meridian_rendv_handle_t* handle = (entry != NULL && entry->user_context != NULL)
+            ? (meridian_rendv_handle_t*)entry->user_context : NULL;
+        if (entry != NULL) {
+            meridian_stream_entry_destroy(entry);
+        }
+        if (Stream != NULL && handle != NULL && handle->msquic != NULL) {
+            handle->msquic->StreamClose(Stream);
+        }
+        break;
+    }
+
+    default:
+        break;
+    }
+
+    return QUIC_STATUS_SUCCESS;
+}
+
+// ============================================================================
 // TUNNEL CONNECTION CALLBACK
 // ============================================================================
 
@@ -350,6 +514,7 @@ meridian_rendv_t* meridian_rendv_handle_find_peer(meridian_rendv_handle_t* handl
  */
 static QUIC_STATUS QUIC_API rendv_tunnel_connection_callback(
     HQUIC Connection, void* Context, QUIC_CONNECTION_EVENT* Event) {
+    (void)Connection;
     meridian_rendv_handle_t* handle = (meridian_rendv_handle_t*)Context;
 
     switch (Event->Type) {
@@ -365,8 +530,8 @@ static QUIC_STATUS QUIC_API rendv_tunnel_connection_callback(
         if (entry == NULL) return QUIC_STATUS_SUCCESS;
 
         QUIC_STREAM_CALLBACK_HANDLER callback = is_bidi
-            ? meridian_bidi_stream_callback
-            : meridian_uni_stream_callback;
+            ? rendv_bidi_stream_callback
+            : rendv_uni_stream_callback;
         handle->msquic->SetCallbackHandler(Stream, (void*)callback, entry);
         return QUIC_STATUS_SUCCESS;
     }

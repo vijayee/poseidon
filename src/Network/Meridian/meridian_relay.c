@@ -49,6 +49,24 @@ static int relay_track_stream(meridian_relay_t* relay,
     return 0;
 }
 
+/**
+ * Removes a stream entry from the relay's active_streams tracking array.
+ * Caller must hold relay->lock.
+ */
+static void relay_remove_stream(meridian_relay_t* relay,
+                                 meridian_stream_entry_t* entry) {
+    if (relay == NULL || entry == NULL) return;
+
+    for (size_t i = 0; i < relay->num_active_streams; i++) {
+        if (relay->active_streams[i] == entry) {
+            relay->active_streams[i] =
+                relay->active_streams[relay->num_active_streams - 1];
+            relay->num_active_streams--;
+            break;
+        }
+    }
+}
+
 // ============================================================================
 // RELAY CLIENT LIFECYCLE
 // ============================================================================
@@ -629,11 +647,22 @@ relay_uni_stream_callback(HQUIC Stream, void* Context,
         }
         break;
 
-    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
+        meridian_relay_t* relay_ctx = (entry != NULL && entry->user_context != NULL)
+            ? (meridian_relay_t*)entry->user_context : NULL;
         if (entry != NULL) {
+            if (relay_ctx != NULL) {
+                platform_lock(&relay_ctx->lock);
+                relay_remove_stream(relay_ctx, entry);
+                platform_unlock(&relay_ctx->lock);
+            }
             meridian_stream_entry_destroy(entry);
         }
+        if (Stream != NULL && relay_ctx != NULL) {
+            relay_ctx->msquic->StreamClose(Stream);
+        }
         break;
+    }
 
     default:
         break;
@@ -696,11 +725,22 @@ relay_bidi_stream_callback(HQUIC Stream, void* Context,
         }
         break;
 
-    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
+        meridian_relay_t* relay_ctx = (entry != NULL && entry->user_context != NULL)
+            ? (meridian_relay_t*)entry->user_context : NULL;
         if (entry != NULL) {
+            if (relay_ctx != NULL) {
+                platform_lock(&relay_ctx->lock);
+                relay_remove_stream(relay_ctx, entry);
+                platform_unlock(&relay_ctx->lock);
+            }
             meridian_stream_entry_destroy(entry);
         }
+        if (Stream != NULL && relay_ctx != NULL) {
+            relay_ctx->msquic->StreamClose(Stream);
+        }
         break;
+    }
 
     default:
         break;

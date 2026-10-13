@@ -128,8 +128,8 @@ protocol_uni_stream_callback(HQUIC Stream, void* Context,
             protocol_remove_stream(proto, entry);
         }
         meridian_stream_entry_destroy(entry);
-        if (Stream) {
-            // Stream handle closed by msquic after this callback
+        if (Stream != NULL && proto != NULL) {
+            proto->msquic->StreamClose(Stream);
         }
         break;
     }
@@ -195,6 +195,9 @@ protocol_bidi_stream_callback(HQUIC Stream, void* Context,
             protocol_remove_stream(proto, entry);
         }
         meridian_stream_entry_destroy(entry);
+        if (Stream != NULL && proto != NULL) {
+            proto->msquic->StreamClose(Stream);
+        }
         break;
     }
 

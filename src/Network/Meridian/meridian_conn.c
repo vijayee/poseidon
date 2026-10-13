@@ -133,9 +133,16 @@ void meridian_conn_disconnect(meridian_conn_t* conn) {
 
     platform_lock(&conn->lock);
 
+    // Shut down and close the direct QUIC connection if active
+    if (conn->direct_connection != NULL && conn->msquic != NULL) {
+        conn->msquic->ConnectionShutdown(conn->direct_connection,
+                                          QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
+        conn->msquic->ConnectionClose(conn->direct_connection);
+        conn->direct_connection = NULL;
+    }
+
     conn->direct_path.active = false;
     conn->relay_path.active = false;
-    conn->direct_connection = NULL;
     conn->state = MERIDIAN_CONN_STATE_RELAY;
 
     platform_unlock(&conn->lock);

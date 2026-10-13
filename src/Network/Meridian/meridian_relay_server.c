@@ -3,11 +3,13 @@
 //
 
 #include "meridian_relay_server.h"
+#include "meridian_packet.h"
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <cbor.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -590,32 +592,66 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
                 break;
             }
 
-            // Build ADDR_RESPONSE: [4 bytes: dest=0 big-endian] + [CBOR address payload]
-            // Encode reflexive address as: family(1) + port(2) + ip(4) = 7 bytes
-            // Then wrap in a simple CBOR byte string: 0x47 followed by 7 bytes
-            uint32_t dest_zero = htonl(0);
+            // Parse the ADDR_REQUEST CBOR payload to extract query_id
+            const uint8_t* cbor_payload = entry->recv_buf + sizeof(uint32_t);
+            size_t cbor_payload_len = entry->recv_len - sizeof(uint32_t);
+            uint64_t query_id = 0;
 
-            uint8_t addr_bytes[7];
-            addr_bytes[0] = (uint8_t)remote_addr.Ipv4.sin_family;
-            memcpy(addr_bytes + 1, &remote_addr.Ipv4.sin_port, 2);
-            memcpy(addr_bytes + 3, &remote_addr.Ipv4.sin_addr, 4);
+            struct cbor_load_result cbor_result;
+            cbor_item_t* req_item = cbor_load(cbor_payload, cbor_payload_len, &cbor_result);
+            if (req_item != NULL && cbor_array_is_definite(req_item) &&
+                cbor_array_size(req_item) >= 3) {
+                cbor_item_t** items = cbor_array_handle(req_item);
+                uint64_t qid_1 = cbor_get_uint64(items[1]);
+                uint64_t qid_2 = cbor_get_uint64(items[2]);
+                query_id = (qid_1 << 32) | qid_2;
+            }
+            if (req_item != NULL) cbor_decref(&req_item);
 
-            uint8_t response_buf[4 + 1 + 7];  // dest header + CBOR tag + addr
-            memcpy(response_buf, &dest_zero, sizeof(uint32_t));
-            response_buf[4] = 0x47;  // CBOR byte string, length 7
-            memcpy(response_buf + 5, addr_bytes, 7);
+            // Build ADDR_RESPONSE CBOR array:
+            // [type, query_id_hi, query_id_lo, reflexive_addr, reflexive_port, endpoint_id]
+            meridian_addr_response_t addr_resp;
+            addr_resp.type = MERIDIAN_PACKET_TYPE_ADDR_RESPONSE;
+            addr_resp.query_id = query_id;
+            addr_resp.reflexive_addr = remote_addr.Ipv4.sin_addr.s_addr;
+            addr_resp.reflexive_port = ntohs(remote_addr.Ipv4.sin_port);
+            addr_resp.endpoint_id = server->clients[client_slot].endpoint_id;
 
-            size_t response_len = sizeof(response_buf);
-
-            // Send response on the same bidi stream
-            uint8_t* send_buf = (uint8_t*)get_memory(response_len);
-            if (send_buf == NULL) {
-                log_warn("Relay: failed to allocate ADDR_RESPONSE send buffer");
+            cbor_item_t* resp_cbor = meridian_addr_response_encode(&addr_resp);
+            if (resp_cbor == NULL) {
+                log_warn("Relay: failed to encode ADDR_RESPONSE");
                 server->stats.datagrams_dropped++;
                 platform_unlock(&server->lock);
                 break;
             }
-            memcpy(send_buf, response_buf, response_len);
+
+            unsigned char* cbor_buf = NULL;
+            size_t cbor_buf_sz = 0;
+            size_t cbor_len = cbor_serialize_alloc(resp_cbor, &cbor_buf, &cbor_buf_sz);
+            cbor_decref(&resp_cbor);
+
+            if (cbor_len == 0 || cbor_buf == NULL) {
+                log_warn("Relay: failed to serialize ADDR_RESPONSE");
+                server->stats.datagrams_dropped++;
+                platform_unlock(&server->lock);
+                break;
+            }
+
+            // Wire format: [4 bytes dest=0 BE] + [CBOR ADDR_RESPONSE]
+            size_t response_len = 4 + cbor_len;
+            uint8_t* send_buf = (uint8_t*)get_memory(response_len);
+            if (send_buf == NULL) {
+                log_warn("Relay: failed to allocate ADDR_RESPONSE send buffer");
+                free(cbor_buf);
+                server->stats.datagrams_dropped++;
+                platform_unlock(&server->lock);
+                break;
+            }
+
+            // dest_endpoint_id = 0 in big-endian
+            memset(send_buf, 0, sizeof(uint32_t));
+            memcpy(send_buf + 4, cbor_buf, cbor_len);
+            free(cbor_buf);
 
             QUIC_BUFFER send_buffer;
             send_buffer.Buffer = send_buf;
@@ -637,7 +673,10 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
 
             platform_unlock(&server->lock);
         } else {
-            // Forward to destination client via uni stream
+            // Forward to destination client via uni stream.
+            // Bidi wire format: [4B dest BE] + [payload]
+            // Uni wire format: [4B dest BE] + [4B src BE] + [payload]
+            // Need to insert the source endpoint_id before forwarding.
             platform_lock(&server->lock);
             int dest_slot = relay_server_find_client_by_endpoint(server, dest_endpoint_id);
 
@@ -650,15 +689,33 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
             }
 
             HQUIC dest_connection = server->clients[dest_slot].connection;
+            uint32_t src_endpoint_id = server->clients[client_slot].endpoint_id;
 
-            // Forward the full message (header + payload) via uni stream
+            // Rebuild with 8-byte header: [4B dest BE] + [4B src BE] + [payload]
+            size_t fwd_len = 8 + (entry->recv_len - 4);
+            uint8_t* fwd_buf = (uint8_t*)get_memory(fwd_len);
+            if (fwd_buf == NULL) {
+                server->stats.datagrams_dropped++;
+                platform_unlock(&server->lock);
+                break;
+            }
+
+            // Copy dest header (first 4 bytes)
+            memcpy(fwd_buf, entry->recv_buf, 4);
+            // Insert src endpoint_id in big-endian
+            uint32_t src_be = htonl(src_endpoint_id);
+            memcpy(fwd_buf + 4, &src_be, sizeof(uint32_t));
+            // Copy payload after original 4-byte header
+            memcpy(fwd_buf + 8, entry->recv_buf + 4, entry->recv_len - 4);
+
             int result = meridian_stream_send_uni(server->msquic, dest_connection,
-                                                   entry->recv_buf, entry->recv_len,
-                                                   NULL);
+                                                   fwd_buf, fwd_len, NULL);
+            free(fwd_buf);
+
             if (result == 0) {
                 server->stats.datagrams_forwarded++;
-                log_debug("Relay: forwarded bidi stream to endpoint %u (%zu bytes)",
-                          dest_endpoint_id, entry->recv_len);
+                log_debug("Relay: forwarded bidi stream to endpoint %u (from %u, %zu bytes)",
+                          dest_endpoint_id, src_endpoint_id, fwd_len);
             } else {
                 server->stats.datagrams_dropped++;
                 log_warn("Relay: failed to forward bidi stream to endpoint %u",
