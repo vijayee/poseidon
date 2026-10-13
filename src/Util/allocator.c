@@ -1,6 +1,10 @@
 //
 // Created by victor on 3/30/25.
 //
+// Vendored from liboffs on 2026-09-26 (commit 1.2, actor-migration branch).
+// Poseidon-specific mutations:
+//   * No header drops. NULL reachable via log.h (per its vendored pass).
+// Body is byte-equivalent to liboffs/src/Util/allocator.c.
 
 #include "allocator.h"
 #include <stdlib.h>
