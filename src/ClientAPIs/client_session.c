@@ -37,6 +37,7 @@
 #define POSEIDON_CLIENT_SESSION_MSG_HANDLE_REQUEST    0x05
 #define POSEIDON_CLIENT_SESSION_MSG_DELIVER           0x06
 #define POSEIDON_CLIENT_SESSION_MSG_CLEANUP_SUBS      0x07
+#define POSEIDON_CLIENT_SESSION_MSG_DISPATCH_EVENT    0x08
 
 // HANDLE_REQUEST carries a heap-allocated client_frame_t by pointer so the
 // wrapper can pass a stable copy to dispatch (the wrapper's stack frame
@@ -53,6 +54,18 @@ typedef struct client_session_msg_deliver_t {
     uint8_t* buf;
     size_t buf_len;
 } client_session_msg_deliver_t;
+
+// DISPATCH_EVENT carries the raw inputs to the public dispatch_event API.
+// Strings and the payload are heap-copied by the wrapper so the actor's
+// dispatch can outlive the wrapper's stack frame. dispatch owns every
+// pointer and frees them after encoding and sending.
+typedef struct client_session_msg_dispatch_event_t {
+    uint8_t event_type;
+    char* topic_path;
+    char* subtopic;
+    uint8_t* payload;
+    size_t payload_len;
+} client_session_msg_dispatch_event_t;
 
 // SUBSCRIBE / UNSUBSCRIBE / IS_SUBSCRIBED / HAS_LOOPBACK / CLEANUP_SUBS
 // payloads — plain data, no allocation. The wrappers read/write the matching
@@ -410,6 +423,37 @@ static void handle_deliver(client_session_t* s, client_session_msg_deliver_t* p)
     s->transport->send(s->transport, s->client_fd, p->buf, p->buf_len);
 }
 
+static void handle_dispatch_event(client_session_t* s,
+                                   const client_session_msg_dispatch_event_t* p) {
+    // cbor encode/decode must happen inside the actor (boss directive).
+    // We replicate the old wrapper's encode-then-send pipeline but on the
+    // actor's own thread, then free the heap-copied inputs the wrapper
+    // handed us.
+    if (p->topic_path == NULL) return;
+
+    if (s->transport != NULL && s->client_fd >= 0) {
+        cbor_item_t* event = client_protocol_encode_event(
+            p->event_type, p->topic_path,
+            p->subtopic ? p->subtopic : "",
+            p->payload, p->payload_len);
+        if (event != NULL) {
+            uint8_t* buf = NULL;
+            size_t buf_len = 0;
+            if (client_protocol_serialize(event, &buf, &buf_len) == 0) {
+                s->transport->send(s->transport, s->client_fd, buf, buf_len);
+                free(buf);
+            }
+            cbor_decref(&event);
+        }
+    }
+
+    // Actor owns the heap-copied inputs and frees them regardless of
+    // whether the wire-send path was taken.
+    free(p->topic_path);
+    free(p->subtopic);
+    free(p->payload);
+}
+
 static void handle_cleanup_subs(client_session_t* s) {
     // Snapshot active topics first so we can drop session->lock equivalents
     // (none — actor serialises) and then notify the manager for any topic
@@ -471,6 +515,12 @@ static void client_session_dispatch(void* state, message_t* msg) {
     }
     case POSEIDON_CLIENT_SESSION_MSG_CLEANUP_SUBS: {
         handle_cleanup_subs(s);
+        break;
+    }
+    case POSEIDON_CLIENT_SESSION_MSG_DISPATCH_EVENT: {
+        const client_session_msg_dispatch_event_t* p =
+            (const client_session_msg_dispatch_event_t*)msg->payload;
+        handle_dispatch_event(s, p);
         break;
     }
     default:
@@ -603,45 +653,45 @@ void client_session_dispatch_event(client_session_t* s,
                                     const char* topic_path,
                                     const char* subtopic,
                                     const uint8_t* payload, size_t payload_len) {
-    (void)event_type;
     if (s == NULL || topic_path == NULL) return;
 
-    cbor_item_t* event = client_protocol_encode_event(
-        event_type, topic_path,
-        subtopic ? subtopic : "",
-        payload, payload_len);
-    if (event == NULL) return;
-    uint8_t* buf = NULL;
-    size_t buf_len = 0;
-    if (client_protocol_serialize(event, &buf, &buf_len) != 0) {
-        cbor_decref(&event);
-        return;
-    }
-    cbor_decref(&event);
-
+    // Heap-copy every input the actor will need so its dispatch can outlive
+    // this wrapper's stack frame. The actor (handle_dispatch_event) owns
+    // and frees all three buffers after encoding and sending.
     char* topic_copy = strdup(topic_path);
-    if (topic_copy == NULL) {
-        free(buf);
+    char* subtopic_copy = (subtopic != NULL) ? strdup(subtopic) : NULL;
+    uint8_t* payload_copy = NULL;
+    if (payload_len > 0) {
+        payload_copy = (uint8_t*)malloc(payload_len);
+        if (payload_copy != NULL) memcpy(payload_copy, payload, payload_len);
+    }
+    if (topic_copy == NULL || (subtopic != NULL && subtopic_copy == NULL) ||
+        (payload_len > 0 && payload_copy == NULL)) {
+        free(topic_copy);
+        free(subtopic_copy);
+        free(payload_copy);
         return;
     }
-    client_session_msg_deliver_t msg = {
+
+    client_session_msg_dispatch_event_t dp = {
+        .event_type = event_type,
         .topic_path = topic_copy,
-        .buf = buf,
-        .buf_len = buf_len,
+        .subtopic = subtopic_copy,
+        .payload = payload_copy,
+        .payload_len = payload_len,
     };
     message_t m = {
-        .type = POSEIDON_CLIENT_SESSION_MSG_DELIVER,
-        .payload = &msg,
+        .type = POSEIDON_CLIENT_SESSION_MSG_DISPATCH_EVENT,
+        .payload = &dp,
         .payload_destroy = NULL,
     };
     if (!actor_send(&s->actor, &m)) {
         free(topic_copy);
-        free(buf);
+        free(subtopic_copy);
+        free(payload_copy);
         return;
     }
     actor_run(&s->actor, 32);
-    free(topic_copy);
-    free(buf);
 }
 
 void client_session_cleanup_subscriptions(client_session_t* s) {
@@ -806,10 +856,10 @@ static void session_dispatch_message(void* ctx, const uint8_t* topic, size_t top
  *   serialised by the session actor itself. The corresponding
  *   platform_mutex_lock/unlock pairs in subscribe/unsubscribe/is_subscribed/
  *   has_loopback/cleanup_subscriptions/handle_request are gone.
- * - All cbor encode/decode (in particular the CHANNEL_DESTROY and
- *   CHANNEL_MODIFY cases in handle_request) moved INSIDE dispatch. Boss
- *   directive: per-actor FD serialisation makes a per-session lock
- *   redundant, and cbor work must run on the actor's thread.
+ * - All cbor encode/decode (CHANNEL_DESTROY/CHANNEL_MODIFY in handle_request,
+ *   and the public dispatch_event wrapper's encode-and-send pipeline) moved
+ *   INSIDE dispatch. Boss directive: per-actor FD serialisation makes a
+ *   per-session lock redundant, and cbor work must run on the actor's thread.
  * - Public API surface preserved (create/destroy/handle_request/subscribe/
  *   unsubscribe/is_subscribed/has_loopback/dispatch_event/
  *   cleanup_subscriptions).
