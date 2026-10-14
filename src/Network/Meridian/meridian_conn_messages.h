@@ -58,9 +58,11 @@ extern "C" {
  *                                            wiring; layout TBD in a later
  *                                            phase)
  *   MERIDIAN_CONN_SET_PEER_NAT_TYPE  -> meridian_conn_set_peer_nat_type_msg_t
- *                                       (borrowed: enum value passed by value)
+ *                                       (borrowed: enum value passed by value;
+ *                                       2.6 routes this through the actor)
  *   MERIDIAN_CONN_SET_PEER_REFLEXIVE -> meridian_conn_set_peer_reflexive_msg_t
- *                                       (borrowed: integers passed by value)
+ *                                       (borrowed: integers passed by value;
+ *                                       2.6 routes this through the actor)
  *   MERIDIAN_CONN_DESTROY            -> NULL
  *
  * No payload-destroy functions are defined here. Every message in the

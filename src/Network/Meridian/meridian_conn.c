@@ -22,6 +22,10 @@ static void meridian_conn_dispatch(void* state, message_t* msg);
 static void meridian_conn_handle_disconnect(meridian_conn_t* conn);
 static void meridian_conn_handle_send(meridian_conn_t* conn, const uint8_t* data,
                                       uint32_t len, int* result);
+static void meridian_conn_handle_set_peer_nat_type(meridian_conn_t* conn,
+                                                   meridian_nat_type_t type);
+static void meridian_conn_handle_set_peer_reflexive(meridian_conn_t* conn,
+                                                    uint32_t addr, uint16_t port);
 
 meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_relay_t* relay,
                                        meridian_nat_type_t local_nat_type,
@@ -82,10 +86,12 @@ meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_rel
  * message at a time off conn->actor's mailbox.
  *
  * 2.4 routes the first mutator (MERIDIAN_CONN_DISCONNECT) through this switch.
- * Later steps will add cases for SEND, SET_PEER_NAT_TYPE, SET_PEER_REFLEXIVE,
- * and the relay-path mutators. Unhandled message types fall through to a
- * no-op; payload_destroy is NULL for all 10 MERIDIAN_CONN_* types so no
- * payload cleanup is required.
+ * 2.5 adds MERIDIAN_CONN_SEND (with an out-param result slot). 2.6 adds the
+ * two peer-info mutators (MERIDIAN_CONN_SET_PEER_NAT_TYPE and
+ * MERIDIAN_CONN_SET_PEER_REFLEXIVE). Later steps will add
+ * UPGRADE_TO_DIRECT and the relay-path mutators. Unhandled message types
+ * fall through to a no-op; payload_destroy is NULL for all 10
+ * MERIDIAN_CONN_* types so no payload cleanup is required.
  */
 static void meridian_conn_dispatch(void* state, message_t* msg) {
     meridian_conn_t* conn = (meridian_conn_t*)state;
@@ -97,6 +103,20 @@ static void meridian_conn_dispatch(void* state, message_t* msg) {
             assert(msg->payload != NULL);
             const meridian_conn_send_msg_t* p = (const meridian_conn_send_msg_t*)msg->payload;
             meridian_conn_handle_send(conn, p->data, p->len, p->result);
+            break;
+        }
+        case MERIDIAN_CONN_SET_PEER_NAT_TYPE: {
+            assert(msg->payload != NULL);
+            const meridian_conn_set_peer_nat_type_msg_t* p =
+                (const meridian_conn_set_peer_nat_type_msg_t*)msg->payload;
+            meridian_conn_handle_set_peer_nat_type(conn, p->type);
+            break;
+        }
+        case MERIDIAN_CONN_SET_PEER_REFLEXIVE: {
+            assert(msg->payload != NULL);
+            const meridian_conn_set_peer_reflexive_msg_t* p =
+                (const meridian_conn_set_peer_reflexive_msg_t*)msg->payload;
+            meridian_conn_handle_set_peer_reflexive(conn, p->addr, p->port);
             break;
         }
         default:
@@ -306,10 +326,16 @@ int meridian_conn_upgrade_to_direct(meridian_conn_t* conn) {
 // PEER INFORMATION UPDATES
 // ============================================================================
 
-void meridian_conn_set_peer_nat_type(meridian_conn_t* conn, meridian_nat_type_t type) {
-    if (conn == NULL) return;
-
-    platform_mutex_lock(conn->lock);
+/**
+ * @brief Actor-thread body for MERIDIAN_CONN_SET_PEER_NAT_TYPE.
+ *
+ * Runs serially on the actor's owning thread. Updates peer_nat_type and,
+ * for symmetric peers, downgrades the connection state to RELAY_ONLY by
+ * clearing the direct path. No lock is required: actor dispatch is the
+ * serialization point.
+ */
+static void meridian_conn_handle_set_peer_nat_type(meridian_conn_t* conn,
+                                                   meridian_nat_type_t type) {
     conn->peer_nat_type = type;
 
     // If peer has symmetric NAT, downgrade to relay-only
@@ -317,17 +343,45 @@ void meridian_conn_set_peer_nat_type(meridian_conn_t* conn, meridian_nat_type_t 
         conn->direct_path.active = false;
         conn->state = MERIDIAN_CONN_STATE_RELAY_ONLY;
     }
+}
 
-    platform_mutex_unlock(conn->lock);
+void meridian_conn_set_peer_nat_type(meridian_conn_t* conn, meridian_nat_type_t type) {
+    if (conn == NULL) return;
+
+    meridian_conn_set_peer_nat_type_msg_t payload = {.type = type};
+    message_t msg = {
+        .type = MERIDIAN_CONN_SET_PEER_NAT_TYPE,
+        .payload = &payload,
+        .payload_destroy = NULL,
+    };
+    if (!actor_send(&conn->actor, &msg)) return;
+    actor_run(&conn->actor, 32);
+}
+
+/**
+ * @brief Actor-thread body for MERIDIAN_CONN_SET_PEER_REFLEXIVE.
+ *
+ * Runs serially on the actor's owning thread. Records the reflexive
+ * address tuple on the direct path. No lock is required: actor dispatch
+ * is the serialization point.
+ */
+static void meridian_conn_handle_set_peer_reflexive(meridian_conn_t* conn,
+                                                    uint32_t addr, uint16_t port) {
+    conn->direct_path.reflexive_addr = addr;
+    conn->direct_path.reflexive_port = port;
 }
 
 void meridian_conn_set_peer_reflexive(meridian_conn_t* conn, uint32_t addr, uint16_t port) {
     if (conn == NULL) return;
 
-    platform_mutex_lock(conn->lock);
-    conn->direct_path.reflexive_addr = addr;
-    conn->direct_path.reflexive_port = port;
-    platform_mutex_unlock(conn->lock);
+    meridian_conn_set_peer_reflexive_msg_t payload = {.addr = addr, .port = port};
+    message_t msg = {
+        .type = MERIDIAN_CONN_SET_PEER_REFLEXIVE,
+        .payload = &payload,
+        .payload_destroy = NULL,
+    };
+    if (!actor_send(&conn->actor, &msg)) return;
+    actor_run(&conn->actor, 32);
 }
 
 // ============================================================================
