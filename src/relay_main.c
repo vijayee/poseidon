@@ -3,7 +3,7 @@
 //
 
 #include "Network/Meridian/meridian_relay_server.h"
-#include "Network/Meridian/msquic_singleton.h"
+#include "Platform/poseidon_msquic.h"
 #include "Util/log.h"
 #include "Util/allocator.h"
 #include <stdio.h>

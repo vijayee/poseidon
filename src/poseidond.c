@@ -4,7 +4,7 @@
 
 #include "ClientAPIs/transport.h"
 #include "Channel/channel_manager.h"
-#include "Network/Meridian/msquic_singleton.h"
+#include "Platform/poseidon_msquic.h"
 #include "Workers/pool.h"
 #include "Time/wheel.h"
 #include "Scheduler/scheduler.h"

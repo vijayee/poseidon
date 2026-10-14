@@ -99,18 +99,16 @@ meridian_relay_server_t* meridian_relay_server_create(
     server->lock = platform_mutex_create();;
     refcounter_init(&server->refcounter);
 
-    // Create registration
-    QUIC_REGISTRATION_CONFIG RegConfig = {
-        .AppName = "meridian_relay",
-        .ExecutionProfile = QUIC_EXECUTION_PROFILE_LOW_LATENCY
-    };
-
-    QUIC_STATUS Status = server->msquic->RegistrationOpen(&RegConfig, &server->registration);
-    if (QUIC_FAILED(Status)) {
+    // Open registration through the process-wide MSQUIC helper. This both
+    // acquires the shared API table and opens a per-app-name registration
+    // (refcounted against other callers in this process).
+    if (!poseidon_msquic_open_registration("meridian_relay",
+                                          &server->registration)) {
         platform_mutex_destroy(server->lock);;
         free(server);
         return NULL;
     }
+    server->msquic = poseidon_msquic_api();
 
     // Configure ALPN
     QUIC_BUFFER Alpn = {
@@ -129,7 +127,7 @@ meridian_relay_server_t* meridian_relay_server_create(
     Settings.PeerUnidiStreamCount = MERIDIAN_MAX_CONCURRENT_STREAMS;
     Settings.IsSet.PeerUnidiStreamCount = TRUE;
 
-    Status = server->msquic->ConfigurationOpen(
+    QUIC_STATUS Status = server->msquic->ConfigurationOpen(
         server->registration,
         &Alpn, 1,
         &Settings, sizeof(Settings),
@@ -137,7 +135,7 @@ meridian_relay_server_t* meridian_relay_server_create(
         &server->configuration);
 
     if (QUIC_FAILED(Status)) {
-        server->msquic->RegistrationClose(server->registration);
+        poseidon_msquic_close_registration("meridian_relay");
         platform_mutex_destroy(server->lock);;
         free(server);
         return NULL;
@@ -162,7 +160,7 @@ meridian_relay_server_t* meridian_relay_server_create(
 
     if (QUIC_FAILED(Status)) {
         server->msquic->ConfigurationClose(server->configuration);
-        server->msquic->RegistrationClose(server->registration);
+        poseidon_msquic_close_registration("meridian_relay");
         platform_mutex_destroy(server->lock);;
         free(server);
         return NULL;
@@ -185,9 +183,11 @@ void meridian_relay_server_destroy(meridian_relay_server_t* server) {
             server->configuration = NULL;
         }
 
-        // Close registration
+        // Close registration through the process-wide MSQUIC helper; the
+        // last close for "meridian_relay" also drops the API table refcount
+        // and triggers MsQuicClose.
         if (server->registration) {
-            server->msquic->RegistrationClose(server->registration);
+            poseidon_msquic_close_registration("meridian_relay");
             server->registration = NULL;
         }
 

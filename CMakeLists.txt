@@ -77,7 +77,7 @@ set(POSEIDON_SOURCES
     ${MERIDIAN_SRC_DIR}/meridian_conn.c
     ${MERIDIAN_SRC_DIR}/meridian_protocol.c
     ${MERIDIAN_SRC_DIR}/meridian_stream.c
-    ${MERIDIAN_SRC_DIR}/msquic_singleton.c
+    ${PLATFORM_SRC_DIR}/poseidon_msquic.c
     ${UTIL_SRC_DIR}/allocator.c
     ${UTIL_SRC_DIR}/memory_pool.c
     ${UTIL_SRC_DIR}/log.c

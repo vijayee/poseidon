@@ -4,7 +4,7 @@
 
 #include "../../Platform/platform_thread.h"
 #include "meridian_protocol.h"
-#include "msquic_singleton.h"
+#include "Platform/poseidon_msquic.h"
 #include "../Quasar/quasar_route.h"
 #include "../../Channel/channel_manager.h"
 #include "../../Util/allocator.h"
@@ -327,7 +327,7 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol) {
         }
 
         if (protocol->registration) {
-            protocol->msquic->RegistrationClose(protocol->registration);
+            poseidon_msquic_close_registration("meridian");
             protocol->registration = NULL;
         }
 
@@ -395,13 +395,8 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
         return -1;
     }
 
-    // Create registration
-    QUIC_REGISTRATION_CONFIG RegConfig = {
-        .AppName = "meridian",
-        .ExecutionProfile = QUIC_EXECUTION_PROFILE_LOW_LATENCY
-    };
-
-    if (QUIC_FAILED(Status = protocol->msquic->RegistrationOpen(&RegConfig, &protocol->registration))) {
+    // Create registration (keyed refcount shared with other meridian components)
+    if (!poseidon_msquic_open_registration("meridian", &protocol->registration)) {
         poseidon_msquic_close();
         protocol->msquic = NULL;
         platform_mutex_unlock(protocol->lock);
@@ -426,8 +421,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
             &Settings, sizeof(Settings),
             NULL,
             &protocol->configuration))) {
-        protocol->msquic->RegistrationClose(protocol->registration);
-        poseidon_msquic_close();
+        poseidon_msquic_close_registration("meridian");
         protocol->msquic = NULL;
         protocol->registration = NULL;
         platform_mutex_unlock(protocol->lock);
@@ -451,8 +445,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
             protocol->configuration,
             &CredConfig))) {
         protocol->msquic->ConfigurationClose(protocol->configuration);
-        protocol->msquic->RegistrationClose(protocol->registration);
-        poseidon_msquic_close();
+        poseidon_msquic_close_registration("meridian");
         protocol->msquic = NULL;
         protocol->registration = NULL;
         protocol->configuration = NULL;
@@ -467,8 +460,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
             protocol,
             &protocol->listener))) {
         protocol->msquic->ConfigurationClose(protocol->configuration);
-        protocol->msquic->RegistrationClose(protocol->registration);
-        poseidon_msquic_close();
+        poseidon_msquic_close_registration("meridian");
         protocol->msquic = NULL;
         protocol->registration = NULL;
         protocol->configuration = NULL;
@@ -494,8 +486,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
             &Address))) {
         protocol->msquic->ListenerClose(protocol->listener);
         protocol->msquic->ConfigurationClose(protocol->configuration);
-        protocol->msquic->RegistrationClose(protocol->registration);
-        poseidon_msquic_close();
+        poseidon_msquic_close_registration("meridian");
         protocol->msquic = NULL;
         protocol->registration = NULL;
         protocol->configuration = NULL;
@@ -532,8 +523,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
     if (protocol->gossip_handle == NULL) {
         protocol->msquic->ListenerClose(protocol->listener);
         protocol->msquic->ConfigurationClose(protocol->configuration);
-        protocol->msquic->RegistrationClose(protocol->registration);
-        poseidon_msquic_close();
+        poseidon_msquic_close_registration("meridian");
         protocol->msquic = NULL;
         protocol->registration = NULL;
         protocol->configuration = NULL;
@@ -601,7 +591,7 @@ int meridian_protocol_stop(meridian_protocol_t* protocol) {
     }
 
     if (protocol->registration) {
-        protocol->msquic->RegistrationClose(protocol->registration);
+        poseidon_msquic_close_registration("meridian");
         protocol->registration = NULL;
     }
 

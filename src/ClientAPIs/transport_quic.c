@@ -9,7 +9,7 @@
 
 #include "transport.h"
 #include "client_protocol.h"
-#include "../Network/Meridian/msquic_singleton.h"
+#include "../Platform/poseidon_msquic.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
 #include "../Util/vec.h"
@@ -459,21 +459,13 @@ static int quic_transport_start(poseidon_transport_t* self) {
     quic_transport_data_t* data = (quic_transport_data_t*)self->loop;
     const struct QUIC_API_TABLE* api = data->api;
 
-    QUIC_STATUS status = api->RegistrationOpen(NULL, &data->registration);
-    if (QUIC_FAILED(status)) {
-        log_error("quic transport: RegistrationOpen failed: 0x%x", status);
-        return -1;
-    }
-
     QUIC_BUFFER alpn;
     alpn.Buffer = (uint8_t*)QUIC_ALPN;
     alpn.Length = sizeof(QUIC_ALPN) - 1;
 
-    status = api->ConfigurationOpen(data->registration, &alpn, 1, NULL, 0, NULL, &data->configuration);
+    QUIC_STATUS status = api->ConfigurationOpen(data->registration, &alpn, 1, NULL, 0, NULL, &data->configuration);
     if (QUIC_FAILED(status)) {
         log_error("quic transport: ConfigurationOpen failed: 0x%x", status);
-        api->RegistrationClose(data->registration);
-        data->registration = NULL;
         return -1;
     }
 
@@ -492,8 +484,6 @@ static int quic_transport_start(poseidon_transport_t* self) {
         log_error("quic transport: ConfigurationLoadCredential failed: 0x%x", status);
         api->ConfigurationClose(data->configuration);
         data->configuration = NULL;
-        api->RegistrationClose(data->registration);
-        data->registration = NULL;
         return -1;
     }
 
@@ -502,8 +492,6 @@ static int quic_transport_start(poseidon_transport_t* self) {
         log_error("quic transport: ListenerOpen failed: 0x%x", status);
         api->ConfigurationClose(data->configuration);
         data->configuration = NULL;
-        api->RegistrationClose(data->registration);
-        data->registration = NULL;
         return -1;
     }
 
@@ -518,8 +506,6 @@ static int quic_transport_start(poseidon_transport_t* self) {
         data->listener = NULL;
         api->ConfigurationClose(data->configuration);
         data->configuration = NULL;
-        api->RegistrationClose(data->registration);
-        data->registration = NULL;
         return -1;
     }
 
@@ -581,10 +567,6 @@ static int quic_transport_stop(poseidon_transport_t* self) {
         api->ConfigurationClose(data->configuration);
         data->configuration = NULL;
     }
-    if (data->registration != NULL) {
-        api->RegistrationClose(data->registration);
-        data->registration = NULL;
-    }
 
     return 0;
 }
@@ -637,6 +619,8 @@ static void quic_transport_destroy(poseidon_transport_t* transport) {
             quic_transport_stop(transport);
         }
 
+        poseidon_msquic_close_registration("poseidon_client");
+
         free(data->cert_path);
         free(data->key_path);
         platform_mutex_destroy(data->lock);;
@@ -665,8 +649,16 @@ poseidon_transport_t* poseidon_transport_quic_create(uint16_t port,
         return NULL;
     }
 
+    HQUIC registration = NULL;
+    if (!poseidon_msquic_open_registration("poseidon_client", &registration)) {
+        log_error("quic transport: failed to open msquic registration");
+        poseidon_msquic_close();
+        return NULL;
+    }
+
     poseidon_transport_t* transport = get_clear_memory(sizeof(poseidon_transport_t));
     if (transport == NULL) {
+        poseidon_msquic_close_registration("poseidon_client");
         poseidon_msquic_close();
         return NULL;
     }
@@ -674,11 +666,13 @@ poseidon_transport_t* poseidon_transport_quic_create(uint16_t port,
     quic_transport_data_t* data = get_clear_memory(sizeof(quic_transport_data_t));
     if (data == NULL) {
         free(transport);
+        poseidon_msquic_close_registration("poseidon_client");
         poseidon_msquic_close();
         return NULL;
     }
 
     data->api = api;
+    data->registration = registration;
     data->port = port;
     data->cert_path = strdup(cert_path);
     data->key_path = strdup(key_path);
@@ -687,6 +681,7 @@ poseidon_transport_t* poseidon_transport_quic_create(uint16_t port,
         free(data->key_path);
         free(data);
         free(transport);
+        poseidon_msquic_close_registration("poseidon_client");
         poseidon_msquic_close();
         return NULL;
     }

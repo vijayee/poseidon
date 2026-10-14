@@ -100,7 +100,7 @@ set(POSEIDON_CLIENT_SOURCES
     ${POSEIDON_SRC_DIR}/Platform/platform_time.c
     ${POSEIDON_SRC_DIR}/Crypto/key_pair.c
     ${POSEIDON_SRC_DIR}/RefCounter/refcounter.c
-    ${POSEIDON_SRC_DIR}/Network/Meridian/msquic_singleton.c
+    ${POSEIDON_SRC_DIR}/Platform/poseidon_msquic.c
 )
 
 # ============================================================================

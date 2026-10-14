@@ -71,7 +71,7 @@ set(MERIDIAN_RELAY_SOURCES
     ${POSEIDON_SRC_DIR}/relay_main.c
     ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_relay_server.c
     ${POSEIDON_SRC_DIR}/Network/Meridian/meridian_stream.c
-    ${POSEIDON_SRC_DIR}/Network/Meridian/msquic_singleton.c
+    ${POSEIDON_SRC_DIR}/Platform/poseidon_msquic.c
     ${POSEIDON_SRC_DIR}/RefCounter/refcounter.c
     ${POSEIDON_SRC_DIR}/Util/allocator.c
     ${POSEIDON_SRC_DIR}/Util/log.c

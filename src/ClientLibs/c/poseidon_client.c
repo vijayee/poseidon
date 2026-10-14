@@ -7,7 +7,7 @@
 #include "Crypto/key_pair.h"
 #include "Channel/channel_config.h"
 #include "ClientAPIs/client_protocol.h"
-#include "Network/Meridian/msquic_singleton.h"
+#include "Platform/poseidon_msquic.h"
 #include "Util/allocator.h"
 #include "Util/log.h"
 #include "../../Platform/platform_thread.h"
