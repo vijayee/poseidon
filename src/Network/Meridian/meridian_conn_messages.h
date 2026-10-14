@@ -24,7 +24,7 @@ extern "C" {
 /* ============================================================================
  * MESSAGE TABLE
  * ----------------------------------------------------------------------------
- * The 10 MERIDIAN_CONN_* values defined in message.h map to the following
+ * The 11 MERIDIAN_CONN_* values defined in message.h map to the following
  * payload layouts. The two lifetime rules are uniform across the family:
  *
  *   - Borrowed payloads: the sender's buffer must outlive the actor's
@@ -40,7 +40,11 @@ extern "C" {
  * drain boundary.
  * ============================================================================
  *
- *   MERIDIAN_CONN_CONNECT            -> NULL
+ *   MERIDIAN_CONN_CONNECT            -> meridian_conn_connect_msg_t
+ *                                       (borrowed: caller-owned int* result
+ *                                       out-param; handler writes 0 on
+ *                                       success, -1 on NULL conn;
+ *                                       2.8 routes this through the actor)
  *   MERIDIAN_CONN_DISCONNECT         -> NULL
  *   MERIDIAN_CONN_SEND               -> meridian_conn_send_msg_t (borrowed:
  *                                       caller-owned data buffer AND a
@@ -112,6 +116,18 @@ typedef struct meridian_conn_upgrade_to_direct_msg_t {
     int* result; /**< Borrowed: caller-owned int where the handler writes
                       the upgrade outcome. Must be non-NULL. */
 } meridian_conn_upgrade_to_direct_msg_t;
+
+/* MERIDIAN_CONN_CONNECT payload. Borrowed: the caller's result slot must
+ * outlive the actor's processing of the message. The handler writes the
+ * connect outcome into *result: 0 on success (a state transition was
+ * attempted — RELAY_ONLY/TRYING_DIRECT/RELAY cases all write 0; DIRECT
+ * is a no-op that also writes 0), or -1 on NULL conn. The wrapper's
+ * stack frame is the natural owner; it stays live across actor_run()
+ * in the caller-thread-dispatch path. */
+typedef struct meridian_conn_connect_msg_t {
+    int* result; /**< Borrowed: caller-owned int where the handler writes
+                      the connect outcome. Must be non-NULL. */
+} meridian_conn_connect_msg_t;
 
 #ifdef __cplusplus
 }

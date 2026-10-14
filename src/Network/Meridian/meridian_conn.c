@@ -28,6 +28,7 @@ static void meridian_conn_handle_set_peer_reflexive(meridian_conn_t* conn,
                                                     uint32_t addr, uint16_t port);
 static void meridian_conn_handle_upgrade_to_direct(meridian_conn_t* conn,
                                                    int* result);
+static void meridian_conn_handle_connect(meridian_conn_t* conn, int* result);
 
 meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_relay_t* relay,
                                        meridian_nat_type_t local_nat_type,
@@ -91,10 +92,10 @@ meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_rel
  * 2.5 adds MERIDIAN_CONN_SEND (with an out-param result slot). 2.6 adds the
  * two peer-info mutators (MERIDIAN_CONN_SET_PEER_NAT_TYPE and
  * MERIDIAN_CONN_SET_PEER_REFLEXIVE). 2.7 adds MERIDIAN_CONN_UPGRADE_TO_DIRECT
- * (with an out-param result slot). 2.8 will route the remaining mutators
- * (CONNECT and the relay-path mutators). Unhandled message types fall
- * through to a no-op; payload_destroy is NULL for all 10 MERIDIAN_CONN_*
- * types so no payload cleanup is required.
+ * (with an out-param result slot). 2.8 adds MERIDIAN_CONN_CONNECT (also with
+ * an out-param result slot). Unhandled message types fall through to a
+ * no-op; payload_destroy is NULL for all 11 MERIDIAN_CONN_* types so no
+ * payload cleanup is required.
  */
 static void meridian_conn_dispatch(void* state, message_t* msg) {
     meridian_conn_t* conn = (meridian_conn_t*)state;
@@ -129,6 +130,13 @@ static void meridian_conn_dispatch(void* state, message_t* msg) {
             meridian_conn_handle_upgrade_to_direct(conn, p->result);
             break;
         }
+        case MERIDIAN_CONN_CONNECT: {
+            assert(msg->payload != NULL);
+            const meridian_conn_connect_msg_t* p =
+                (const meridian_conn_connect_msg_t*)msg->payload;
+            meridian_conn_handle_connect(conn, p->result);
+            break;
+        }
         default:
             /* Unhandled message type: no-op. The message_node_t wrapper is
              * freed by actor_run after this function returns. */
@@ -159,50 +167,16 @@ void meridian_conn_destroy(meridian_conn_t* conn) {
 int meridian_conn_connect(meridian_conn_t* conn) {
     if (conn == NULL) return -1;
 
-    platform_mutex_lock(conn->lock);
-
-    switch (conn->state) {
-        case MERIDIAN_CONN_STATE_RELAY_ONLY:
-            // Symmetric NAT — only use relay
-            if (conn->relay != NULL) {
-                conn->relay_path.active = true;
-            }
-            break;
-
-        case MERIDIAN_CONN_STATE_TRYING_DIRECT:
-            // Try direct connection first, relay as backup
-            if (conn->direct_path.addr != 0 && conn->direct_path.port != 0) {
-                // Direct attempt would go here — open QUIC connection to peer
-                // For now, mark as attempting
-                conn->direct_attempts++;
-                conn->last_direct_attempt_ms = 0; // Would use timestamp
-                // If relay is available, start relay connection as backup
-                if (conn->relay != NULL) {
-                    conn->relay_path.active = true;
-                }
-            } else {
-                // No address — fall back to relay
-                conn->state = MERIDIAN_CONN_STATE_RELAY;
-                if (conn->relay != NULL) {
-                    conn->relay_path.active = true;
-                }
-            }
-            break;
-
-        case MERIDIAN_CONN_STATE_RELAY:
-            // Use relay connection
-            if (conn->relay != NULL) {
-                conn->relay_path.active = true;
-            }
-            break;
-
-        case MERIDIAN_CONN_STATE_DIRECT:
-            // Already connected directly — nothing to do
-            break;
+    int result = 0;
+    meridian_conn_connect_msg_t payload = { .result = &result };
+    message_t msg = { .type = MERIDIAN_CONN_CONNECT,
+                      .payload = &payload,
+                      .payload_destroy = NULL };
+    if (!actor_send(&conn->actor, &msg)) {
+        return -1;
     }
-
-    platform_mutex_unlock(conn->lock);
-    return 0;
+    actor_run(&conn->actor, 32);
+    return result;
 }
 
 /**
@@ -430,6 +404,70 @@ static void meridian_conn_handle_upgrade_to_direct(meridian_conn_t* conn,
     conn->state = MERIDIAN_CONN_STATE_TRYING_DIRECT;
     conn->direct_attempts++;
     conn->last_direct_attempt_ms = 0;
+    *result = 0;
+}
+
+/**
+ * @brief Actor-thread body of MERIDIAN_CONN_CONNECT.
+ *
+ * Runs on the conn's actor thread (worker thread under a real pool, caller
+ * thread under the NULL-pool synchronous-drain path used in tests). The
+ * pre-2.8 body held conn->lock around this exact 4-state switch; 2.8
+ * retires that lock because the actor model already serializes the body
+ * on a single thread.
+ *
+ * Replicates the original wrapper's switch on conn->state: RELAY_ONLY and
+ * RELAY both activate the relay path (no-op if relay is NULL); TRYING_DIRECT
+ * increments direct_attempts and may fall back to RELAY when no direct
+ * address is known; DIRECT is a no-op (already connected). Writes 0 into
+ * *result on every branch (the contract: the only non-zero return is the
+ * NULL-conn fast-path in the public wrapper, which never reaches the
+ * actor).
+ */
+static void meridian_conn_handle_connect(meridian_conn_t* conn, int* result) {
+    assert(conn != NULL);
+    assert(result != NULL);
+
+    switch (conn->state) {
+        case MERIDIAN_CONN_STATE_RELAY_ONLY:
+            // Symmetric NAT — only use relay
+            if (conn->relay != NULL) {
+                conn->relay_path.active = true;
+            }
+            break;
+
+        case MERIDIAN_CONN_STATE_TRYING_DIRECT:
+            // Try direct connection first, relay as backup
+            if (conn->direct_path.addr != 0 && conn->direct_path.port != 0) {
+                // Direct attempt would go here — open QUIC connection to peer
+                // For now, mark as attempting
+                conn->direct_attempts++;
+                conn->last_direct_attempt_ms = 0; // Would use timestamp
+                // If relay is available, start relay connection as backup
+                if (conn->relay != NULL) {
+                    conn->relay_path.active = true;
+                }
+            } else {
+                // No address — fall back to relay
+                conn->state = MERIDIAN_CONN_STATE_RELAY;
+                if (conn->relay != NULL) {
+                    conn->relay_path.active = true;
+                }
+            }
+            break;
+
+        case MERIDIAN_CONN_STATE_RELAY:
+            // Use relay connection
+            if (conn->relay != NULL) {
+                conn->relay_path.active = true;
+            }
+            break;
+
+        case MERIDIAN_CONN_STATE_DIRECT:
+            // Already connected directly — nothing to do
+            break;
+    }
+
     *result = 0;
 }
 
