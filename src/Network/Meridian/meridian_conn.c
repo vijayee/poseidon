@@ -7,6 +7,7 @@
 #include "meridian_relay_server.h"
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
+#include "../../Actor/actor.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,12 +15,14 @@
 // CONNECTION LIFECYCLE
 // ============================================================================
 
+/** Forward declaration — defined below. */
+static void meridian_conn_dispatch(void* state, message_t* msg);
+
 meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_relay_t* relay,
                                        meridian_nat_type_t local_nat_type,
                                        const struct QUIC_API_TABLE* msquic,
                                        struct scheduler_pool_t* pool) {
     if (peer == NULL) return NULL;
-    (void)pool;  /* Wired to actor in 2.3. */
 
     meridian_conn_t* conn = (meridian_conn_t*)get_clear_memory(sizeof(meridian_conn_t));
     if (conn == NULL) return NULL;
@@ -57,9 +60,31 @@ meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_rel
         conn->state = MERIDIAN_CONN_STATE_RELAY;
     }
 
+    // Wire the actor mailbox. NULL pool = caller-thread dispatch (registry skipped).
+    conn->pool = pool;
+    actor_init(&conn->actor, conn, meridian_conn_dispatch, pool);
+
     conn->lock = platform_mutex_create();;
     refcounter_init(&conn->refcounter);
     return conn;
+}
+
+/**
+ * @brief Actor dispatch entry point.
+ *
+ * Called serially on the actor's owning thread (worker pool thread when a
+ * scheduler pool is wired in, caller thread when pool == NULL). Receives one
+ * message at a time off conn->actor's mailbox.
+ *
+ * No mutators are converted yet — every message currently falls through the
+ * unhandled branch and is silently discarded (with the message_t struct itself
+ * leaking, since payload_destroy is NULL for all 10 MERIDIAN_CONN_* types).
+ * 2.4 will route the first case (MERIDIAN_CONN_DISCONNECT) through here.
+ */
+static void meridian_conn_dispatch(void* state, message_t* msg) {
+    (void)state;
+    (void)msg;
+    /* No mutators converted yet. 2.4 will add the first case. */
 }
 
 void meridian_conn_destroy(meridian_conn_t* conn) {
@@ -72,6 +97,7 @@ void meridian_conn_destroy(meridian_conn_t* conn) {
             conn->direct_connection = NULL;
         }
         // relay is borrowed — don't destroy it here
+        actor_destroy(&conn->actor);
         platform_mutex_destroy(conn->lock);;
         free(conn);
     }
