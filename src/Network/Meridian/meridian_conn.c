@@ -17,6 +17,7 @@
 
 /** Forward declaration — defined below. */
 static void meridian_conn_dispatch(void* state, message_t* msg);
+static void meridian_conn_handle_disconnect(meridian_conn_t* conn);
 
 meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_relay_t* relay,
                                        meridian_nat_type_t local_nat_type,
@@ -76,15 +77,23 @@ meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_rel
  * scheduler pool is wired in, caller thread when pool == NULL). Receives one
  * message at a time off conn->actor's mailbox.
  *
- * No mutators are converted yet — every message currently falls through the
- * unhandled branch and is silently discarded (with the message_t struct itself
- * leaking, since payload_destroy is NULL for all 10 MERIDIAN_CONN_* types).
- * 2.4 will route the first case (MERIDIAN_CONN_DISCONNECT) through here.
+ * 2.4 routes the first mutator (MERIDIAN_CONN_DISCONNECT) through this switch.
+ * Later steps will add cases for SEND, SET_PEER_NAT_TYPE, SET_PEER_REFLEXIVE,
+ * and the relay-path mutators. Unhandled message types fall through to a
+ * no-op; payload_destroy is NULL for all 10 MERIDIAN_CONN_* types so no
+ * payload cleanup is required.
  */
 static void meridian_conn_dispatch(void* state, message_t* msg) {
-    (void)state;
-    (void)msg;
-    /* No mutators converted yet. 2.4 will add the first case. */
+    meridian_conn_t* conn = (meridian_conn_t*)state;
+    switch (msg->type) {
+        case MERIDIAN_CONN_DISCONNECT:
+            meridian_conn_handle_disconnect(conn);
+            break;
+        default:
+            /* Unhandled message type: no-op. The message_node_t wrapper is
+             * freed by actor_run after this function returns. */
+            break;
+    }
 }
 
 void meridian_conn_destroy(meridian_conn_t* conn) {
@@ -156,11 +165,16 @@ int meridian_conn_connect(meridian_conn_t* conn) {
     return 0;
 }
 
-void meridian_conn_disconnect(meridian_conn_t* conn) {
-    if (conn == NULL) return;
-
-    platform_mutex_lock(conn->lock);
-
+/**
+ * @brief Actor-thread handler for MERIDIAN_CONN_DISCONNECT.
+ *
+ * Runs serially on the actor's owning thread — the same serialization the
+ * explicit platform_mutex_* calls used to provide. No lock is taken here:
+ * actor dispatch already guarantees exclusive access to conn's mutable
+ * fields. Shutdown/close, path flag reset, and state transition to RELAY
+ * are performed in the same order as the pre-2.4 implementation.
+ */
+static void meridian_conn_handle_disconnect(meridian_conn_t* conn) {
     // Shut down and close the direct QUIC connection if active
     if (conn->direct_connection != NULL && conn->msquic != NULL) {
         conn->msquic->ConnectionShutdown(conn->direct_connection,
@@ -172,8 +186,26 @@ void meridian_conn_disconnect(meridian_conn_t* conn) {
     conn->direct_path.active = false;
     conn->relay_path.active = false;
     conn->state = MERIDIAN_CONN_STATE_RELAY;
+}
 
-    platform_mutex_unlock(conn->lock);
+void meridian_conn_disconnect(meridian_conn_t* conn) {
+    if (conn == NULL) return;
+
+    /* Post a disconnect message to the actor and drain synchronously. When
+     * a scheduler pool is wired in, scheduler_inject (inside actor_send)
+     * will route this through a worker thread; with pool == NULL the
+     * queue stays IDLE and actor_run drains on the caller's thread. */
+    message_t msg = {
+        .type = MERIDIAN_CONN_DISCONNECT,
+        .payload = NULL,
+        .payload_destroy = NULL,
+    };
+    if (!actor_send(&conn->actor, &msg)) {
+        /* DESTROY flag already set or queue rejected the push — nothing to
+         * do; the connection is on its way out. */
+        return;
+    }
+    actor_run(&conn->actor, 32);
 }
 
 int meridian_conn_send(meridian_conn_t* conn, const uint8_t* data, uint32_t len) {
