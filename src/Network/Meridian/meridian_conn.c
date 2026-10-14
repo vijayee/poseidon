@@ -3,11 +3,13 @@
 //
 
 #include "meridian_conn.h"
+#include "meridian_conn_messages.h"
 #include "meridian_relay.h"
 #include "meridian_relay_server.h"
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
 #include "../../Actor/actor.h"
+#include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -18,6 +20,8 @@
 /** Forward declaration — defined below. */
 static void meridian_conn_dispatch(void* state, message_t* msg);
 static void meridian_conn_handle_disconnect(meridian_conn_t* conn);
+static void meridian_conn_handle_send(meridian_conn_t* conn, const uint8_t* data,
+                                      uint32_t len, int* result);
 
 meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_relay_t* relay,
                                        meridian_nat_type_t local_nat_type,
@@ -89,6 +93,12 @@ static void meridian_conn_dispatch(void* state, message_t* msg) {
         case MERIDIAN_CONN_DISCONNECT:
             meridian_conn_handle_disconnect(conn);
             break;
+        case MERIDIAN_CONN_SEND: {
+            assert(msg->payload != NULL);
+            const meridian_conn_send_msg_t* p = (const meridian_conn_send_msg_t*)msg->payload;
+            meridian_conn_handle_send(conn, p->data, p->len, p->result);
+            break;
+        }
         default:
             /* Unhandled message type: no-op. The message_node_t wrapper is
              * freed by actor_run after this function returns. */
@@ -208,26 +218,55 @@ void meridian_conn_disconnect(meridian_conn_t* conn) {
     actor_run(&conn->actor, 32);
 }
 
+/**
+ * @brief Actor-thread handler for MERIDIAN_CONN_SEND.
+ *
+ * Runs serially on the actor's owning thread. No lock is taken: actor
+ * dispatch already guarantees exclusive access to conn's mutable fields.
+ * Writes the send outcome into the caller-owned *result slot: (int)len on
+ * success, leaves the initial -1 in place on no-path or send failure.
+ * The caller's data buffer must outlive this function — actor_send copies
+ * the message_t by value into its own message_node_t, so by the time we
+ * run, the wrapper's stack frame is irrelevant to the data pointer.
+ */
+static void meridian_conn_handle_send(meridian_conn_t* conn, const uint8_t* data,
+                                      uint32_t len, int* result) {
+    /* result is initialized to -1 by the wrapper before actor_send. We
+     * only overwrite on a successful send; on the no-path / failure
+     * branches we leave -1 as the final value. */
+    if (conn->direct_path.active && conn->direct_connection != NULL && conn->msquic != NULL) {
+        int rc = meridian_stream_send_uni(conn->msquic, conn->direct_connection,
+                                          data, (size_t)len, NULL);
+        if (rc == 0) *result = (int)len;
+    } else if (conn->relay_path.active && conn->relay != NULL) {
+        int rc = meridian_relay_send_datagram(conn->relay, data, (size_t)len,
+                                              conn->relay_endpoint_id);
+        if (rc == 0) *result = (int)len;
+    }
+}
+
 int meridian_conn_send(meridian_conn_t* conn, const uint8_t* data, uint32_t len) {
     if (conn == NULL || data == NULL || len == 0) return -1;
 
-    platform_mutex_lock(conn->lock);
-
+    /* Result lives on our stack; the actor is drained synchronously below
+     * so it stays live across the dispatch. */
     int result = -1;
-
-    // Prefer direct path if active
-    if (conn->direct_path.active && conn->direct_connection != NULL && conn->msquic != NULL) {
-        result = meridian_stream_send_uni(conn->msquic, conn->direct_connection,
-                                           data, (size_t)len, NULL);
-        if (result == 0) result = (int)len;
-    } else if (conn->relay_path.active && conn->relay != NULL) {
-        // Fall back to relay
-        result = meridian_relay_send_datagram(conn->relay, data, (size_t)len,
-                                               conn->relay_endpoint_id);
-        if (result == 0) result = (int)len;
+    meridian_conn_send_msg_t payload = {
+        .data = data,
+        .len = len,
+        .result = &result,
+    };
+    message_t msg = {
+        .type = MERIDIAN_CONN_SEND,
+        .payload = &payload,
+        .payload_destroy = NULL,
+    };
+    if (!actor_send(&conn->actor, &msg)) {
+        /* DESTROY flag already set or queue rejected the push — connection
+         * is on its way out. Return -1 to mirror the pre-2.5 contract. */
+        return -1;
     }
-
-    platform_mutex_unlock(conn->lock);
+    actor_run(&conn->actor, 32);
     return result;
 }
 

@@ -94,6 +94,35 @@ TEST_F(ConnTest, UpgradeToDirectRequiresReflexive) {
     meridian_node_destroy(peer);
 }
 
+// Negative path: with no direct_connection and no relay, the handler's
+// direct-path and relay-path branches both fall through, leaving the
+// initial -1 in the caller's result slot. Exercises the actor
+// wrapper→handler split and the int* result out-param mechanism.
+TEST_F(ConnTest, SendNoPath) {
+    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080, NULL);
+    meridian_conn_t* conn = meridian_conn_create(peer, NULL, MERIDIAN_NAT_TYPE_OPEN, NULL, NULL);
+    ASSERT_NE(nullptr, conn);
+
+    // Neither direct_path.active nor relay_path.active is set without a
+    // connect() call and a live relay — both handler branches are no-ops.
+    const uint8_t data[] = {0x01, 0x02, 0x03, 0x04};
+    EXPECT_EQ(-1, meridian_conn_send(conn, data, sizeof(data)));
+
+    // Idempotency: a second send through the same actor still returns -1
+    // without leaking or mutating the connection.
+    EXPECT_EQ(-1, meridian_conn_send(conn, data, sizeof(data)));
+
+    // Queries still work post-dispatch — confirms actor-thread access did
+    // not corrupt conn's mutable state. Freshly created with OPEN NAT, no
+    // paths are active yet, so neither direct nor relay is asserted.
+    EXPECT_EQ(MERIDIAN_CONN_STATE_TRYING_DIRECT, meridian_conn_get_state(conn));
+    EXPECT_FALSE(meridian_conn_is_direct(conn));
+    EXPECT_FALSE(meridian_conn_is_relay(conn));
+
+    meridian_conn_destroy(conn);
+    meridian_node_destroy(peer);
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

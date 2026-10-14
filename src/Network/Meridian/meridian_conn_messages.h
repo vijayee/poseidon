@@ -42,7 +42,11 @@ extern "C" {
  *
  *   MERIDIAN_CONN_CONNECT            -> NULL
  *   MERIDIAN_CONN_DISCONNECT         -> NULL
- *   MERIDIAN_CONN_SEND               -> meridian_conn_send_msg_t (borrowed)
+ *   MERIDIAN_CONN_SEND               -> meridian_conn_send_msg_t (borrowed:
+ *                                       caller-owned data buffer AND a
+ *                                       caller-owned int* result out-param;
+ *                                       handler writes (int)len or -1 into
+ *                                       *result)
  *   MERIDIAN_CONN_UPGRADE_TO_DIRECT  -> NULL
  *   MERIDIAN_CONN_DIRECT_CONNECTED   -> NULL (reserved for msquic callback
  *                                            wiring; layout TBD in a later
@@ -65,11 +69,17 @@ extern "C" {
  * the entire family's lifetime.
  * ============================================================================ */
 
-/* MERIDIAN_CONN_SEND payload. Borrowed: the caller's data buffer must
- * outlive the actor's processing of the message. */
+/* MERIDIAN_CONN_SEND payload. Borrowed: the caller's data buffer AND
+ * the caller's result slot must outlive the actor's processing of the
+ * message. The handler writes the send outcome into *result: (int)len on
+ * success, -1 on no-path or send failure. The wrapper's stack frame is
+ * the natural owner; it stays live across actor_run() in the
+ * caller-thread-dispatch path. */
 typedef struct meridian_conn_send_msg_t {
     const uint8_t* data;   /**< Borrowed: caller-owned send buffer. */
     uint32_t       len;    /**< Buffer length in bytes. */
+    int*           result; /**< Borrowed: caller-owned int where the handler
+                                writes the send outcome. Must be non-NULL. */
 } meridian_conn_send_msg_t;
 
 /* MERIDIAN_CONN_SET_PEER_NAT_TYPE payload. Borrowed-by-value: the enum
