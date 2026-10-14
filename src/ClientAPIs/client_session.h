@@ -1,6 +1,8 @@
 //
 // Created by victor on 4/22/26.
 //
+// Vendored from liboffs/src/ClientAPIs/client_session.h. See "Local modifications" at EOF.
+//
 
 #ifndef POSEIDON_CLIENT_SESSION_H
 #define POSEIDON_CLIENT_SESSION_H
@@ -12,6 +14,7 @@
 #include "../Channel/channel_manager.h"
 #include "../Platform/platform_thread.h"
 #include "../RefCounter/refcounter.h"
+#include "../Actor/actor.h"
 
 typedef struct poseidon_transport_t poseidon_transport_t;
 
@@ -33,10 +36,21 @@ typedef struct client_session_t {
     int client_fd;
     poseidon_transport_t* transport;
     poseidon_channel_manager_t* manager;
+    scheduler_pool_t* pool;
+    actor_t actor;
     client_subscription_t subscriptions[CLIENT_SESSION_MAX_SUBSCRIPTIONS];
     size_t num_subscriptions;
     uint32_t next_request_id;
-    platform_mutex_t* lock;
+    // Actor-query out-fields: pre-initialised by the wrapper before actor_send,
+    // written by the matching _impl during dispatch, read by the wrapper after
+    // actor_run returns. See channel_manager.h for the established pattern.
+    int register_out;
+    int subscribe_out;
+    int unsubscribe_out;
+    bool is_subscribed_out;
+    bool has_loopback_out;
+    cbor_item_t* handle_request_response_out;
+    int handle_request_rc_out;
 } client_session_t;
 
 client_session_t* client_session_create(uint32_t session_id,
