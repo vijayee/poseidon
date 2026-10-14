@@ -23,6 +23,7 @@ extern "C" {
 // ============================================================================
 
 struct meridian_relay_t;
+struct scheduler_pool_t;
 
 // ============================================================================
 // CONNECTION STATE
@@ -98,11 +99,14 @@ typedef struct meridian_conn_t {
  * @param peer           Peer node to connect to
  * @param relay          Relay client (NULL if direct-only)
  * @param local_nat_type Our NAT type for this connection
+ * @param msquic         msquic API table (may be NULL for tests)
+ * @param pool           Scheduler pool for actor dispatch (NULL = caller-thread dispatch)
  * @return               New connection with refcount=1, or NULL on failure
  */
 meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_relay_t* relay,
                                        meridian_nat_type_t local_nat_type,
-                                       const struct QUIC_API_TABLE* msquic);
+                                       const struct QUIC_API_TABLE* msquic,
+                                       struct scheduler_pool_t* pool);
 
 /**
  * Destroys a connection.

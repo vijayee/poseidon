@@ -16,8 +16,10 @@
 
 meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_relay_t* relay,
                                        meridian_nat_type_t local_nat_type,
-                                       const struct QUIC_API_TABLE* msquic) {
+                                       const struct QUIC_API_TABLE* msquic,
+                                       struct scheduler_pool_t* pool) {
     if (peer == NULL) return NULL;
+    (void)pool;  /* Wired to actor in 2.3. */
 
     meridian_conn_t* conn = (meridian_conn_t*)get_clear_memory(sizeof(meridian_conn_t));
     if (conn == NULL) return NULL;
