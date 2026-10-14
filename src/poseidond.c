@@ -7,6 +7,7 @@
 #include "Network/Meridian/msquic_singleton.h"
 #include "Workers/pool.h"
 #include "Time/wheel.h"
+#include "Scheduler/scheduler.h"
 #include "Crypto/key_pair.h"
 #include "Util/log.h"
 #include <stdio.h>
@@ -131,10 +132,25 @@ int main(int argc, char* argv[]) {
     hierarchical_timing_wheel_t* wheel = hierarchical_timing_wheel_create(8, pool);
     hierarchical_timing_wheel_run(wheel);
 
+    // Create scheduler pool (single-owner; teardown before work_pool)
+    scheduler_pool_t* sched = scheduler_pool_create(platform_core_count());
+    if (sched == NULL) {
+        log_error("poseidond: failed to create scheduler pool");
+        hierarchical_timing_wheel_destroy(wheel);
+        work_pool_shutdown(pool);
+        work_pool_join_all(pool);
+        work_pool_destroy(pool);
+        poseidon_msquic_close();
+        return EXIT_FAILURE;
+    }
+    scheduler_pool_start(sched);
+
     // Create dial channel key pair
     poseidon_key_pair_t* dial_key = poseidon_key_pair_create("ED25519");
     if (dial_key == NULL) {
         log_error("poseidond: failed to create dial key pair");
+        scheduler_pool_stop(sched);
+        scheduler_pool_destroy(sched);
         poseidon_msquic_close();
         work_pool_shutdown(pool);
         work_pool_join_all(pool);
@@ -145,10 +161,29 @@ int main(int argc, char* argv[]) {
 
     // Create channel manager
     poseidon_channel_manager_t* mgr = poseidon_channel_manager_create(
-        dial_key, dial_port, port_range_start, port_range_end, pool, wheel);
+        dial_key, dial_port, port_range_start, port_range_end, pool, wheel, sched);
     if (mgr == NULL) {
         log_error("poseidond: failed to create channel manager");
         poseidon_key_pair_destroy(dial_key);
+        scheduler_pool_stop(sched);
+        scheduler_pool_destroy(sched);
+        poseidon_msquic_close();
+        work_pool_shutdown(pool);
+        work_pool_join_all(pool);
+        work_pool_destroy(pool);
+        hierarchical_timing_wheel_destroy(wheel);
+        return EXIT_FAILURE;
+    }
+
+    // Start the manager's dial channel (msquic listener bind).
+    // _create leaves the dial channel passive so unit tests can run
+    // without a live msquic environment; the daemon must start it here.
+    if (poseidon_channel_manager_start(mgr) != 0) {
+        log_error("poseidond: failed to start channel manager dial channel");
+        poseidon_channel_manager_destroy(mgr);
+        poseidon_key_pair_destroy(dial_key);
+        scheduler_pool_stop(sched);
+        scheduler_pool_destroy(sched);
         poseidon_msquic_close();
         work_pool_shutdown(pool);
         work_pool_join_all(pool);
@@ -294,6 +329,10 @@ int main(int argc, char* argv[]) {
     // Cleanup
     poseidon_channel_manager_destroy(mgr);
     poseidon_key_pair_destroy(dial_key);
+    scheduler_pool_drain_pending_derefs(sched);
+    scheduler_pool_wait_for_idle(sched);
+    scheduler_pool_stop(sched);
+    scheduler_pool_destroy(sched);
     hierarchical_timing_wheel_wait_for_idle_signal(wheel);
     hierarchical_timing_wheel_stop(wheel);
     work_pool_shutdown(pool);

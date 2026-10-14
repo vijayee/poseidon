@@ -277,7 +277,7 @@ protected:
         ASSERT_NE(dial_key_pair, nullptr);
 
         mgr = poseidon_channel_manager_create(dial_key_pair, 18000, 18001, 18010,
-                                               pool, wheel);
+                                               pool, wheel, nullptr);
         ASSERT_NE(mgr, nullptr);
     }
 

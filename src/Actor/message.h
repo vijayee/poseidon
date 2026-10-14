@@ -74,6 +74,94 @@ typedef enum {
   MERIDIAN_CONN_TEST_FORCE_STATE,
   /* Tear down the connection and free the actor. Refcount==0 path only. */
   MERIDIAN_CONN_DESTROY,
+
+  /* --- poseidon_channel_manager actor (subsystem actor) ---
+   *
+   * Subsystem: Channel/channel_manager.{c,h}
+   * Per-subsystem payload layouts live in
+   * src/Channel/channel_manager_messages.h, mirroring the
+   * meridian_conn_messages.h split that keeps this header
+   * dependency-free.
+   *
+   * 2.10 routes the 11 mutators of poseidon_channel_manager_t
+   * (create_channel, join_channel, destroy_channel, the two
+   * bootstrap handlers, the two notice handlers, add_tombstone,
+   * expire_tombstones, register_session, unregister_session)
+   * through actor_send. All callers (client_session.c
+   * create/join, channel_manager_bootstrap_intercept from the
+   * subscriber thread, and the in-process notice handlers)
+   * dispatch + drain synchronously on the calling thread using
+   * actor_run(actor, 32) so the public function return values
+   * (poseidon_channel_t* / int) remain available to the wrapper
+   * through borrowed int** / X** out-params on the payload
+   * struct.
+   */
+
+  /* Create a new locally-owned channel. The wrapper's stack frame
+   * owns the out_channel slot; the handler writes the new
+   * poseidon_channel_t* into *out_channel (or NULL on rejection).
+   * (was: direct field mutation under mgr->lock). */
+  POSEIDON_CHANNEL_MANAGER_MSG_CREATE_CHANNEL,
+  /* Join an existing channel via bootstrap request. Same
+   * out-channel convention as CREATE_CHANNEL; the handler also
+   * records a pending_bootstrap_t entry so the eventual
+   * HANDLE_BOOTSTRAP_REPLY can resolve it.
+   * (was: direct field mutation under mgr->lock). */
+  POSEIDON_CHANNEL_MANAGER_MSG_JOIN_CHANNEL,
+  /* Tear down a channel identified by node_id. No return value.
+   * (was: direct field mutation under mgr->lock). */
+  POSEIDON_CHANNEL_MANAGER_MSG_DESTROY_CHANNEL,
+  /* I/O-bound bootstrap reply handler. Splits the work: mutates
+   * pending_bootstraps under the actor, then releases for the
+   * meridian_protocol_connect + add_seed_node loop. Wrapper
+   * reads *out_rc for the int return.
+   * (was: lock L317 around the pending mutation, then unlocked
+   * I/O — 2.10 preserves the split via actor dispatch). */
+  POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_BOOTSTRAP_REPLY,
+  /* Inbound bootstrap request from a peer. If a tombstone exists
+   * for the topic, a synthesized delete/modify notice is
+   * published on the dial channel synchronously inside the
+   * handler; otherwise the request is routed to
+   * poseidon_channel_handle_bootstrap_request. Wrapper reads
+   * *out_rc for the int return.
+   * (was: tombstone check + encode + synchronous publish on
+   * mgr->dial_channel inside the request handler — 2.10 keeps
+   * the synchronous publish because it is the only way to
+   * satisfy the protocol reply before the requester times out).
+   */
+  POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_BOOTSTRAP_REQUEST,
+  /* Inbound delete notice from the network. The wrapper keeps
+   * the caller-allocated meridian_channel_delete_notice_t alive
+   * across the actor_run drain via the borrowed pointer on the
+   * payload. Handler rebuilds a tombstone, finds any matching
+   * local channel, deletes it, then re-publishes the notice on
+   * the dial channel.
+   * (was: direct field mutation under mgr->lock L507). */
+  POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_DELETE_NOTICE,
+  /* Inbound modify notice. Same pattern as HANDLE_DELETE_NOTICE
+   * but the tombstone type is MODIFY and the matched local
+   * channel is rejoined with the supplied config.
+   * (was: direct field mutation under mgr->lock L557). */
+  POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_MODIFY_NOTICE,
+  /* Append a tombstone to the manager's ring. The wrapper's
+   * tombstone is copied into the actor's local copy, so the
+   * caller can free its tombstone immediately after
+   * actor_send + actor_run returns.
+   * (was: direct append under mgr->lock L633). */
+  POSEIDON_CHANNEL_MANAGER_MSG_ADD_TOMBSTONE,
+  /* Sweep expired tombstones. Called from tick_all under the
+   * timing wheel. No arguments; no return value.
+   * (was: in-place sweep under mgr->lock L676). */
+  POSEIDON_CHANNEL_MANAGER_MSG_EXPIRE_TOMBSTONES,
+  /* Register a client session in the manager's session
+   * registry. The session pointer is borrowed (opaque void*);
+   * the registry does not take ownership.
+   * (was: capacity check + append under mgr->lock L753). */
+  POSEIDON_CHANNEL_MANAGER_MSG_REGISTER_SESSION,
+  /* Unregister a client session. swap-remove lookup + drop
+   * under the actor.
+   * (was: swap-remove under mgr->lock L765). */
+  POSEIDON_CHANNEL_MANAGER_MSG_UNREGISTER_SESSION,
 } message_type_e;
 
 /* Base message. The actor's dispatch receives one of these; type selects the
@@ -139,4 +227,16 @@ typedef struct message_t {
  * Network/Meridian/meridian_conn_messages.h, keeping message.h free of
  * Meridian / msquic / network dependencies. The Timer trim is preserved
  * exactly; the change is purely additive to the enum.
+ *
+ * Phase 2 (commit 2.10) adds the POSEIDON_CHANNEL_MANAGER_* family (11 entries)
+ * above the local-modifications block. The enum is still the global
+ * message_type_e; Channel/channel_manager payload structs live in the
+ * per-subsystem header Channel/channel_manager_messages.h, keeping
+ * message.h free of Channel / network / notice / tombstone dependencies.
+ * The change is purely additive to the enum; the 11 existing TIMER_*
+ * and 11 MERIDIAN_CONN_* families are unchanged. As with the Meridian
+ * connection migration, all 11 channel-manager mutators route through
+ * actor_send + actor_run synchronous drain so caller-side return values
+ * (poseidon_channel_t* / int) remain available to the wrappers through
+ * borrowed out-param pointers on the payload struct.
  */

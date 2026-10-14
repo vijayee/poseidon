@@ -15,6 +15,7 @@
 #include "../Network/Meridian/meridian_packet.h"
 #include "../Workers/pool.h"
 #include "../Time/wheel.h"
+#include "../Actor/actor.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -66,13 +67,44 @@ typedef struct poseidon_channel_manager_t {
     uint16_t port_range_end;
     work_pool_t* pool;
     hierarchical_timing_wheel_t* wheel;
-    platform_mutex_t* lock;
+    actor_t actor;  /**< Mailbox / dispatch state (embedded by value) */
     pending_bootstrap_t pending_bootstraps[POSEIDON_MAX_PENDING_BOOTSTRAPS];
     size_t num_pending_bootstraps;
     poseidon_tombstone_t tombstones[POSEIDON_TOMBSTONE_MAX];
     size_t num_tombstones;
     void* sessions[POSEIDON_SESSION_REGISTRY_MAX];
     size_t num_sessions;
+
+    /* External-reader mutex. The actor is the only writer of the session
+     * and channel registries; pre-actorization callers (client_session.c)
+     * still take this lock to snapshot the lists from other threads. The
+     * manager itself never takes this lock. Tracked for removal when all
+     * external readers migrate to actor queries. */
+    platform_mutex_t* external_lock;
+
+    /* Out-parameter fields written by the actor dispatch and read by the
+     * synchronous public wrappers (actor_send + actor_run on caller thread). */
+    poseidon_channel_t* create_channel_out;
+    poseidon_channel_t* join_channel_out;
+    int destroy_channel_out;
+    bool hbr_first_reply;
+    meridian_protocol_t* hbr_protocol;
+    int hbr_return_value;
+    char hbrq_responder_node_id[64];
+    uint32_t hbrq_responder_addr;
+    uint16_t hbrq_responder_port;
+    poseidon_channel_t* hbrq_dial_channel;
+    uint64_t hbrq_timestamp_us;
+    unsigned char* hbrq_publish_buf;
+    size_t hbrq_publish_len;
+    cbor_item_t* hbrq_tombstone_encoded;
+    int hbrq_tombstone_type;
+    int hbrq_return_value;
+    int hdn_did_work;
+    int hmn_did_work;
+    int add_tombstone_out;
+    int register_session_out;
+    int unregister_session_out;
 } poseidon_channel_manager_t;
 
 // ============================================================================
@@ -89,6 +121,8 @@ typedef struct poseidon_channel_manager_t {
  * @param port_range_end   End of the port range (inclusive)
  * @param pool            Work pool for async operations
  * @param wheel           Timing wheel for scheduling
+ * @param sched           Scheduler pool owning the manager actor
+ *                        (NULL = caller-thread dispatch via actor_run)
  * @return                New manager with refcount=1, or NULL on failure
  */
 poseidon_channel_manager_t* poseidon_channel_manager_create(
@@ -97,9 +131,23 @@ poseidon_channel_manager_t* poseidon_channel_manager_create(
     uint16_t port_range_start,
     uint16_t port_range_end,
     work_pool_t* pool,
-    hierarchical_timing_wheel_t* wheel);
+    hierarchical_timing_wheel_t* wheel,
+    scheduler_pool_t* sched);
 
 void poseidon_channel_manager_destroy(poseidon_channel_manager_t* mgr);
+
+/**
+ * Starts the manager's internal dial channel (msquic listener bind).
+ *
+ * The dial channel is created in a passive state by
+ * poseidon_channel_manager_create so unit tests can exercise the manager
+ * actor without a live msquic environment. Production callers (the daemon)
+ * must invoke this after create and before serving traffic.
+ *
+ * @param mgr  Manager whose dial channel should be started
+ * @return     0 on success, -1 on failure
+ */
+int poseidon_channel_manager_start(poseidon_channel_manager_t* mgr);
 
 // ============================================================================
 // CHANNEL MANAGEMENT

@@ -172,7 +172,7 @@ protected:
 };
 
 TEST_F(ChannelManagerBootstrapTest, JoinChannelCreatesPendingBootstrap) {
-    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel);
+    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel, nullptr);
     ASSERT_NE(mgr, nullptr);
 
     const char* topic = "TestTopic123";
@@ -190,7 +190,7 @@ TEST_F(ChannelManagerBootstrapTest, JoinChannelCreatesPendingBootstrap) {
 }
 
 TEST_F(ChannelManagerBootstrapTest, HandleBootstrapRequestRejectsUnknownTopic) {
-    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel);
+    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel, nullptr);
     ASSERT_NE(mgr, nullptr);
 
     // No channels joined yet, so request for any topic should fail
@@ -198,7 +198,7 @@ TEST_F(ChannelManagerBootstrapTest, HandleBootstrapRequestRejectsUnknownTopic) {
 }
 
 TEST_F(ChannelManagerBootstrapTest, HandleBootstrapReplyFindsPending) {
-    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel);
+    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel, nullptr);
     ASSERT_NE(mgr, nullptr);
 
     const char* topic = "TestTopic456";
@@ -220,7 +220,7 @@ TEST_F(ChannelManagerBootstrapTest, HandleBootstrapReplyFindsPending) {
 }
 
 TEST_F(ChannelManagerBootstrapTest, HandleBootstrapReplyNotFound) {
-    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel);
+    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel, nullptr);
     ASSERT_NE(mgr, nullptr);
 
     // No pending bootstrap for this topic/timestamp

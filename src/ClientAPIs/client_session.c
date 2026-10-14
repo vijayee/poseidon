@@ -546,16 +546,16 @@ bool client_session_has_loopback(client_session_t* session, const char* topic_pa
 static bool manager_has_other_subscriber(poseidon_channel_manager_t* mgr,
                                           const char* topic_path,
                                           const client_session_t* exclude) {
-    // Snapshot session pointers to avoid holding manager->lock while
+    // Snapshot session pointers to avoid holding manager->external_lock while
     // taking session->lock (prevents deadlock with dispatch path)
     vec_t(client_session_t*) snap;
     vec_init(&snap);
-    platform_mutex_lock(mgr->lock);
+    platform_mutex_lock(mgr->external_lock);
     for (size_t i = 0; i < mgr->num_sessions; i++) {
         client_session_t* s = (client_session_t*)mgr->sessions[i];
         if (s != NULL && s != exclude) vec_push(&snap, s);
     }
-    platform_mutex_unlock(mgr->lock);
+    platform_mutex_unlock(mgr->external_lock);
 
     bool found = false;
     for (int i = 0; i < snap.length; i++) {
@@ -630,15 +630,15 @@ static void session_dispatch_message(void* ctx, const uint8_t* topic, size_t top
     cbor_decref(&event);
 
     // Snapshot session list under manager lock to avoid holding
-    // manager->lock while taking session->lock (prevents deadlock)
+    // manager->external_lock while taking session->lock (prevents deadlock)
     vec_t(client_session_t*) snap;
     vec_init(&snap);
-    platform_mutex_lock(manager->lock);
+    platform_mutex_lock(manager->external_lock);
     for (size_t i = 0; i < manager->num_sessions; i++) {
         client_session_t* s = (client_session_t*)manager->sessions[i];
         if (s != NULL) vec_push(&snap, s);
     }
-    platform_mutex_unlock(manager->lock);
+    platform_mutex_unlock(manager->external_lock);
 
     // Deliver to each subscribed session (no manager lock held)
     for (int i = 0; i < snap.length; i++) {
