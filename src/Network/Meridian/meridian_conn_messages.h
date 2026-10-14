@@ -47,7 +47,11 @@ extern "C" {
  *                                       caller-owned int* result out-param;
  *                                       handler writes (int)len or -1 into
  *                                       *result)
- *   MERIDIAN_CONN_UPGRADE_TO_DIRECT  -> NULL
+ *   MERIDIAN_CONN_UPGRADE_TO_DIRECT  -> meridian_conn_upgrade_to_direct_msg_t
+ *                                       (borrowed: caller-owned int* result
+ *                                       out-param; handler writes 0 on
+ *                                       success, -1 on each rejection branch;
+ *                                       2.7 routes this through the actor)
  *   MERIDIAN_CONN_DIRECT_CONNECTED   -> NULL (reserved for msquic callback
  *                                            wiring; layout TBD in a later
  *                                            phase)
@@ -96,6 +100,18 @@ typedef struct meridian_conn_set_peer_reflexive_msg_t {
     uint32_t addr;   /**< Peer reflexive IPv4 address (network byte order). */
     uint16_t port;   /**< Peer reflexive port (host byte order). */
 } meridian_conn_set_peer_reflexive_msg_t;
+
+/* MERIDIAN_CONN_UPGRADE_TO_DIRECT payload. Borrowed: the caller's result
+ * slot must outlive the actor's processing of the message. The handler
+ * writes the upgrade outcome into *result: 0 on a state transition to
+ * TRYING_DIRECT, -1 on each rejection branch (already-DIRECT, neither
+ * RELAY state, peer/local symmetric NAT, or missing reflexive address).
+ * The wrapper's stack frame is the natural owner; it stays live across
+ * actor_run() in the caller-thread-dispatch path. */
+typedef struct meridian_conn_upgrade_to_direct_msg_t {
+    int* result; /**< Borrowed: caller-owned int where the handler writes
+                      the upgrade outcome. Must be non-NULL. */
+} meridian_conn_upgrade_to_direct_msg_t;
 
 #ifdef __cplusplus
 }

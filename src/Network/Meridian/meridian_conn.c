@@ -26,6 +26,8 @@ static void meridian_conn_handle_set_peer_nat_type(meridian_conn_t* conn,
                                                    meridian_nat_type_t type);
 static void meridian_conn_handle_set_peer_reflexive(meridian_conn_t* conn,
                                                     uint32_t addr, uint16_t port);
+static void meridian_conn_handle_upgrade_to_direct(meridian_conn_t* conn,
+                                                   int* result);
 
 meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_relay_t* relay,
                                        meridian_nat_type_t local_nat_type,
@@ -88,10 +90,11 @@ meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_rel
  * 2.4 routes the first mutator (MERIDIAN_CONN_DISCONNECT) through this switch.
  * 2.5 adds MERIDIAN_CONN_SEND (with an out-param result slot). 2.6 adds the
  * two peer-info mutators (MERIDIAN_CONN_SET_PEER_NAT_TYPE and
- * MERIDIAN_CONN_SET_PEER_REFLEXIVE). Later steps will add
- * UPGRADE_TO_DIRECT and the relay-path mutators. Unhandled message types
- * fall through to a no-op; payload_destroy is NULL for all 10
- * MERIDIAN_CONN_* types so no payload cleanup is required.
+ * MERIDIAN_CONN_SET_PEER_REFLEXIVE). 2.7 adds MERIDIAN_CONN_UPGRADE_TO_DIRECT
+ * (with an out-param result slot). 2.8 will route the remaining mutators
+ * (CONNECT and the relay-path mutators). Unhandled message types fall
+ * through to a no-op; payload_destroy is NULL for all 10 MERIDIAN_CONN_*
+ * types so no payload cleanup is required.
  */
 static void meridian_conn_dispatch(void* state, message_t* msg) {
     meridian_conn_t* conn = (meridian_conn_t*)state;
@@ -117,6 +120,13 @@ static void meridian_conn_dispatch(void* state, message_t* msg) {
             const meridian_conn_set_peer_reflexive_msg_t* p =
                 (const meridian_conn_set_peer_reflexive_msg_t*)msg->payload;
             meridian_conn_handle_set_peer_reflexive(conn, p->addr, p->port);
+            break;
+        }
+        case MERIDIAN_CONN_UPGRADE_TO_DIRECT: {
+            assert(msg->payload != NULL);
+            const meridian_conn_upgrade_to_direct_msg_t* p =
+                (const meridian_conn_upgrade_to_direct_msg_t*)msg->payload;
+            meridian_conn_handle_upgrade_to_direct(conn, p->result);
             break;
         }
         default:
@@ -293,33 +303,24 @@ int meridian_conn_send(meridian_conn_t* conn, const uint8_t* data, uint32_t len)
 int meridian_conn_upgrade_to_direct(meridian_conn_t* conn) {
     if (conn == NULL) return -1;
 
-    platform_mutex_lock(conn->lock);
-
-    // Only upgrade from RELAY state
-    if (conn->state != MERIDIAN_CONN_STATE_RELAY) {
-        platform_mutex_unlock(conn->lock);
-        return (conn->state == MERIDIAN_CONN_STATE_DIRECT) ? 0 : -1;
-    }
-
-    // Don't upgrade if peer has symmetric NAT
-    if (conn->peer_nat_type == MERIDIAN_NAT_TYPE_SYMMETRIC ||
-        conn->local_nat_type == MERIDIAN_NAT_TYPE_SYMMETRIC) {
-        platform_mutex_unlock(conn->lock);
+    /* Result lives on our stack; the actor is drained synchronously below
+     * so it stays live across the dispatch. */
+    int result = -1;
+    meridian_conn_upgrade_to_direct_msg_t payload = {
+        .result = &result,
+    };
+    message_t msg = {
+        .type = MERIDIAN_CONN_UPGRADE_TO_DIRECT,
+        .payload = &payload,
+        .payload_destroy = NULL,
+    };
+    if (!actor_send(&conn->actor, &msg)) {
+        /* DESTROY flag already set or queue rejected the push — connection
+         * is on its way out. Return -1 to mirror the pre-2.7 contract. */
         return -1;
     }
-
-    // Need reflexive address to attempt direct
-    if (conn->direct_path.reflexive_addr == 0) {
-        platform_mutex_unlock(conn->lock);
-        return -1;
-    }
-
-    conn->state = MERIDIAN_CONN_STATE_TRYING_DIRECT;
-    conn->direct_attempts++;
-    conn->last_direct_attempt_ms = 0;
-
-    platform_mutex_unlock(conn->lock);
-    return 0;
+    actor_run(&conn->actor, 32);
+    return result;
 }
 
 // ============================================================================
@@ -382,6 +383,54 @@ void meridian_conn_set_peer_reflexive(meridian_conn_t* conn, uint32_t addr, uint
     };
     if (!actor_send(&conn->actor, &msg)) return;
     actor_run(&conn->actor, 32);
+}
+
+// ============================================================================
+// PATH UPGRADE
+// ============================================================================
+
+/**
+ * @brief Actor-thread body of MERIDIAN_CONN_UPGRADE_TO_DIRECT.
+ *
+ * Runs on the conn's actor thread (worker thread under a real pool, caller
+ * thread under the NULL-pool synchronous-drain path used in tests). The
+ * pre-2.7 body held conn->lock around this exact sequence; 2.7 retires
+ * that lock because the actor model already serializes the body on a
+ * single thread.
+ *
+ * Four rejection branches (state, peer symmetric NAT, local symmetric
+ * NAT, missing reflexive address) all write -1 into *result and return.
+ * The success branch mutates three fields atomically from the actor's
+ * point of view and writes 0 into *result.
+ */
+static void meridian_conn_handle_upgrade_to_direct(meridian_conn_t* conn,
+                                                   int* result) {
+    assert(conn != NULL);
+    assert(result != NULL);
+
+    /* Only upgrade from RELAY state. */
+    if (conn->state != MERIDIAN_CONN_STATE_RELAY) {
+        *result = (conn->state == MERIDIAN_CONN_STATE_DIRECT) ? 0 : -1;
+        return;
+    }
+
+    /* Don't upgrade if peer or local has symmetric NAT. */
+    if (conn->peer_nat_type == MERIDIAN_NAT_TYPE_SYMMETRIC ||
+        conn->local_nat_type == MERIDIAN_NAT_TYPE_SYMMETRIC) {
+        *result = -1;
+        return;
+    }
+
+    /* Need a reflexive address to attempt direct. */
+    if (conn->direct_path.reflexive_addr == 0) {
+        *result = -1;
+        return;
+    }
+
+    conn->state = MERIDIAN_CONN_STATE_TRYING_DIRECT;
+    conn->direct_attempts++;
+    conn->last_direct_attempt_ms = 0;
+    *result = 0;
 }
 
 // ============================================================================
