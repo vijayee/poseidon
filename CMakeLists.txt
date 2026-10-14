@@ -59,6 +59,9 @@ set(CHANNEL_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Channel)
 set(CLIENT_APIS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/ClientAPIs)
 set(CLIENT_LIBS_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/ClientLibs/c)
 set(PLATFORM_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Platform)
+set(ACTOR_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Actor)
+set(TIMER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Timer)
+set(SCHEDULER_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src/Scheduler)
 
 # Poseidon Library
 set(POSEIDON_SOURCES
@@ -132,6 +135,20 @@ set(POSEIDON_SOURCES
     ${PLATFORM_SRC_DIR}/platform_socket_watcher.c
     ${PLATFORM_SRC_DIR}/platform_thread.c
     ${PLATFORM_SRC_DIR}/platform_time.c
+    ${ACTOR_SRC_DIR}/actor.c
+    ${ACTOR_SRC_DIR}/message_queue.c
+    ${ACTOR_SRC_DIR}/pool.c
+    # Timer/timer_actor.c is staged in src/Timer/ but NOT compiled here: it
+    # depends on a poll-dancer pd_timer_* API that is not present in the
+    # currently pinned poll-dancer submodule (deps/poll-dancer has no
+    # pd_timer_t, no <internal/timer.h>). The .c/.h files stay on disk so
+    # Actor/message.h can reference TIMER_* message types in source comments,
+    # and so the file is ready to be re-enabled the moment a poll-dancer
+    # version with the pd_timer API is vendored. Adding it now would break
+    # the build with 'unknown type pd_timer_t' and 'internal/timer.h: No such
+    # file or directory'.
+    ${SCHEDULER_SRC_DIR}/deque.c
+    ${SCHEDULER_SRC_DIR}/scheduler.c
 )
 
 # Platform-specific transport stubs
