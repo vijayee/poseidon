@@ -231,6 +231,7 @@ set(TEST_INCLUDE_DIRS
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/hashmap/include
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/libcbor/src
     ${CMAKE_CURRENT_SOURCE_DIR}/deps/blake3/c
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/poll-dancer/include
 )
 
 function(add_meridian_test TEST_NAME)
@@ -283,3 +284,11 @@ add_meridian_test(topic_id_test tests/topic_id_test.cpp)
 add_meridian_test(client_protocol_test tests/client_protocol_test.cpp)
 add_meridian_test(client_session_test tests/client_session_test.cpp)
 add_meridian_test(poseidon_client_test tests/poseidon_client_test.cpp)
+
+# Actor / Scheduler Tests
+# Exercises the vendored actor machinery (actor_t, message_t,
+# message_queue_t) and scheduler pool. These are unit tests of the
+# concurrency primitives themselves, not end-to-end subsystem tests.
+add_meridian_test(deque_test tests/deque_test.cpp)
+add_meridian_test(actor_test tests/actor_test.cpp)
+add_meridian_test(scheduler_test tests/scheduler_test.cpp)
