@@ -313,7 +313,6 @@ typedef struct meridian_conn_t {
     meridian_nat_type_t peer_nat_type;  // Peer's NAT type
     uint32_t direct_attempts;           // Count of direct connection attempts
     uint64_t last_direct_attempt_ms;    // Timestamp of last direct attempt
-    PLATFORMLOCKTYPE(lock);
 } meridian_conn_t;
 ```
 
@@ -321,7 +320,7 @@ typedef struct meridian_conn_t {
 
 | Function | Description |
 |----------|-------------|
-| `meridian_conn_create(protocol, peer, relay)` | Create connection to peer |
+| `meridian_conn_create(peer, relay, local_nat_type, msquic, pool)` | Create connection to peer |
 | `meridian_conn_destroy(conn)` | Destroy connection |
 | `meridian_conn_connect(conn)` | Initiate connection (tries direct first if possible) |
 | `meridian_conn_disconnect(conn)` | Close connection |

@@ -69,6 +69,9 @@ typedef enum {
   MERIDIAN_CONN_SET_PEER_NAT_TYPE,
   /* Reflect a peer reflexive address update (was: meridian_conn_set_peer_reflexive). */
   MERIDIAN_CONN_SET_PEER_REFLEXIVE,
+  /* Test-only: force conn->state. Bypasses state-machine validation; test
+   * fixture helper. (was: direct field assignment in tests). */
+  MERIDIAN_CONN_TEST_FORCE_STATE,
   /* Tear down the connection and free the actor. Refcount==0 path only. */
   MERIDIAN_CONN_DESTROY,
 } message_type_e;
@@ -130,7 +133,7 @@ typedef struct message_t {
  * test-pass gate for commit 1.4. Future commits extend the enum as each
  * subsystem is brought onto the actor model.
  *
- * Phase 2 (commit 2.1) adds the MERIDIAN_CONN_* family (10 entries) above
+ * Phase 2 (commit 2.1) adds the MERIDIAN_CONN_* family (11 entries as of 2.9) above
  * the local-modifications block. The enum is the global message_type_e;
  * Meridian connection payload structs live in the per-subsystem header
  * Network/Meridian/meridian_conn_messages.h, keeping message.h free of

@@ -71,6 +71,11 @@ extern "C" {
  *   MERIDIAN_CONN_SET_PEER_REFLEXIVE -> meridian_conn_set_peer_reflexive_msg_t
  *                                       (borrowed: integers passed by value;
  *                                       2.6 routes this through the actor)
+ *   MERIDIAN_CONN_TEST_FORCE_STATE   -> meridian_conn_test_force_state_msg_t
+ *                                       (borrowed: enum value passed by value;
+ *                                       test-only override that forces
+ *                                       conn->state; 2.9 routes this through
+ *                                       the actor)
  *   MERIDIAN_CONN_DESTROY            -> NULL
  *
  * No payload-destroy functions are defined here. Every message in the
@@ -128,6 +133,15 @@ typedef struct meridian_conn_connect_msg_t {
     int* result; /**< Borrowed: caller-owned int where the handler writes
                       the connect outcome. Must be non-NULL. */
 } meridian_conn_connect_msg_t;
+
+/* MERIDIAN_CONN_TEST_FORCE_STATE payload. Borrowed-by-value: the enum
+ * is copied into the struct, no heap lifetime to manage. Test-only:
+ * forces conn->state to the supplied value through the actor dispatch
+ * path, so the state transition is observable to any in-flight
+ * messages on the same actor. */
+typedef struct meridian_conn_test_force_state_msg_t {
+    meridian_conn_state_t force_state; /**< State to assign to conn->state. */
+} meridian_conn_test_force_state_msg_t;
 
 #ifdef __cplusplus
 }

@@ -87,7 +87,7 @@ TEST_F(ConnTest, UpgradeToDirectRequiresReflexive) {
     meridian_conn_t* conn = meridian_conn_create(peer, NULL, MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE, NULL, NULL);
     ASSERT_NE(nullptr, conn);
     // Start in RELAY state (no peer address)
-    conn->state = MERIDIAN_CONN_STATE_RELAY;
+    meridian_conn_test_force_state(conn, MERIDIAN_CONN_STATE_RELAY);
     // Upgrade fails without reflexive address
     EXPECT_EQ(-1, meridian_conn_upgrade_to_direct(conn));
     meridian_conn_destroy(conn);

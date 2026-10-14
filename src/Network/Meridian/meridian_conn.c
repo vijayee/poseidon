@@ -29,6 +29,8 @@ static void meridian_conn_handle_set_peer_reflexive(meridian_conn_t* conn,
 static void meridian_conn_handle_upgrade_to_direct(meridian_conn_t* conn,
                                                    int* result);
 static void meridian_conn_handle_connect(meridian_conn_t* conn, int* result);
+static void meridian_conn_handle_test_force_state(meridian_conn_t* conn,
+                                                  meridian_conn_state_t force_state);
 
 meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_relay_t* relay,
                                        meridian_nat_type_t local_nat_type,
@@ -76,7 +78,6 @@ meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_rel
     conn->pool = pool;
     actor_init(&conn->actor, conn, meridian_conn_dispatch, pool);
 
-    conn->lock = platform_mutex_create();;
     refcounter_init(&conn->refcounter);
     return conn;
 }
@@ -137,6 +138,13 @@ static void meridian_conn_dispatch(void* state, message_t* msg) {
             meridian_conn_handle_connect(conn, p->result);
             break;
         }
+        case MERIDIAN_CONN_TEST_FORCE_STATE: {
+            assert(msg->payload != NULL);
+            const meridian_conn_test_force_state_msg_t* p =
+                (const meridian_conn_test_force_state_msg_t*)msg->payload;
+            meridian_conn_handle_test_force_state(conn, p->force_state);
+            break;
+        }
         default:
             /* Unhandled message type: no-op. The message_node_t wrapper is
              * freed by actor_run after this function returns. */
@@ -155,7 +163,6 @@ void meridian_conn_destroy(meridian_conn_t* conn) {
         }
         // relay is borrowed — don't destroy it here
         actor_destroy(&conn->actor);
-        platform_mutex_destroy(conn->lock);;
         free(conn);
     }
 }
@@ -182,11 +189,10 @@ int meridian_conn_connect(meridian_conn_t* conn) {
 /**
  * @brief Actor-thread handler for MERIDIAN_CONN_DISCONNECT.
  *
- * Runs serially on the actor's owning thread — the same serialization the
- * explicit platform_mutex_* calls used to provide. No lock is taken here:
- * actor dispatch already guarantees exclusive access to conn's mutable
- * fields. Shutdown/close, path flag reset, and state transition to RELAY
- * are performed in the same order as the pre-2.4 implementation.
+ * Runs serially on the actor's owning thread. Actor dispatch already
+ * guarantees exclusive access to conn's mutable fields. Shutdown/close,
+ * path flag reset, and state transition to RELAY are performed in the
+ * same order as the pre-2.4 implementation.
  */
 static void meridian_conn_handle_disconnect(meridian_conn_t* conn) {
     // Shut down and close the direct QUIC connection if active
@@ -225,10 +231,10 @@ void meridian_conn_disconnect(meridian_conn_t* conn) {
 /**
  * @brief Actor-thread handler for MERIDIAN_CONN_SEND.
  *
- * Runs serially on the actor's owning thread. No lock is taken: actor
- * dispatch already guarantees exclusive access to conn's mutable fields.
- * Writes the send outcome into the caller-owned *result slot: (int)len on
- * success, leaves the initial -1 in place on no-path or send failure.
+ * Runs serially on the actor's owning thread. Actor dispatch already
+ * guarantees exclusive access to conn's mutable fields. Writes the send
+ * outcome into the caller-owned *result slot: (int)len on success, leaves
+ * the initial -1 in place on no-path or send failure.
  * The caller's data buffer must outlive this function — actor_send copies
  * the message_t by value into its own message_node_t, so by the time we
  * run, the wrapper's stack frame is irrelevant to the data pointer.
@@ -306,8 +312,7 @@ int meridian_conn_upgrade_to_direct(meridian_conn_t* conn) {
  *
  * Runs serially on the actor's owning thread. Updates peer_nat_type and,
  * for symmetric peers, downgrades the connection state to RELAY_ONLY by
- * clearing the direct path. No lock is required: actor dispatch is the
- * serialization point.
+ * clearing the direct path. Actor dispatch is the serialization point.
  */
 static void meridian_conn_handle_set_peer_nat_type(meridian_conn_t* conn,
                                                    meridian_nat_type_t type) {
@@ -337,8 +342,8 @@ void meridian_conn_set_peer_nat_type(meridian_conn_t* conn, meridian_nat_type_t 
  * @brief Actor-thread body for MERIDIAN_CONN_SET_PEER_REFLEXIVE.
  *
  * Runs serially on the actor's owning thread. Records the reflexive
- * address tuple on the direct path. No lock is required: actor dispatch
- * is the serialization point.
+ * address tuple on the direct path. Actor dispatch is the serialization
+ * point.
  */
 static void meridian_conn_handle_set_peer_reflexive(meridian_conn_t* conn,
                                                     uint32_t addr, uint16_t port) {
@@ -368,9 +373,9 @@ void meridian_conn_set_peer_reflexive(meridian_conn_t* conn, uint32_t addr, uint
  *
  * Runs on the conn's actor thread (worker thread under a real pool, caller
  * thread under the NULL-pool synchronous-drain path used in tests). The
- * pre-2.7 body held conn->lock around this exact sequence; 2.7 retires
- * that lock because the actor model already serializes the body on a
- * single thread.
+ * pre-actor body held an internal lock around this exact sequence; the
+ * actor model already serializes the body on a single thread, so no
+ * additional synchronization is required.
  *
  * Four rejection branches (state, peer symmetric NAT, local symmetric
  * NAT, missing reflexive address) all write -1 into *result and return.
@@ -412,9 +417,9 @@ static void meridian_conn_handle_upgrade_to_direct(meridian_conn_t* conn,
  *
  * Runs on the conn's actor thread (worker thread under a real pool, caller
  * thread under the NULL-pool synchronous-drain path used in tests). The
- * pre-2.8 body held conn->lock around this exact 4-state switch; 2.8
- * retires that lock because the actor model already serializes the body
- * on a single thread.
+ * pre-actor body held an internal lock around this exact 4-state switch;
+ * the actor model already serializes the body on a single thread, so no
+ * additional synchronization is required.
  *
  * Replicates the original wrapper's switch on conn->state: RELAY_ONLY and
  * RELAY both activate the relay path (no-op if relay is NULL); TRYING_DIRECT
@@ -469,6 +474,46 @@ static void meridian_conn_handle_connect(meridian_conn_t* conn, int* result) {
     }
 
     *result = 0;
+}
+
+/**
+ * @brief Actor-thread body for MERIDIAN_CONN_TEST_FORCE_STATE.
+ *
+ * Runs on the conn's actor thread. Test-only override: directly assigns
+ * the requested state. There is no validation against the connection's
+ * path activity flags — callers in tests are expected to drive conn state
+ * through stages in a coherent order.
+ */
+static void meridian_conn_handle_test_force_state(meridian_conn_t* conn,
+                                                  meridian_conn_state_t force_state) {
+    assert(conn != NULL);
+    conn->state = force_state;
+}
+
+// ============================================================================
+// TEST HELPERS
+// ============================================================================
+
+/**
+ * @brief Test-only: force conn->state through the actor dispatch path.
+ *
+ * Useful in tests that need to set up a specific connection state before
+ * exercising a handler. Unlike direct field assignment, this dispatch goes
+ * through the same actor mailbox as production sends, so the state
+ * transition is observable to any in-flight messages on the same actor.
+ *
+ * @param conn   The connection (NULL is a no-op).
+ * @param state  The state to assign.
+ */
+void meridian_conn_test_force_state(meridian_conn_t* conn, meridian_conn_state_t state) {
+    if (conn == NULL) return;
+
+    meridian_conn_test_force_state_msg_t payload = { .force_state = state };
+    message_t msg = { .type = MERIDIAN_CONN_TEST_FORCE_STATE,
+                      .payload = &payload,
+                      .payload_destroy = NULL };
+    if (!actor_send(&conn->actor, &msg)) return;
+    actor_run(&conn->actor, 32);
 }
 
 // ============================================================================

@@ -89,7 +89,6 @@ typedef struct meridian_conn_t {
     uint64_t last_direct_attempt_ms;     /**< Timestamp of last direct attempt */
     scheduler_pool_t* pool;              /**< Scheduler pool owning this actor (NULL = caller-thread dispatch) */
     actor_t actor;                       /**< Mailbox / dispatch state (embedded by value) */
-    platform_mutex_t* lock;              /**< Thread-safe access */
 } meridian_conn_t;
 
 // ============================================================================
@@ -210,6 +209,27 @@ bool meridian_conn_is_direct(const meridian_conn_t* conn);
  * @return      True if relay path is active
  */
 bool meridian_conn_is_relay(const meridian_conn_t* conn);
+
+// ============================================================================
+// TEST HELPERS
+// ============================================================================
+
+/**
+ * @brief Forces a connection into the given state by routing the write
+ *        through the actor.
+ *
+ * Test-only helper. Used to set up fixtures that depend on a specific
+ * state value (e.g. RELAY, RELAY_ONLY) without driving the full
+ * connect / upgrade state machine. The write happens on the actor's
+ * owning thread, so the call is safe with respect to the actor
+ * dispatch contract.
+ *
+ * No-op if conn is NULL.
+ *
+ * @param conn   Connection to mutate
+ * @param state  State to force
+ */
+void meridian_conn_test_force_state(meridian_conn_t* conn, meridian_conn_state_t state);
 
 #ifdef __cplusplus
 }
