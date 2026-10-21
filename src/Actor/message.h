@@ -162,6 +162,61 @@ typedef enum {
    * under the actor.
    * (was: swap-remove under mgr->lock L765). */
   POSEIDON_CHANNEL_MANAGER_MSG_UNREGISTER_SESSION,
+
+  /* ========================================================================
+   * 2.11 Unix ClientAPI transport — listener + per-connection actor messages
+   * ========================================================================
+   *
+   * Splits the Unix client-side file into two actors: the per-connection
+   * actor (POSEIDON_UNIX_CONNECTION_*) and the listener actor
+   * (POSEIDON_UNIX_SERVER_*). Payload structs live in
+   * src/ClientAPIs/unix_connection_messages.h; this enum only carries
+   * the type tags.
+   *
+   * Net drop vs the message set that lived in the actor-merged form: the
+   * CACHE_* family (3 entries, application-level cache invalidation) and
+   * OFD_CACHE_RESOLVE_RESULT are dropped because poseidon does not carry
+   * an application cache on the transport path. The result is 8 types
+   * where the actor-merged form had 10. */
+  __POSEIDON_UNIX_MESSAGE_BASE,
+  /* Inbound bytes read off the connection's socket. The payload is a
+   * poseidon_unix_connection_data_payload_t* holding a buffer_t* with
+   * the raw bytes as they arrived; the connection actor reassembles
+   * the frames from them. */
+  POSEIDON_UNIX_CONNECTION_DATA = __POSEIDON_UNIX_MESSAGE_BASE,
+  /* Peer closed or half-closed the socket (PD_EVENT_HANGUP). No
+   * payload. */
+  POSEIDON_UNIX_CONNECTION_HANGUP,
+  /* Watcher reported an error (PD_EVENT_ERROR). The watcher fd is
+   * still valid; the connection drains any remaining data and then
+   * proceeds through the normal close path. No payload. */
+  POSEIDON_UNIX_CONNECTION_ERROR,
+  /* The socket became writable again. The connection actor retries the
+   * send of the frame that did not fit into the kernel's send buffer.
+   * No payload: the pending bytes live in the connection's write
+   * buffer. */
+  POSEIDON_UNIX_CONNECTION_WRITABLE,
+  /* Outbound frame submitted by the session actor. Payload is a
+   * poseidon_unix_connection_write_payload_t* (already-framed
+   * buffer_t*); freed via the static destroyer registered with the
+   * message. */
+  POSEIDON_UNIX_CONNECTION_WRITE,
+  /* Session actor or timer requested close. Payload is a
+   * poseidon_unix_connection_close_payload_t* (graceful bool). */
+  POSEIDON_UNIX_CONNECTION_CLOSE,
+  /* Per-connection read callback asks the listener to rearm a watcher's
+   * event mask. Payload is a
+   * poseidon_unix_server_watcher_update_payload_t*; the listener
+   * dispatches pd_watcher_update inline on the loop thread. */
+  POSEIDON_UNIX_SERVER_UPDATE_WATCHER,
+  /* Per-connection destroy or read callback asks the listener to stop
+   * and eventually destroy a watcher. Payload is a
+   * poseidon_unix_server_watcher_update_payload_t*; the listener
+   * calls pd_watcher_stop inline, pushes the watcher onto the
+   * transport's destroy_stack_t for deferred pd_watcher_destroy on
+   * the next drain, and (if payload->sock is non-NULL) calls
+   * platform_socket_destroy on the snapshot fd. */
+  POSEIDON_UNIX_SERVER_STOP_WATCHER,
 } message_type_e;
 
 /* Base message. The actor's dispatch receives one of these; type selects the
@@ -239,4 +294,18 @@ typedef struct message_t {
  * actor_send + actor_run synchronous drain so caller-side return values
  * (poseidon_channel_t* / int) remain available to the wrappers through
  * borrowed out-param pointers on the payload struct.
+ *
+ * Phase 2 (commit 2.11) adds the POSEIDON_UNIX_* family (7 entries) above
+ * the local-modifications block. The enum is still the global
+ * message_type_e; the per-connection and listener payload structs live in
+ * the per-subsystem header ClientAPIs/unix_connection_messages.h, keeping
+ * message.h free of poll-dancer / platform-socket / client-session
+ * dependencies. The change is purely additive to the enum; the 4 TIMER_*,
+ * 11 MERIDIAN_CONN_*, and 11 POSEIDON_CHANNEL_MANAGER_* families are
+ * unchanged. As with the prior two migrations, every connection-level
+ * mutator (write, close, watcher-update, watcher-stop) routes through
+ * actor_send on the per-connection actor or the listener actor, with
+ * the listener draining the transport's destroy_stack_t at the bottom of
+ * each pd_loop_run_once iteration so watchers torn down off the I/O
+ * thread are freed back on the I/O thread.
  */

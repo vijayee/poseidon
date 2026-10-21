@@ -64,13 +64,13 @@ struct poseidon_channel_manager_t;
 // header self-contained without dragging the <backend>_connection.h
 // headers (which will be added in later commits) into every translation
 // unit that includes this internal header.
-struct unix_connection_t;
-struct tcp_connection_t;
-struct ws_connection_t;
-struct quic_connection_t;
-struct wt_connection_t;
-struct binder_connection_t;
-struct xpc_connection_t;
+struct poseidon_unix_connection_t;
+struct poseidon_tcp_connection_t;
+struct poseidon_ws_connection_t;
+struct poseidon_quic_connection_t;
+struct poseidon_wt_connection_t;
+struct poseidon_binder_connection_t;
+struct poseidon_xpc_connection_t;
 
 // Public transport-type enum and callback typedef are pulled from
 // transport.h so backends can write the type / on_message fields on

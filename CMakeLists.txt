@@ -118,7 +118,10 @@ set(POSEIDON_SOURCES
     ${CHANNEL_SRC_DIR}/topic_id.c
     ${CLIENT_APIS_SRC_DIR}/client_protocol.c
     ${CLIENT_APIS_SRC_DIR}/client_session.c
+    ${CLIENT_APIS_SRC_DIR}/transport.c
+    ${CLIENT_APIS_SRC_DIR}/transport_destroy_stack.c
     ${CLIENT_APIS_SRC_DIR}/transport_unix.c
+    ${CLIENT_APIS_SRC_DIR}/unix_connection.c
     ${CLIENT_APIS_SRC_DIR}/transport_tcp.c
     ${CLIENT_APIS_SRC_DIR}/transport_ws.c
     ${CLIENT_APIS_SRC_DIR}/transport_quic.c

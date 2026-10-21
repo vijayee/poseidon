@@ -3,6 +3,9 @@
 //
 
 #include "ClientAPIs/transport.h"
+#include "ClientAPIs/transport_unix.h"
+#include "ClientAPIs/client_protocol.h"
+#include "ClientAPIs/client_session.h"
 #include "Channel/channel_manager.h"
 #include "Platform/poseidon_msquic.h"
 #include "Workers/pool.h"
@@ -31,6 +34,49 @@ static poseidon_transport_t* g_unix_transport = NULL;
 static void signal_handler(int signum) {
     (void)signum;
     g_running = false;
+}
+
+// Handles one decoded inbound frame from a Unix client. The frame is
+// the payload of a length-prefixed message: a CBOR-encoded client
+// frame. The request is handed to the client's session actor, and the
+// response (if any) is framed and sent back to the same client.
+static void unix_on_message(struct poseidon_transport_internal_t* transport,
+                            int client_id,
+                            const uint8_t* data,
+                            size_t len) {
+    if (transport == NULL || data == NULL) return;
+
+    client_session_t* session =
+        poseidon_transport_unix_session_for_client_id(transport, client_id);
+    if (session == NULL) return;
+
+    struct cbor_load_result result;
+    cbor_item_t* item = cbor_load(data, len, &result);
+    if (item == NULL) {
+        log_warn("poseidond: failed to decode CBOR frame from client %d",
+                 client_id);
+        return;
+    }
+
+    client_frame_t frame;
+    memset(&frame, 0, sizeof(frame));
+    if (client_protocol_decode(item, &frame) == 0) {
+        cbor_item_t* response = NULL;
+        int rc = client_session_handle_request(session, &frame, &response);
+        if (response != NULL) {
+            uint8_t* resp_buf = NULL;
+            size_t resp_len = 0;
+            if (client_protocol_serialize(response, &resp_buf, &resp_len) == 0) {
+                poseidon_transport_unix_send_to_client(transport, client_id,
+                                                       resp_buf, resp_len);
+                free(resp_buf);
+            }
+            cbor_decref(&response);
+        }
+        (void)rc;
+    }
+
+    cbor_decref(&item);
 }
 
 static void print_usage(const char* program) {
@@ -199,13 +245,16 @@ int main(int argc, char* argv[]) {
     poseidon_transport_t* g_wt_transport = NULL;
 
     if (config.enable_unix) {
-        g_unix_transport = poseidon_transport_unix_create(config.unix_socket_path, mgr);
+        g_unix_transport = poseidon_transport_unix_create(config.unix_socket_path,
+                                                          mgr,
+                                                          unix_on_message,
+                                                          NULL);
         if (g_unix_transport != NULL) {
             if (g_unix_transport->start(g_unix_transport) == 0) {
                 log_info("poseidond: Unix transport listening on %s", config.unix_socket_path);
             } else {
                 log_error("poseidond: failed to start Unix transport");
-                poseidon_transport_destroy(g_unix_transport);
+                poseidon_transport_unix_destroy(g_unix_transport);
                 g_unix_transport = NULL;
             }
         } else {
@@ -306,8 +355,11 @@ int main(int argc, char* argv[]) {
 
     // Stop transports
     if (g_unix_transport != NULL) {
-        g_unix_transport->stop(g_unix_transport);
-        poseidon_transport_destroy(g_unix_transport);
+        // The Unix transport owns its connections, its I/O loop and its
+        // actor, so it has its own destroy: the generic one does not
+        // know about any of them.
+        poseidon_transport_unix_destroy(g_unix_transport);
+        g_unix_transport = NULL;
     }
     if (g_tcp_transport != NULL) {
         g_tcp_transport->stop(g_tcp_transport);

@@ -1,496 +1,731 @@
 //
-// Created by victor on 4/22/26.
+// transport_unix.c
+//
+// Unix domain socket transport backend.
+//
+// The transport owns a poll-dancer event loop driven by one platform
+// thread. The listening socket is registered with the loop through an
+// accept watcher; every accepted socket becomes a per-connection actor
+// (unix_connection.c) that runs on the transport's scheduler pool.
+//
+// Threading model:
+//   - the I/O thread runs the poll-dancer loop and is the only thread
+//     that touches the accept watcher and the loop's watcher registry;
+//   - the scheduler pool workers run the per-connection actors, which
+//     own frame decoding and the write path;
+//   - the caller's thread creates and destroys the transport.
+//
+// Because a watcher may only be registered or unregistered on the loop
+// thread, a connection that needs its watcher torn down pushes the
+// watcher onto the transport's destroy stack and the I/O thread drains
+// that stack at the bottom of every loop iteration. The socket
+// descriptor is closed only after the watcher has been unregistered, so
+// the descriptor number cannot be recycled under a live registration.
+//
+// Wire protocol: 4-byte big-endian length prefix followed by the
+// payload. The connection actor strips the prefix and hands the payload
+// to the on_message callback; the send path adds the prefix back.
 //
 
-#include "transport.h"
+#include "transport_unix.h"
+
+#include "../Platform/platform.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
-#include <poll-dancer/poll-dancer.h>
-#include <cbor.h>
-#include <string.h>
-#include <stdio.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <sys/un.h>
-#include <errno.h>
-#include "../Platform/platform_thread.h"
+#include "../Actor/actor.h"
+#include "../Actor/message.h"
+#include "../Buffer/buffer.h"
+#include "../Channel/channel_manager.h"
+#include "client_session.h"
+#include "transport_internal.h"
+#include "unix_connection.h"
 
-#define UNIX_MAX_CLIENTS 128
-#define UNIX_READ_BUF_SIZE 65536
+#include <poll-dancer/poll-dancer.h>
+
+#include <errno.h>
+#include <endian.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
 #define UNIX_FRAME_HEADER_SIZE 4
 
-// Per-client connection state
-typedef struct unix_client_t {
-    int fd;
-    client_session_t* session;
-    pd_watcher_t* watcher;
-    uint8_t read_buf[UNIX_READ_BUF_SIZE];
-    size_t read_len;
-    poseidon_transport_t* transport;
-} unix_client_t;
+// How long the I/O thread blocks in epoll_wait before it re-checks the
+// running flag and drains the destroy stack. 100ms is short enough that
+// a stop request is honoured promptly and long enough that an idle
+// transport does not spin.
+#define UNIX_LOOP_TICK_MS 100
 
-// Unix transport state (forward-declared for accept context)
-typedef struct unix_transport_data_t unix_transport_data_t;
+// Session ids are handed to client_session_create. They only have to be
+// unique among the live sessions of one transport.
+static uint64_t s_next_session_id = 1;
 
-// Accept callback context
-typedef struct {
-    poseidon_transport_t* transport;
-    unix_transport_data_t* data;
-} unix_accept_ctx_t;
+// ============================================================================
+// BACKEND PRIVATE STATE
+// ============================================================================
+//
+// The shared transport body (transport_internal.h) carries the fields
+// every backend needs. The Unix-specific state — the listening socket,
+// the accept watcher, the socket path and the user context — lives
+// here.
+//
+// Two views of the transport exist side by side:
+//   - base is the actor-shaped body every backend shares. It is the
+//     FIRST member, so a pointer to it IS a pointer to this struct and
+//     the backend can be recovered from the internal body alone.
+//   - public is the vtable-shaped view that transport.h still
+//     declares. It is reached from the public pointer through
+//     offsetof.
+//
+// The public view is what the daemon and the client session call
+// through (start / stop / send), the internal view is what the
+// per-connection actors hold.
 
-// Unix transport state
-struct unix_transport_data_t {
-    int listen_fd;
-    pd_loop_t* loop;
+typedef struct poseidon_unix_transport_t {
+    // The shared transport body. First so that a pointer to this
+    // struct IS a pointer to the shared body.
+    poseidon_transport_internal_t base;
+
+    // The vtable-shaped public view.
+    poseidon_transport_t public;
+
+    // Listening socket and its accept watcher. The watcher is created
+    // on the I/O thread, right before the loop starts running.
+    platform_socket_t* listen_sock;
     pd_watcher_t* listen_watcher;
-    unix_accept_ctx_t* accept_ctx;
-    unix_client_t* clients[UNIX_MAX_CLIENTS];
-    size_t num_clients;
-};
+
+    // Copy of the socket path. Freed by the destroy path, after
+    // platform_local_cleanup has unlinked the socket file.
+    char* socket_path;
+
+    // Opaque user context handed to the create function.
+    void* ctx;
+
+    // Guards the connection table below. The accept callback (I/O
+    // thread) adds connections; the destroy path (caller thread) walks
+    // them. The scheduler pool workers never touch the table.
+    platform_mutex_t* conn_lock;
+
+    // Scheduler pool owned by this transport. Set only when the
+    // transport had to create one of its own because no channel
+    // manager supplied one; the transport then owns its lifecycle.
+    scheduler_pool_t* own_pool;
+} poseidon_unix_transport_t;
 
 // ============================================================================
-// FRAME PROTOCOL: 4-byte length prefix (network byte order) + CBOR payload
+// FORWARD DECLARATIONS
 // ============================================================================
 
-static bool read_frame_header(const uint8_t* buf, uint32_t* len) {
-    *len = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
-           ((uint32_t)buf[2] << 8)  |  (uint32_t)buf[3];
-    return *len > 0 && *len <= UNIX_READ_BUF_SIZE;
+static void* _server_thread(void* arg);
+static void _accept_callback(pd_loop_t* loop,
+                             pd_watcher_t* watcher,
+                             pd_event_t events,
+                             void* user_data);
+static void _unix_transport_dispatch(void* state, message_t* msg);
+static int _unix_transport_send_to_client(poseidon_transport_internal_t* transport,
+                                           int client_id,
+                                           const uint8_t* data,
+                                           size_t len);
+static int _unix_vtable_send(poseidon_transport_t* self,
+                             int client_id,
+                             const uint8_t* data,
+                             size_t len);
+
+// ============================================================================
+// VIEW CONVERSIONS
+// ============================================================================
+
+// Recovers the backend struct from the vtable-shaped public pointer.
+static poseidon_unix_transport_t* _unix_from_public(poseidon_transport_t* transport) {
+    return (poseidon_unix_transport_t*)((char*)transport -
+        offsetof(poseidon_unix_transport_t, public));
 }
 
-static void write_frame_header(uint8_t* buf, uint32_t len) {
-    buf[0] = (uint8_t)(len >> 24);
-    buf[1] = (uint8_t)(len >> 16);
-    buf[2] = (uint8_t)(len >> 8);
-    buf[3] = (uint8_t)(len);
-}
-
-// ============================================================================
-// CLIENT MANAGEMENT
-// ============================================================================
-
-static unix_client_t* unix_client_create(int fd, poseidon_transport_t* transport) {
-    static uint32_t next_session_id = 1;
-    unix_client_t* client = get_clear_memory(sizeof(unix_client_t));
-    if (client == NULL) return NULL;
-
-    client->fd = fd;
-    client->transport = transport;
-    client->session = client_session_create(next_session_id++, transport->manager);
-    if (client->session == NULL) {
-        free(client);
-        return NULL;
-    }
-    client->session->client_fd = fd;
-    client->session->transport = transport;
-    client->read_len = 0;
-
-    return client;
-}
-
-static void unix_client_destroy(unix_client_t* client) {
-    if (client == NULL) return;
-    if (client->watcher != NULL) {
-        pd_watcher_stop(client->watcher);
-        pd_watcher_destroy(client->watcher);
-    }
-    if (client->fd >= 0) {
-        close(client->fd);
-    }
-    client_session_destroy(client->session);
-    free(client);
+// Recovers the backend struct from the actor-shaped internal pointer.
+// base is the first member, so this is a plain upcast.
+static poseidon_unix_transport_t* _unix_from_base(poseidon_transport_internal_t* transport) {
+    return (poseidon_unix_transport_t*)transport;
 }
 
 // ============================================================================
-// READ CALLBACK — process incoming CBOR frames
+// HELPERS
 // ============================================================================
 
-static void unix_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
-                                pd_event_t events, void* user_data);
-
-static void process_client_data(unix_client_t* client) {
-    while (client->read_len >= UNIX_FRAME_HEADER_SIZE) {
-        uint32_t frame_len = 0;
-        if (!read_frame_header(client->read_buf, &frame_len)) {
-            log_warn("unix transport: invalid frame header, disconnecting client");
-            return;
-        }
-
-        size_t total_len = UNIX_FRAME_HEADER_SIZE + frame_len;
-        if (client->read_len < total_len) break;
-
-        // Decode CBOR frame
-        struct cbor_load_result result;
-        cbor_item_t* item = cbor_load(client->read_buf + UNIX_FRAME_HEADER_SIZE,
-                                       frame_len, &result);
-        if (item == NULL) {
-            log_warn("unix transport: failed to decode CBOR frame");
-            memmove(client->read_buf, client->read_buf + total_len,
-                    client->read_len - total_len);
-            client->read_len -= total_len;
-            continue;
-        }
-
-        client_frame_t frame;
-        memset(&frame, 0, sizeof(frame));
-        if (client_protocol_decode(item, &frame) == 0) {
-            cbor_item_t* response = NULL;
-            int rc = client_session_handle_request(client->session, &frame, &response);
-            if (response != NULL) {
-                // Serialize and send response
-                uint8_t* resp_buf = NULL;
-                size_t resp_len = 0;
-                if (client_protocol_serialize(response, &resp_buf, &resp_len) == 0) {
-                    uint8_t header[UNIX_FRAME_HEADER_SIZE];
-                    write_frame_header(header, (uint32_t)resp_len);
-                    send(client->fd, header, UNIX_FRAME_HEADER_SIZE, MSG_NOSIGNAL);
-                    send(client->fd, resp_buf, resp_len, MSG_NOSIGNAL);
-                    free(resp_buf);
-                }
-                cbor_decref(&response);
-            }
-            (void)rc;
-        }
-
-        cbor_decref(&item);
-
-        // Shift remaining data
-        memmove(client->read_buf, client->read_buf + total_len,
-                client->read_len - total_len);
-        client->read_len -= total_len;
-    }
-}
-
-static void unix_client_disconnect(unix_client_t* client) {
-    if (client == NULL) return;
-
-    poseidon_transport_t* transport = client->transport;
-    unix_transport_data_t* data = (unix_transport_data_t*)transport->loop;
-
-    // Clean up Quasar subscriptions before unregistering from session registry
-    client_session_cleanup_subscriptions(client->session);
-    poseidon_channel_manager_unregister_session(transport->manager, client->session);
-
-    // Remove from client list
-    for (size_t i = 0; i < data->num_clients; i++) {
-        if (data->clients[i] == client) {
-            data->clients[i] = data->clients[data->num_clients - 1];
-            data->clients[data->num_clients - 1] = NULL;
-            data->num_clients--;
-            break;
+// Finds the connection whose socket descriptor is client_id. The
+// descriptor is the connection's identity on the wire: the client
+// library reports it back on every reply.
+static poseidon_unix_connection_t* _find_connection_by_fd(
+    poseidon_unix_transport_t* transport,
+    int client_id) {
+    for (int i = 0; i < transport->base.connections.length; i++) {
+        poseidon_unix_connection_t* conn =
+            (poseidon_unix_connection_t*)transport->base.connections.data[i];
+        if (conn == NULL) continue;
+        if (platform_socket_fd(conn->sock) == client_id) {
+            return conn;
         }
     }
-
-    unix_client_destroy(client);
+    return NULL;
 }
 
-static void unix_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
-                                pd_event_t events, void* user_data) {
-    (void)loop;
-    unix_client_t* client = (unix_client_t*)user_data;
-    int fd = pd_watcher_get_fd(watcher);
+// ============================================================================
+// DISPATCH
+// ============================================================================
+//
+// The transport body is actor-shaped: it owns an actor_t that carries
+// the listener-level messages. The Unix backend does not currently
+// need to receive cross-actor messages (the per-connection actors
+// talk to their peers directly), so the dispatch is a no-op that keeps
+// the actor contract satisfied. It exists so that the transport can be
+// bound to the scheduler pool like every other actor in the codebase,
+// and so that a future listener-level message has a home.
 
-    if (events & PD_EVENT_READ) {
-        ssize_t bytes = recv(fd, client->read_buf + client->read_len,
-                              UNIX_READ_BUF_SIZE - client->read_len, 0);
-        if (bytes <= 0) {
-            if (bytes == 0) {
-                log_debug("unix transport: client disconnected (fd=%d)", fd);
-            } else {
-                log_debug("unix transport: recv error on fd=%d: %s", fd, strerror(errno));
-            }
-            unix_client_disconnect(client);
-            return;
-        }
-
-        client->read_len += bytes;
-        process_client_data(client);
-    }
-
-    if (events & PD_EVENT_HANGUP) {
-        log_debug("unix transport: client hangup (fd=%d)", fd);
-        unix_client_disconnect(client);
-        return;
-    }
-
-    if (events & PD_EVENT_ERROR) {
-        log_warn("unix transport: socket error on fd=%d", fd);
-        unix_client_disconnect(client);
-        return;
-    }
+static void _unix_transport_dispatch(void* state, message_t* msg) {
+    (void)state;
+    (void)msg;
 }
 
 // ============================================================================
 // ACCEPT CALLBACK
 // ============================================================================
+//
+// Runs on the I/O thread. Accepts one connection, binds a client
+// session to it and registers the connection actor.
 
-static void unix_accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
-                                  pd_event_t events, void* user_data) {
-    unix_accept_ctx_t* ctx = (unix_accept_ctx_t*)user_data;
-    unix_transport_data_t* data = ctx->data;
-    poseidon_transport_t* transport = ctx->transport;
-    int listen_fd = pd_watcher_get_fd(watcher);
+static void _accept_callback(pd_loop_t* loop,
+                             pd_watcher_t* watcher,
+                             pd_event_t events,
+                             void* user_data) {
+    (void)loop;
+    (void)watcher;
 
-    if (!(events & PD_EVENT_READ)) return;
+    poseidon_unix_transport_t* transport = (poseidon_unix_transport_t*)user_data;
+    if (transport == NULL) return;
 
-    struct sockaddr_un client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    int client_fd = accept(listen_fd, (struct sockaddr*)&client_addr, &client_len);
-    if (client_fd < 0) {
-        log_warn("unix transport: accept failed: %s", strerror(errno));
+    if (!(events & PD_EVENT_READ)) {
         return;
     }
 
-    if (data->num_clients >= UNIX_MAX_CLIENTS) {
-        log_warn("unix transport: max clients reached, rejecting connection");
-        close(client_fd);
+    platform_socket_t* client_sock =
+        platform_local_accept(transport->listen_sock);
+    if (client_sock == NULL) {
+        // A failed accept is normally transient (the peer gave up
+        // between the readiness notification and the accept call).
+        // Only the permanent errors are worth logging.
+        if (errno == EBADF || errno == EINVAL || errno == ENOTSOCK ||
+            errno == EOPNOTSUPP) {
+            log_error("unix transport: accept failed permanently (errno=%d)",
+                      errno);
+        }
         return;
     }
 
-    unix_client_t* client = unix_client_create(client_fd, transport);
-    if (client == NULL) {
-        log_warn("unix transport: failed to create client session");
-        close(client_fd);
+    // The accepted socket inherits the listener's blocking mode, so
+    // it has to be switched explicitly before the connection's read
+    // callback starts pulling from it.
+    platform_socket_set_nonblocking(client_sock);
+
+    int client_fd = platform_socket_fd(client_sock);
+
+    // Bind a client session to the connection. The session is the
+    // per-client state the channel manager registry holds.
+    client_session_t* session =
+        client_session_create((uint32_t)s_next_session_id++,
+                              transport->base.manager);
+    if (session == NULL) {
+        log_error("unix transport: failed to create client session");
+        platform_socket_destroy(client_sock);
+        return;
+    }
+    session->client_fd = client_fd;
+    session->transport = &transport->public;
+
+    if (transport->base.manager != NULL) {
+        poseidon_channel_manager_register_session(transport->base.manager,
+                                                   session);
+    }
+
+    poseidon_unix_connection_t* conn = NULL;
+    if (!poseidon_unix_connection_create(&transport->base, client_sock,
+                                         session, &conn)) {
+        log_error("unix transport: failed to create connection actor");
+        if (transport->base.manager != NULL) {
+            poseidon_channel_manager_unregister_session(
+                transport->base.manager, session);
+        }
+        client_session_destroy(session);
+        platform_socket_destroy(client_sock);
         return;
     }
 
-    client->watcher = pd_watcher_create(loop, client_fd, PD_EVENT_READ,
-                                         unix_read_callback, client);
-    if (client->watcher == NULL) {
-        log_warn("unix transport: failed to create watcher for client fd=%d", client_fd);
-        unix_client_destroy(client);
-        return;
-    }
+    platform_mutex_lock(transport->conn_lock);
+    vec_push(&transport->base.connections, (void*)conn);
+    platform_mutex_unlock(transport->conn_lock);
 
-    data->clients[data->num_clients++] = client;
-    poseidon_channel_manager_register_session(transport->manager, client->session);
-    log_info("unix transport: client connected (fd=%d, total=%zu)",
-             client_fd, data->num_clients);
+    ATOMIC_FETCH_ADD(&transport->base.active_connections, 1);
+
+    // POSIX listeners stay in the listening state after an accept, so
+    // there is nothing to re-arm. The call is a no-op here and exists
+    // so the transport does not have to know which platform it runs on.
+    platform_local_rearm(transport->listen_sock);
 }
 
 // ============================================================================
-// TRANSPORT THREAD
+// SERVER THREAD
 // ============================================================================
+//
+// Runs the poll-dancer loop until the transport is stopped.
 
-static void* unix_transport_thread(void* arg) {
-    poseidon_transport_t* transport = (poseidon_transport_t*)arg;
-    unix_transport_data_t* data = (unix_transport_data_t*)transport->loop;
+static void* _server_thread(void* arg) {
+    poseidon_unix_transport_t* transport = (poseidon_unix_transport_t*)arg;
+    if (transport == NULL) return NULL;
 
-    log_info("unix transport: event loop starting");
-    pd_loop_run(data->loop);
-    log_info("unix transport: event loop stopped");
+    platform_thread_setup_stack();
+
+    // The accept watcher is created here, on the I/O thread, so that
+    // it is registered with the loop on the thread that runs it.
+    transport->listen_watcher =
+        platform_socket_watcher_create(transport->base.loop,
+                                       transport->listen_sock,
+                                       PD_EVENT_READ,
+                                       _accept_callback,
+                                       transport);
+    if (transport->listen_watcher == NULL) {
+        log_error("unix transport: failed to create accept watcher");
+        return NULL;
+    }
+    pd_watcher_start(transport->listen_watcher);
+
+    while (ATOMIC_LOAD(&transport->base.running)) {
+        // Drain the destroy stack before blocking again: watchers
+        // that a connection actor asked to tear down are freed here,
+        // on the I/O thread, so the unregister never races a live
+        // registration.
+        destroy_stack_drain(&transport->base.destroy_stack);
+        pd_loop_run_once(transport->base.loop, UNIX_LOOP_TICK_MS);
+    }
+
+    // One last drain: a connection actor may have pushed a watcher
+    // after the loop noticed the stop flag.
+    destroy_stack_drain(&transport->base.destroy_stack);
+
+    if (transport->listen_watcher != NULL) {
+        pd_watcher_stop(transport->listen_watcher);
+        pd_watcher_destroy(transport->listen_watcher);
+        transport->listen_watcher = NULL;
+    }
+
+    pd_loop_stop(transport->base.loop);
 
     return NULL;
-}
-
-// ============================================================================
-// TRANSPORT INTERFACE IMPLEMENTATION
-// ============================================================================
-
-static int unix_transport_start(poseidon_transport_t* self) {
-    unix_transport_data_t* data = (unix_transport_data_t*)self->loop;
-
-    // Create listening socket
-    data->listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
-    if (data->listen_fd < 0) {
-        log_error("unix transport: socket() failed: %s", strerror(errno));
-        return -1;
-    }
-
-    // Set socket options
-    int opt = 1;
-    setsockopt(data->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    // Bind
-    struct sockaddr_un addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, self->name, sizeof(addr.sun_path) - 1);
-
-    // Remove existing socket file
-    unlink(addr.sun_path);
-
-    if (bind(data->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        log_error("unix transport: bind() failed: %s", strerror(errno));
-        close(data->listen_fd);
-        data->listen_fd = -1;
-        return -1;
-    }
-
-    if (listen(data->listen_fd, 16) < 0) {
-        log_error("unix transport: listen() failed: %s", strerror(errno));
-        close(data->listen_fd);
-        data->listen_fd = -1;
-        unlink(self->name);
-        return -1;
-    }
-
-    // Create accept context
-    unix_accept_ctx_t* ctx = get_clear_memory(sizeof(unix_accept_ctx_t));
-    if (ctx == NULL) {
-        close(data->listen_fd);
-        data->listen_fd = -1;
-        unlink(self->name);
-        return -1;
-    }
-    ctx->transport = self;
-    ctx->data = data;
-    data->accept_ctx = ctx;
-
-    // Create accept watcher
-    data->listen_watcher = pd_watcher_create(data->loop, data->listen_fd,
-                                              PD_EVENT_READ,
-                                              unix_accept_callback, ctx);
-    if (data->listen_watcher == NULL) {
-        log_error("unix transport: failed to create accept watcher");
-        free(ctx);
-        close(data->listen_fd);
-        data->listen_fd = -1;
-        unlink(self->name);
-        return -1;
-    }
-
-    self->running = true;
-
-    // Create thread
-    self->thread = platform_thread_create((platform_thread_fn_t)unix_transport_thread, self);
-    if (self->thread == NULL) {
-        log_error("unix transport: failed to create thread");
-        pd_watcher_destroy(data->listen_watcher);
-        data->listen_watcher = NULL;
-        free(data->accept_ctx);
-        data->accept_ctx = NULL;
-        close(data->listen_fd);
-        data->listen_fd = -1;
-        unlink(self->name);
-        self->running = false;
-        return -1;
-    }
-
-    return 0;
-}
-
-static int unix_transport_stop(poseidon_transport_t* self) {
-    if (!self->running) return 0;
-
-    self->running = false;
-    unix_transport_data_t* data = (unix_transport_data_t*)self->loop;
-
-    // Stop the event loop
-    pd_loop_stop(data->loop);
-
-    // Wait for thread to finish
-    platform_thread_join(self->thread);
-    self->thread = NULL;
-
-    // Clean up clients
-    for (size_t i = 0; i < data->num_clients; i++) {
-        if (data->clients[i] != NULL) {
-            unix_client_destroy(data->clients[i]);
-            data->clients[i] = NULL;
-        }
-    }
-    data->num_clients = 0;
-
-    // Clean up listening socket
-    if (data->listen_watcher != NULL) {
-        pd_watcher_destroy(data->listen_watcher);
-        data->listen_watcher = NULL;
-    }
-    if (data->accept_ctx != NULL) {
-        free(data->accept_ctx);
-        data->accept_ctx = NULL;
-    }
-    if (data->listen_fd >= 0) {
-        close(data->listen_fd);
-        unlink(self->name);
-        data->listen_fd = -1;
-    }
-
-    return 0;
-}
-
-static int unix_transport_send(poseidon_transport_t* self, int client_id,
-                                const uint8_t* data, size_t len) {
-    (void)self;
-    // client_id is the file descriptor in this implementation
-    uint8_t header[UNIX_FRAME_HEADER_SIZE];
-    write_frame_header(header, (uint32_t)len);
-
-    ssize_t h = send(client_id, header, UNIX_FRAME_HEADER_SIZE, MSG_NOSIGNAL);
-    ssize_t d = send(client_id, data, len, MSG_NOSIGNAL);
-    return (h == UNIX_FRAME_HEADER_SIZE && (size_t)d == len) ? 0 : -1;
 }
 
 // ============================================================================
 // LIFECYCLE
 // ============================================================================
 
-poseidon_transport_config_t poseidon_transport_config_defaults(void) {
-    poseidon_transport_config_t config;
-    memset(&config, 0, sizeof(config));
-    config.enable_unix = true;
-    config.unix_socket_path = "/var/run/poseidond.sock";
-    config.tcp_port = 9090;
-    config.ws_port = 9091;
-    config.quic_port = 9092;
-    config.wt_port = 9093;
-    return config;
-}
-
 poseidon_transport_t* poseidon_transport_unix_create(const char* socket_path,
-                                                      poseidon_channel_manager_t* manager) {
-    if (socket_path == NULL || manager == NULL) return NULL;
+                                                      poseidon_channel_manager_t* manager,
+                                                      poseidon_transport_on_message_cb on_message,
+                                                      void* ctx) {
+    if (socket_path == NULL) return NULL;
 
-    poseidon_transport_t* transport = get_clear_memory(sizeof(poseidon_transport_t));
+    poseidon_unix_transport_t* transport =
+        (poseidon_unix_transport_t*)get_clear_memory(
+            sizeof(poseidon_unix_transport_t));
     if (transport == NULL) return NULL;
 
-    unix_transport_data_t* data = get_clear_memory(sizeof(unix_transport_data_t));
-    if (data == NULL) {
+    poseidon_transport_internal_t* base = &transport->base;
+
+    base->loop = pd_loop_create(NULL);
+    if (base->loop == NULL) {
         free(transport);
         return NULL;
     }
 
-    data->loop = pd_loop_create(NULL);
-    if (data->loop == NULL) {
-        free(data);
+    base->manager = manager;
+    base->on_message = on_message;
+    base->type = POSEIDON_TRANSPORT_UNIX_SOCKET;
+    base->name = NULL;
+    base->thread = NULL;
+    base->pool = NULL;
+    vec_init(&base->connections);
+    ATOMIC_STORE(&base->running, 0);
+    ATOMIC_STORE(&base->active_connections, 0);
+    destroy_stack_init(&base->destroy_stack);
+
+    transport->listen_sock = NULL;
+    transport->listen_watcher = NULL;
+    transport->ctx = ctx;
+    transport->own_pool = NULL;
+    transport->conn_lock = platform_mutex_create();
+    if (transport->conn_lock == NULL) {
+        destroy_stack_destroy(&base->destroy_stack);
+        pd_loop_destroy(base->loop);
         free(transport);
         return NULL;
     }
-    data->listen_fd = -1;
 
-    transport->name = socket_path;
-    transport->type = POSEIDON_TRANSPORT_UNIX_SOCKET;
-    transport->manager = manager;
-    transport->loop = data;
-    transport->start = unix_transport_start;
-    transport->stop = unix_transport_stop;
-    transport->send = unix_transport_send;
-    transport->lock = platform_mutex_create();;
+    transport->socket_path = strdup(socket_path);
+    if (transport->socket_path == NULL) {
+        platform_mutex_destroy(transport->conn_lock);
+        destroy_stack_destroy(&base->destroy_stack);
+        pd_loop_destroy(base->loop);
+        free(transport);
+        return NULL;
+    }
 
-    return transport;
+    // The transport body is actor-shaped: bind it to the scheduler
+    // pool the manager uses, so the transport's actor lives on the
+    // same pool as the channel manager and the client sessions.
+    //
+    // A transport without a manager still needs a pool: the
+    // per-connection actors dispatch their messages through it. An
+    // actor with a NULL pool is never scheduled, so its mailbox would
+    // fill up and never be drained. The transport therefore creates
+    // and owns a pool of its own in that case.
+    if (manager != NULL) {
+        base->pool = manager->actor.pool;
+    } else {
+        base->pool = scheduler_pool_create(1);
+        if (base->pool == NULL) {
+            platform_mutex_destroy(transport->conn_lock);
+            destroy_stack_destroy(&base->destroy_stack);
+            pd_loop_destroy(base->loop);
+            free(transport->socket_path);
+            free(transport);
+            return NULL;
+        }
+        scheduler_pool_start(base->pool);
+        transport->own_pool = base->pool;
+    }
+    actor_init(&base->actor, base, _unix_transport_dispatch, base->pool);
+
+    // The socket inherits the process umask at bind, which locks out
+    // non-root clients under a root umask. Publish a world-accessible
+    // mode on the bound inode; a chmod failure keeps the daemon
+    // running with the umask-derived mode rather than failing startup.
+    transport->listen_sock = platform_local_listen(socket_path);
+    if (transport->listen_sock == NULL) {
+        log_error("unix transport: failed to listen on %s (errno=%d)",
+                  socket_path, errno);
+        actor_destroy(&base->actor);
+        if (transport->own_pool != NULL) {
+            scheduler_pool_stop(transport->own_pool);
+            scheduler_pool_destroy(transport->own_pool);
+        }
+        platform_mutex_destroy(transport->conn_lock);
+        destroy_stack_destroy(&base->destroy_stack);
+        pd_loop_destroy(base->loop);
+        free(transport->socket_path);
+        free(transport);
+        return NULL;
+    }
+
+    if (chmod(socket_path, (mode_t)0666) != 0) {
+        log_warn("unix transport: chmod(%s, 0666) failed (errno=%d); "
+                 "socket keeps its umask-derived mode",
+                 socket_path, errno);
+    }
+
+    platform_socket_set_nonblocking(transport->listen_sock);
+
+    // The vtable-shaped public view lives in the same allocation as
+    // the actor-shaped body, side by side.
+    transport->public.name = transport->socket_path;
+    transport->public.type = POSEIDON_TRANSPORT_UNIX_SOCKET;
+    transport->public.thread = NULL;
+    transport->public.loop = base->loop;
+    transport->public.manager = manager;
+    transport->public.on_message = on_message;
+    transport->public.ctx = ctx;
+    transport->public.lock = transport->conn_lock;
+    transport->public.running = false;
+    transport->public.start = poseidon_transport_unix_start;
+    transport->public.stop = poseidon_transport_unix_stop;
+    transport->public.send = _unix_vtable_send;
+    transport->public.destroy = NULL;
+
+    return &transport->public;
 }
 
-void poseidon_transport_destroy(poseidon_transport_t* transport) {
+int poseidon_transport_unix_start(poseidon_transport_t* transport) {
+    if (transport == NULL) return -1;
+
+    poseidon_unix_transport_t* unix_transport = _unix_from_public(transport);
+
+    if (ATOMIC_LOAD(&unix_transport->base.running)) {
+        return 0;
+    }
+
+    log_info("unix transport: starting on %s", unix_transport->socket_path);
+
+    ATOMIC_STORE(&unix_transport->base.running, 1);
+    platform_thread_t* thread =
+        platform_thread_create(_server_thread, unix_transport);
+    if (thread == NULL) {
+        ATOMIC_STORE(&unix_transport->base.running, 0);
+        log_error("unix transport: failed to create I/O thread");
+        return -1;
+    }
+    unix_transport->base.thread = thread;
+    unix_transport->public.thread = thread;
+    unix_transport->public.running = true;
+
+    return 0;
+}
+
+int poseidon_transport_unix_stop(poseidon_transport_t* transport) {
+    if (transport == NULL) return 0;
+
+    poseidon_unix_transport_t* unix_transport = _unix_from_public(transport);
+
+    if (!ATOMIC_LOAD(&unix_transport->base.running)) {
+        return 0;
+    }
+
+    ATOMIC_STORE(&unix_transport->base.running, 0);
+
+    // Wake the I/O thread so it notices the stop flag without waiting
+    // for the tick to expire. The wake-up is best-effort: on the
+    // epoll backend it is a no-op and the thread wakes on its own
+    // when the tick expires.
+    pd_loop_async_send(unix_transport->base.loop, unix_transport);
+
+    if (unix_transport->base.thread != NULL) {
+        platform_thread_join(unix_transport->base.thread);
+        unix_transport->base.thread = NULL;
+    }
+    unix_transport->public.thread = NULL;
+    unix_transport->public.running = false;
+
+    return 0;
+}
+
+void poseidon_transport_unix_destroy(poseidon_transport_t* transport) {
     if (transport == NULL) return;
 
-    if (transport->destroy != NULL) {
-        transport->destroy(transport);
-        return;
+    poseidon_unix_transport_t* unix_transport = _unix_from_public(transport);
+    poseidon_transport_internal_t* base = &unix_transport->base;
+
+    // Stop the I/O thread first: after this returns no callback can
+    // fire on a connection, so the teardown below runs without a race
+    // against the accept path.
+    if (ATOMIC_LOAD(&base->running)) {
+        poseidon_transport_unix_stop(transport);
     }
 
-    if (transport->running) {
-        transport->stop(transport);
+    // Drain the destroy stack BEFORE tearing down the connection
+    // watchers. The stack holds the watchers a connection actor asked
+    // to tear down; destroying them a second time from the loop below
+    // would double-free the watcher and corrupt the heap.
+    destroy_stack_drain(&base->destroy_stack);
+
+    if (unix_transport->listen_sock != NULL) {
+        platform_socket_destroy(unix_transport->listen_sock);
+        unix_transport->listen_sock = NULL;
     }
 
-    unix_transport_data_t* data = (unix_transport_data_t*)transport->loop;
-    if (data != NULL) {
-        if (data->loop != NULL) {
-            pd_loop_destroy(data->loop);
+    // Quiesce the connection actors first. actor_destroy sets the
+    // DESTROY flag (so the scheduler stops picking the actor up and
+    // actor_send drops its messages), waits for any dispatch that is
+    // already running to finish, and drains the mailbox.
+    //
+    // The order matters: the connection's fields (sock, watcher,
+    // write_buffer, transport) are read and written by the actor's
+    // dispatch, so they may only be touched once the actor is
+    // quiesced. Tearing the connection down before the actor is
+    // stopped would race the dispatch against the free.
+    for (int i = 0; i < base->connections.length; i++) {
+        poseidon_unix_connection_t* conn =
+            (poseidon_unix_connection_t*)base->connections.data[i];
+        if (conn == NULL) continue;
+        actor_destroy(&conn->actor);
+    }
+
+    // Wait for the rest of the pool to go quiet as well: a client
+    // session actor may still be dispatching a delivery that reaches
+    // back into this transport.
+    if (base->pool != NULL &&
+        !ATOMIC_LOAD(&base->pool->terminate)) {
+        scheduler_pool_wait_for_idle(base->pool);
+    }
+
+    // Release the connection resources. The actors are quiesced, so
+    // nothing touches these fields any more.
+    //
+    // The connections are released in reverse order so the table
+    // shrinks from the tail.
+    for (int i = base->connections.length - 1; i >= 0; i--) {
+        poseidon_unix_connection_t* conn =
+            (poseidon_unix_connection_t*)base->connections.data[i];
+        if (conn == NULL) continue;
+
+        conn->is_closing = 1;
+        if (conn->sock != NULL) {
+            platform_socket_destroy(conn->sock);
+            conn->sock = NULL;
         }
-        free(data);
+        conn->transport = NULL;
+        if (conn->watcher != NULL) {
+            pd_watcher_t* watcher = conn->watcher;
+            conn->watcher = NULL;
+            pd_watcher_stop(watcher);
+            pd_watcher_destroy(watcher);
+        }
+        if (conn->write_buffer != NULL) {
+            buffer_destroy(conn->write_buffer);
+            conn->write_buffer = NULL;
+        }
+        if (conn->session != NULL) {
+            // Detach the session from the transport before the
+            // transport's memory goes away: a session that is still
+            // registered with the manager must not reach back into a
+            // freed transport when it delivers a message.
+            conn->session->transport = NULL;
+            client_session_cleanup_subscriptions(conn->session);
+            if (base->manager != NULL) {
+                poseidon_channel_manager_unregister_session(base->manager,
+                                                            conn->session);
+            }
+            client_session_destroy(conn->session);
+            conn->session = NULL;
+        }
+        free(conn);
+    }
+    vec_deinit(&base->connections);
+
+    if (unix_transport->socket_path != NULL) {
+        platform_local_cleanup(unix_transport->socket_path);
+        free(unix_transport->socket_path);
+        unix_transport->socket_path = NULL;
     }
 
-    platform_mutex_destroy(transport->lock);;
-    free(transport);
+    // The shared body is actor-shaped: destroy its actor before the
+    // loop goes away.
+    actor_destroy(&base->actor);
+
+    destroy_stack_destroy(&base->destroy_stack);
+
+    if (base->loop != NULL) {
+        pd_loop_destroy(base->loop);
+        base->loop = NULL;
+    }
+
+    if (unix_transport->conn_lock != NULL) {
+        platform_mutex_destroy(unix_transport->conn_lock);
+        unix_transport->conn_lock = NULL;
+    }
+
+    // The pool the transport created for itself is stopped and
+    // destroyed here. A pool that came from the channel manager is
+    // owned by the manager and is left alone.
+    if (unix_transport->own_pool != NULL) {
+        scheduler_pool_stop(unix_transport->own_pool);
+        scheduler_pool_destroy(unix_transport->own_pool);
+        unix_transport->own_pool = NULL;
+        base->pool = NULL;
+    }
+
+    free(unix_transport);
+}
+
+// ============================================================================
+// SEND
+// ============================================================================
+
+// Frames the payload with its 4-byte big-endian length prefix and
+// hands it to the connection's write actor.
+static int _unix_transport_send_to_client(poseidon_transport_internal_t* transport,
+                                           int client_id,
+                                           const uint8_t* data,
+                                           size_t len) {
+    if (transport == NULL || (data == NULL && len > 0)) return -1;
+
+    poseidon_unix_transport_t* unix_transport = _unix_from_base(transport);
+
+    platform_mutex_lock(unix_transport->conn_lock);
+    poseidon_unix_connection_t* conn =
+        _find_connection_by_fd(unix_transport, client_id);
+    platform_mutex_unlock(unix_transport->conn_lock);
+
+    if (conn == NULL) {
+        return -1;
+    }
+
+    // Build the framed payload: 4 header bytes plus the body. The
+    // connection's write actor owns the buffer from here on.
+    buffer_t* framed = buffer_create(UNIX_FRAME_HEADER_SIZE + len);
+    if (framed == NULL) {
+        return -1;
+    }
+    uint32_t be_len = htobe32((uint32_t)len);
+    memcpy(framed->data, &be_len, UNIX_FRAME_HEADER_SIZE);
+    if (len > 0) {
+        memcpy(framed->data + UNIX_FRAME_HEADER_SIZE, data, len);
+    }
+
+    poseidon_unix_connection_write(conn, framed);
+    return 0;
+}
+
+// The vtable-shaped send hook. The public view and the internal body
+// are two members of the same allocation, so the internal body is
+// reached through the public pointer.
+static int _unix_vtable_send(poseidon_transport_t* self,
+                             int client_id,
+                             const uint8_t* data,
+                             size_t len) {
+    if (self == NULL) return -1;
+    poseidon_unix_transport_t* unix_transport = _unix_from_public(self);
+    return _unix_transport_send_to_client(&unix_transport->base, client_id,
+                                           data, len);
+}
+
+int poseidon_transport_unix_send(poseidon_transport_t* transport,
+                                  int client_id,
+                                  const uint8_t* data,
+                                  size_t len) {
+    if (transport == NULL) return -1;
+    return _unix_transport_send_to_client(
+        (poseidon_transport_internal_t*)transport, client_id, data, len);
+}
+
+int poseidon_transport_unix_send_to_client(
+    struct poseidon_transport_internal_t* transport,
+    int client_id,
+    const uint8_t* data,
+    size_t len) {
+    return _unix_transport_send_to_client(transport, client_id, data, len);
+}
+
+// ============================================================================
+// ACCESSORS
+// ============================================================================
+
+client_session_t* poseidon_transport_unix_session_for_client_id(
+    struct poseidon_transport_internal_t* transport,
+    int client_id) {
+    if (transport == NULL) return NULL;
+
+    poseidon_unix_transport_t* unix_transport = _unix_from_base(transport);
+
+    platform_mutex_lock(unix_transport->conn_lock);
+    poseidon_unix_connection_t* conn =
+        _find_connection_by_fd(unix_transport, client_id);
+    client_session_t* session = (conn != NULL) ? conn->session : NULL;
+    platform_mutex_unlock(unix_transport->conn_lock);
+
+    return session;
+}
+
+void* poseidon_transport_unix_context(
+    struct poseidon_transport_internal_t* transport) {
+    if (transport == NULL) return NULL;
+    return _unix_from_base(transport)->ctx;
 }

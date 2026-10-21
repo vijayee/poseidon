@@ -59,7 +59,15 @@ poseidon_transport_config_t poseidon_transport_config_defaults(void);
 
 typedef struct poseidon_transport_t poseidon_transport_t;
 
-typedef void (*poseidon_transport_on_message_cb)(poseidon_transport_t* transport,
+// The internal actor-shaped transport body lives in transport_internal.h.
+// The user-supplied on_message callback receives a pointer to it so that
+// the connection dispatch can pass its own transport up directly. The
+// full body is in transport_internal.h, which is included by the
+// per-backend connection .c files at the point of use; the public
+// transport header only needs the type by name.
+struct poseidon_transport_internal_t;
+
+typedef void (*poseidon_transport_on_message_cb)(struct poseidon_transport_internal_t* transport,
                                                   int client_id,
                                                   const uint8_t* data,
                                                   size_t len);
@@ -71,6 +79,7 @@ struct poseidon_transport_t {
     void* loop;
     poseidon_channel_manager_t* manager;
     poseidon_transport_on_message_cb on_message;
+    void* ctx;
     platform_mutex_t* lock;
     volatile bool running;
 
@@ -89,11 +98,19 @@ struct poseidon_transport_t {
  * Creates a Unix domain socket transport.
  *
  * @param socket_path  Path for the Unix socket (e.g., "/var/run/poseidond.sock")
- * @param manager       Shared channel manager
+ * @param manager       Shared channel manager (may be NULL)
+ * @param on_message    User callback invoked when a complete frame is
+ *                      decoded off a connection. The transport pointer
+ *                      passed to the callback is the internal actor-
+ *                      shaped transport (struct poseidon_transport_internal_t).
+ * @param ctx           Opaque user context, retrievable through the
+ *                      backend's context accessor
  * @return              New transport, or NULL on failure
  */
 poseidon_transport_t* poseidon_transport_unix_create(const char* socket_path,
-                                                      poseidon_channel_manager_t* manager);
+                                                      poseidon_channel_manager_t* manager,
+                                                      poseidon_transport_on_message_cb on_message,
+                                                      void* ctx);
 
 /**
  * Creates a TCP+TLS transport.
