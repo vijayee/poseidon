@@ -129,3 +129,156 @@ Always read and follow the coding conventions in [STYLEGUIDE.md](./STYLEGUIDE.md
 - **No L2 provenance comment on this new file**: standing rule — `NEW files need no L2 provenance comment`, that carveout is for vendored files only.
 - **Build verification**: `cmake --build build/` green, 25/25 ctest, 9/9 conn suite pass, hygiene check on the new header returns 0.
 
+
+## Phase 7 — Unix backend split landed (commit `97ea4a8`)
+
+The Unix domain socket transport is the first backend moved to the actor
+model. Everything below is now established, not planned.
+
+### New file layout (src/ClientAPIs/)
+
+| File | Role |
+|---|---|
+| `transport_unix.h` / `transport_unix.c` | The listener: listening socket, accept watcher, I/O thread, connection table. |
+| `unix_connection.h` / `unix_connection.c` | The per-connection actor: frame decoding, write path, watcher ownership. |
+| `unix_connection_messages.h` | Payload structs for the `POSEIDON_UNIX_*` message family. |
+| `transport_destroy_stack.c` | Shared `destroy_stack_t` helpers (deferred `pd_watcher_destroy` on the loop thread). |
+| `transport.c` | `poseidon_transport_config_defaults` + the generic `poseidon_transport_destroy`, relocated out of the old `transport_unix.c` so the un-migrated backends still link. |
+
+### The two-view transport struct (important — gotcha)
+
+`poseidon_transport_t` (the vtable-shaped public view, in `transport.h`) and
+`poseidon_transport_internal_t` (the actor-shaped body, in
+`transport_internal.h`) have **different layouts**. They cannot be
+overlaid on one another. The backend struct therefore holds **both**:
+
+```c
+typedef struct poseidon_unix_transport_t {
+    poseidon_transport_internal_t base;   /* FIRST: a pointer to the
+                                              backend IS a pointer to the
+                                              shared body */
+    poseidon_transport_t public;          /* the vtable view */
+    platform_socket_t* listen_sock;
+    pd_watcher_t* listen_watcher;
+    char* socket_path;
+    void* ctx;
+    platform_mutex_t* conn_lock;
+    scheduler_pool_t* own_pool;
+} poseidon_unix_transport_t;
+```
+
+Conversions: `_unix_from_public()` uses `offsetof(..., public)`;
+`_unix_from_base()` is a plain upcast (base is first). Commit 9 removes
+the vtable and collapses this to one view.
+
+### Threading model
+
+- I/O thread: the poll-dancer loop, the accept watcher, the destroy-stack
+  drain. Nothing else.
+- Scheduler pool workers: the per-connection actors. They own frame
+  decoding and every write to the socket.
+- Caller thread: create / start / stop / destroy.
+
+A watcher may only be unregistered on the loop thread, so a connection
+that must tear its watcher down pushes it onto the transport's
+`destroy_stack_t`; the I/O thread drains the stack at the bottom of each
+`pd_loop_run_once` iteration. The socket is closed **after** the
+unregister, so the descriptor number cannot be recycled under a live
+registration.
+
+### Teardown order (this order is load-bearing)
+
+1. `poseidon_transport_unix_stop` — join the I/O thread.
+2. `destroy_stack_drain` — free the watchers the connections asked for.
+   **Before** touching the connection watchers, or they are freed twice.
+3. Destroy the listen socket.
+4. `actor_destroy` on **every** connection actor. This sets DESTROY,
+   waits for a running dispatch to finish, and drains the mailbox. The
+   connection's fields (`sock`, `watcher`, `write_buffer`, `transport`)
+   may only be touched after this — touching them earlier is a data race
+   (the thread sanitizer flagged exactly this).
+5. `scheduler_pool_wait_for_idle` — let the rest of the pool go quiet.
+6. Free the connections: socket, watcher, write buffer, session.
+7. `actor_destroy` on the transport's own actor, `destroy_stack_destroy`,
+   `pd_loop_destroy`, free.
+
+`actor_destroy` already detaches the actor from the pool registry and
+destroys the mailbox, so it must **not** be combined with a separate
+`actor_detach_pool` + `message_queue_destroy` — that tears the same
+queue down twice.
+
+### Bugs fixed in this pass
+
+- **Partial send stalled forever.** The write path had no retry when the
+  kernel's send buffer filled up: the frame stayed in `write_buffer` and
+  nothing re-armed the socket. Added `POSEIDON_UNIX_CONNECTION_WRITABLE`,
+  delivered by the read callback on `PD_EVENT_WRITE`, so the actor
+  retries the pending bytes. (Upstream has the same message; the
+  in-between poseidon draft had dropped it and folded it away.)
+- **Teardown data race.** The transport touched `conn->sock` and
+  `conn->is_closing` while a connection actor's dispatch could still be
+  running. Fixed by quiescing the actors first (see the teardown order
+  above). Two sanitizers confirmed the fix.
+- **No scheduler pool without a manager.** A transport created with a
+  NULL channel manager got `pool = NULL`, so its connection actors were
+  never scheduled and their mailboxes filled up undrained. The transport
+  now creates and owns a pool (`own_pool`) in that case, and stops and
+  destroys it in its own teardown.
+
+### API surface added (backend-specific, in `transport_unix.h`)
+
+- `poseidon_transport_unix_create(socket_path, manager, on_message, ctx)` — 4 args, returns `poseidon_transport_t*`, NULL on failure. Matches `transport.h` exactly.
+- `poseidon_transport_unix_destroy` — the backend's own destroy. The generic `poseidon_transport_destroy` does not know about the connections, the loop or the transport's actor, so the Unix backend must not use it.
+- `poseidon_transport_unix_start` / `_stop` / `_send`.
+- `poseidon_transport_unix_send_to_client(internal, client_id, data, len)` — the form the `on_message` callback uses, since the callback receives the internal body.
+- `poseidon_transport_unix_session_for_client_id(internal, client_id)` — the session bound to a client.
+- `poseidon_transport_unix_context(internal)` — the opaque ctx.
+
+`client_id` **is** the file descriptor of the accepted socket.
+
+### The `on_message` callback
+
+```c
+typedef void (*poseidon_transport_on_message_cb)(
+    struct poseidon_transport_internal_t* transport,
+    int client_id, const uint8_t* data, size_t len);
+```
+
+No `void* ctx` parameter — the ctx is stored by the backend and read
+back through the backend's context accessor. The callback receives one
+**decoded** frame: the 4-byte big-endian length prefix is already
+stripped. `poseidond.c` implements it in `unix_on_message`: decode the
+cbor frame, hand the request to `client_session_handle_request`,
+serialize the response, send it back with
+`poseidon_transport_unix_send_to_client` (which re-adds the prefix).
+
+### Wire protocol
+
+4-byte big-endian length prefix + payload, both directions. Same as
+`stream_frame_encode` upstream and as `poseidon_client.c` in-tree.
+
+### Verification performed for this commit
+
+- `cmake --build build/` green, **25/25 ctest**, **9/9 conn suite**.
+- A request/response round trip over the socket, verified end to end
+  (framed request → decoded → framed response → decoded).
+- 20 concurrent clients, 400 requests, half the clients disconnecting
+  abruptly: 410 frames, 0 send failures.
+- valgrind: **0 errors, 0 leaks** (11,903 allocs / 11,903 frees).
+- Thread sanitizer: **0 races** after the teardown fix. (TSAN needs
+  `setarch -R` in this container; it aborts with "unexpected memory
+  mapping" otherwise.)
+- The manager path (transport created with a real `poseidon_channel_manager_t`)
+  round-trips and tears down cleanly.
+
+### Pre-existing issues found (NOT from this commit — do not attribute to it)
+
+- `scheduler_pool_destroy` reads the actor registry of an already-freed
+  manager (`poseidon_channel_manager_destroy` frees the manager, and the
+  pool still walks its registry): 5 invalid reads under valgrind. The
+  daemon's own teardown order triggers it.
+- `poseidon_channel_manager_unregister_session` leaks the message node
+  (32 bytes): the payload is stack-allocated but the node is heap.
+- `poseidond` fails at "failed to start channel manager dial channel"
+  before any transport is created. Reproduces identically on a clean
+  checkout of the parent commit, so it is not from this work.
