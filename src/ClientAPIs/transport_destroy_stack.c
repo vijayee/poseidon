@@ -12,7 +12,7 @@
 // unit so each backend .c does not have to redefine the LIFO list
 // management.
 //
-#include "transport_internal.h"
+#include "transport.h"
 #include "../Platform/platform.h"
 #include <poll-dancer/poll-dancer.h>
 #include <string.h>

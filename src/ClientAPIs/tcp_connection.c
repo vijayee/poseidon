@@ -31,7 +31,7 @@
 #include "../Actor/message.h"
 #include "../Buffer/buffer.h"
 #include "client_session.h"
-#include "transport_internal.h"
+#include "transport.h"
 
 #include <poll-dancer/poll-dancer.h>
 
@@ -662,7 +662,7 @@ static void _tcp_connection_dispatch(void* state, message_t* msg) {
 // CREATE / DESTROY
 // ============================================================================
 
-bool poseidon_tcp_connection_create(poseidon_transport_internal_t* transport,
+bool poseidon_tcp_connection_create(poseidon_transport_t* transport,
                                      platform_socket_t* sock,
                                      client_session_t* session,
                                      struct ssl_ctx_st* ssl_ctx,

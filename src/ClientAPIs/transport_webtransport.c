@@ -28,7 +28,7 @@
 #include "../Buffer/buffer.h"
 #include "../Channel/channel_manager.h"
 #include "client_session.h"
-#include "transport_internal.h"
+#include "transport.h"
 #include "wt_connection.h"
 
 #include <wtf.h>
@@ -54,21 +54,15 @@ static uint64_t s_next_session_id = 1;
 // context, the server, the port and the certificate paths — lives
 // here.
 //
-// Two views of the transport exist side by side:
-//   - base is the actor-shaped body every backend shares. It is the
-//     FIRST member, so a pointer to it IS a pointer to this struct and
-//     the backend can be recovered from the internal body alone.
-//   - public is the vtable-shaped view that transport.h still
-//     declares. It is reached from the public pointer through
-//     offsetof.
+// The shared body is the FIRST member, so a pointer to it IS a pointer
+// to this struct: the backend is recovered from the transport body with
+// a plain upcast.
 
 typedef struct poseidon_wt_transport_t {
     // The shared transport body. First so that a pointer to this
     // struct IS a pointer to the shared body.
-    poseidon_transport_internal_t base;
+    poseidon_transport_t base;
 
-    // The vtable-shaped public view.
-    poseidon_transport_t public;
 
     // The libwtf context and the server. Both are created by start and
     // released by stop.
@@ -98,28 +92,18 @@ static void _wt_stream_callback(const wtf_stream_event_t* event);
 static wtf_connection_decision_t _wt_connection_validator(
     const wtf_connection_request_t* request, void* user_context);
 static void _wt_transport_dispatch(void* state, message_t* msg);
-static int _wt_transport_send_to_client(poseidon_transport_internal_t* transport,
+static int _wt_transport_send_to_client(poseidon_transport_t* transport,
                                          int client_id,
                                          const uint8_t* data,
                                          size_t len);
-static int _wt_vtable_send(poseidon_transport_t* self,
-                            int client_id,
-                            const uint8_t* data,
-                            size_t len);
 
 // ============================================================================
 // VIEW CONVERSIONS
 // ============================================================================
 
-// Recovers the backend struct from the vtable-shaped public pointer.
-static poseidon_wt_transport_t* _wt_from_public(poseidon_transport_t* transport) {
-    return (poseidon_wt_transport_t*)((char*)transport -
-        offsetof(poseidon_wt_transport_t, public));
-}
-
-// Recovers the backend struct from the actor-shaped internal pointer.
-// base is the first member, so this is a plain upcast.
-static poseidon_wt_transport_t* _wt_from_base(poseidon_transport_internal_t* transport) {
+// Recovers the backend struct from the transport body. base is the
+// first member, so this is a plain upcast.
+static poseidon_wt_transport_t* _wt_from_base(poseidon_transport_t* transport) {
     return (poseidon_wt_transport_t*)transport;
 }
 
@@ -203,7 +187,7 @@ static void _wt_session_callback(const wtf_session_event_t* event) {
         }
         // The session id is the connection's identity on the wire.
         session->client_fd = (int)session_id;
-        session->transport = &transport->public;
+        session->transport = &transport->base;
 
         poseidon_wt_connection_t* conn = NULL;
         if (!poseidon_wt_connection_create(&transport->base, session,
@@ -405,7 +389,7 @@ poseidon_transport_t* poseidon_transport_webtransport_create(
             sizeof(poseidon_wt_transport_t));
     if (transport == NULL) return NULL;
 
-    poseidon_transport_internal_t* base = &transport->base;
+    poseidon_transport_t* base = &transport->base;
 
     base->manager = manager;
     base->on_message = NULL;
@@ -444,29 +428,14 @@ poseidon_transport_t* poseidon_transport_webtransport_create(
     base->pool = manager->actor.pool;
     actor_init(&base->actor, base, _wt_transport_dispatch, base->pool);
 
-    // The vtable-shaped public view lives in the same allocation as
-    // the actor-shaped body, side by side.
-    transport->public.name = transport->base.name;
-    transport->public.type = POSEIDON_TRANSPORT_WEBTRANSPORT;
-    transport->public.thread = NULL;
-    transport->public.loop = NULL;
-    transport->public.manager = manager;
-    transport->public.on_message = NULL;
-    transport->public.ctx = NULL;
-    transport->public.lock = transport->conn_lock;
-    transport->public.running = false;
-    transport->public.start = poseidon_transport_webtransport_start;
-    transport->public.stop = poseidon_transport_webtransport_stop;
-    transport->public.send = _wt_vtable_send;
-    transport->public.destroy = poseidon_transport_webtransport_destroy;
 
-    return &transport->public;
+    return &transport->base;
 }
 
 int poseidon_transport_webtransport_start(poseidon_transport_t* transport) {
     if (transport == NULL) return -1;
 
-    poseidon_wt_transport_t* wt_transport = _wt_from_public(transport);
+    poseidon_wt_transport_t* wt_transport = _wt_from_base(transport);
     if (ATOMIC_LOAD(&wt_transport->base.running)) {
         return 0;
     }
@@ -536,7 +505,6 @@ int poseidon_transport_webtransport_start(poseidon_transport_t* transport) {
     }
 
     ATOMIC_STORE(&wt_transport->base.running, 1);
-    wt_transport->public.running = true;
     log_info("webtransport: listening on port %u", (unsigned)wt_transport->port);
     return 0;
 }
@@ -544,13 +512,12 @@ int poseidon_transport_webtransport_start(poseidon_transport_t* transport) {
 int poseidon_transport_webtransport_stop(poseidon_transport_t* transport) {
     if (transport == NULL) return 0;
 
-    poseidon_wt_transport_t* wt_transport = _wt_from_public(transport);
+    poseidon_wt_transport_t* wt_transport = _wt_from_base(transport);
     if (!ATOMIC_LOAD(&wt_transport->base.running)) {
         return 0;
     }
 
     ATOMIC_STORE(&wt_transport->base.running, 0);
-    wt_transport->public.running = false;
 
     // Stop the server first: no new session may connect from here on.
     if (wt_transport->server != NULL) {
@@ -575,8 +542,8 @@ int poseidon_transport_webtransport_stop(poseidon_transport_t* transport) {
 void poseidon_transport_webtransport_destroy(poseidon_transport_t* transport) {
     if (transport == NULL) return;
 
-    poseidon_wt_transport_t* wt_transport = _wt_from_public(transport);
-    poseidon_transport_internal_t* base = &wt_transport->base;
+    poseidon_wt_transport_t* wt_transport = _wt_from_base(transport);
+    poseidon_transport_t* base = &wt_transport->base;
 
     if (ATOMIC_LOAD(&base->running)) {
         poseidon_transport_webtransport_stop(transport);
@@ -668,7 +635,7 @@ void poseidon_transport_webtransport_destroy(poseidon_transport_t* transport) {
 // Hands the payload to the connection's write actor. The connection
 // frames it and serializes the write, so a reply never interleaves
 // with another reply on the same stream.
-static int _wt_transport_send_to_client(poseidon_transport_internal_t* transport,
+static int _wt_transport_send_to_client(poseidon_transport_t* transport,
                                          int client_id,
                                          const uint8_t* data,
                                          size_t len) {
@@ -694,25 +661,12 @@ static int _wt_transport_send_to_client(poseidon_transport_internal_t* transport
     return 0;
 }
 
-// The vtable-shaped send hook. The public view and the internal body
-// are two members of the same allocation, so the internal body is
-// reached through the public pointer.
-static int _wt_vtable_send(poseidon_transport_t* self,
-                            int client_id,
-                            const uint8_t* data,
-                            size_t len) {
-    if (self == NULL) return -1;
-    poseidon_wt_transport_t* wt_transport = _wt_from_public(self);
-    return _wt_transport_send_to_client(&wt_transport->base, client_id, data,
-                                        len);
-}
-
 int poseidon_transport_webtransport_send(poseidon_transport_t* transport,
                                          int client_id,
                                          const uint8_t* data,
                                          size_t len) {
     if (transport == NULL) return -1;
-    poseidon_wt_transport_t* wt_transport = _wt_from_public(transport);
+    poseidon_wt_transport_t* wt_transport = _wt_from_base(transport);
     return _wt_transport_send_to_client(&wt_transport->base, client_id, data,
                                         len);
 }

@@ -11,9 +11,9 @@
  * data through the transport's callbacks. There is no poll-dancer loop
  * behind this backend, and no watcher to tear down.
  *
- * The public transport object is still the vtable-shaped
- * poseidon_transport_t declared in transport.h; the actor-shaped body
- * behind it is the internal transport body from transport_internal.h.
+ * The transport object is the actor-shaped body declared in
+ * transport.h; the backend's private state lives in a backend struct
+ * whose first member is that body.
  * The listener's own state (libwtf context, server, port, certificate
  * paths, connection lock) lives in a backend-private struct whose
  * first member is the shared body, so the backend is recovered from
@@ -33,7 +33,6 @@
 
 #include "transport.h"
 
-struct poseidon_transport_internal_t;
 struct client_session_t;
 
 #ifdef __cplusplus

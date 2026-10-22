@@ -11,9 +11,9 @@
  * until the platform work arrives. The shape to follow then is the one
  * of the Unix and TCP backends.
  *
- * The public transport object is still the vtable-shaped
- * poseidon_transport_t declared in transport.h; the actor-shaped body
- * behind it is the internal transport body from transport_internal.h.
+ * The transport object is the actor-shaped body declared in
+ * transport.h; the backend's private state lives in a backend struct
+ * whose first member is that body.
  */
 
 #ifndef POSEIDON_TRANSPORT_BINDER_H
@@ -25,7 +25,6 @@
 
 #include "transport.h"
 
-struct poseidon_transport_internal_t;
 
 #ifdef __cplusplus
 extern "C" {

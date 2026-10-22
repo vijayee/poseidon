@@ -28,7 +28,7 @@
 #include <poll-dancer/poll-dancer.h>
 #include "../Util/log.h"
 #include "../Buffer/buffer.h"
-#include "transport_internal.h"
+#include "transport.h"
 
 #include <errno.h>
 #include <endian.h>
@@ -481,7 +481,7 @@ static void _unix_connection_dispatch(void* state, message_t* msg) {
 // CREATE / DESTROY
 // ============================================================================
 
-bool poseidon_unix_connection_create(poseidon_transport_internal_t* transport,
+bool poseidon_unix_connection_create(poseidon_transport_t* transport,
                                      platform_socket_t* sock,
                                      client_session_t* session,
                                      poseidon_unix_connection_t** out_conn) {

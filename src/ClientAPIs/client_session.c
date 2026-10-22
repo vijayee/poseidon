@@ -420,7 +420,7 @@ static void handle_handle_request(client_session_t* s,
 static void handle_deliver(client_session_t* s, client_session_msg_deliver_t* p) {
     if (p->topic_path == NULL || p->buf == NULL) return;
     if (s->transport == NULL || s->client_fd < 0) return;
-    s->transport->send(s->transport, s->client_fd, p->buf, p->buf_len);
+    poseidon_transport_send(s->transport, s->client_fd, p->buf, p->buf_len);
 }
 
 static void handle_dispatch_event(client_session_t* s,
@@ -440,7 +440,7 @@ static void handle_dispatch_event(client_session_t* s,
             uint8_t* buf = NULL;
             size_t buf_len = 0;
             if (client_protocol_serialize(event, &buf, &buf_len) == 0) {
-                s->transport->send(s->transport, s->client_fd, buf, buf_len);
+                poseidon_transport_send(s->transport, s->client_fd, buf, buf_len);
                 free(buf);
             }
             cbor_decref(&event);

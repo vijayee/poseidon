@@ -27,11 +27,10 @@
 #include "../../deps/poll-dancer/include/poll-dancer/types.h"
 #include "../Actor/actor.h"
 
-struct poseidon_transport_internal_t;
 struct client_session_t;
 struct QUIC_HANDLE;
 
-#include "transport_internal.h"
+#include "transport.h"
 #include "quic_connection_messages.h"
 
 /* Per-connection actor. One instance per accepted client stream. The
@@ -60,7 +59,7 @@ struct QUIC_HANDLE;
  */
 typedef struct poseidon_quic_connection_t {
   actor_t actor;
-  poseidon_transport_internal_t* transport;
+  poseidon_transport_t* transport;
   client_session_t* session;
   struct QUIC_HANDLE* connection;
   struct QUIC_HANDLE* stream;
@@ -81,7 +80,7 @@ typedef struct poseidon_quic_connection_t {
  *
  * Returns false on failure; the caller must not call any other function
  * on a NULL connection pointer. */
-bool poseidon_quic_connection_create(poseidon_transport_internal_t* transport,
+bool poseidon_quic_connection_create(poseidon_transport_t* transport,
                                      client_session_t* session,
                                      struct QUIC_HANDLE* connection,
                                      struct QUIC_HANDLE* stream,

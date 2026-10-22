@@ -6,9 +6,9 @@
  * every accepted socket becomes a poseidon_unix_connection_t whose
  * actor runs on the transport's scheduler pool.
  *
- * The public transport object is still the vtable-shaped
- * poseidon_transport_t declared in transport.h; the actor-shaped body
- * behind it is the internal transport body from transport_internal.h.
+ * The transport object is the actor-shaped body declared in
+ * transport.h; the backend's private state lives in a backend struct
+ * whose first member is that body.
  * The listener's own state (listening socket, accept watcher, socket
  * path, connection lock) lives in a backend-private struct that the
  * shared body reaches through its backend_data field.
@@ -29,7 +29,6 @@
 
 #include "transport.h"
 
-struct poseidon_transport_internal_t;
 struct client_session_t;
 
 #ifdef __cplusplus
@@ -95,7 +94,7 @@ int poseidon_transport_unix_send(poseidon_transport_t* transport,
  * internal transport body. This is the form the on_message callback
  * uses, since the callback receives the internal body.
  */
-int poseidon_transport_unix_send_to_client(struct poseidon_transport_internal_t* transport,
+int poseidon_transport_unix_send_to_client(struct poseidon_transport_t* transport,
                                             int client_id,
                                             const uint8_t* data,
                                             size_t len);
@@ -106,14 +105,14 @@ int poseidon_transport_unix_send_to_client(struct poseidon_transport_internal_t*
  * until the connection is torn down.
  */
 struct client_session_t* poseidon_transport_unix_session_for_client_id(
-    struct poseidon_transport_internal_t* transport,
+    struct poseidon_transport_t* transport,
     int client_id);
 
 /**
  * Returns the opaque user context handed to
  * poseidon_transport_unix_create.
  */
-void* poseidon_transport_unix_context(struct poseidon_transport_internal_t* transport);
+void* poseidon_transport_unix_context(struct poseidon_transport_t* transport);
 
 #ifdef __cplusplus
 }

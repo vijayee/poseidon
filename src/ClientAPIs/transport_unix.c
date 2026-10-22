@@ -37,7 +37,7 @@
 #include "../Buffer/buffer.h"
 #include "../Channel/channel_manager.h"
 #include "client_session.h"
-#include "transport_internal.h"
+#include "transport.h"
 #include "unix_connection.h"
 
 #include <poll-dancer/poll-dancer.h>
@@ -74,25 +74,15 @@ static uint64_t s_next_session_id = 1;
 // the accept watcher, the socket path and the user context — lives
 // here.
 //
-// Two views of the transport exist side by side:
-//   - base is the actor-shaped body every backend shares. It is the
-//     FIRST member, so a pointer to it IS a pointer to this struct and
-//     the backend can be recovered from the internal body alone.
-//   - public is the vtable-shaped view that transport.h still
-//     declares. It is reached from the public pointer through
-//     offsetof.
-//
-// The public view is what the daemon and the client session call
-// through (start / stop / send), the internal view is what the
-// per-connection actors hold.
+// The shared body is the FIRST member, so a pointer to it IS a pointer
+// to this struct: the backend is recovered from the transport body with
+// a plain upcast.
 
 typedef struct poseidon_unix_transport_t {
     // The shared transport body. First so that a pointer to this
     // struct IS a pointer to the shared body.
-    poseidon_transport_internal_t base;
+    poseidon_transport_t base;
 
-    // The vtable-shaped public view.
-    poseidon_transport_t public;
 
     // Listening socket and its accept watcher. The watcher is created
     // on the I/O thread, right before the loop starts running.
@@ -127,28 +117,18 @@ static void _accept_callback(pd_loop_t* loop,
                              pd_event_t events,
                              void* user_data);
 static void _unix_transport_dispatch(void* state, message_t* msg);
-static int _unix_transport_send_to_client(poseidon_transport_internal_t* transport,
+static int _unix_transport_send_to_client(poseidon_transport_t* transport,
                                            int client_id,
                                            const uint8_t* data,
                                            size_t len);
-static int _unix_vtable_send(poseidon_transport_t* self,
-                             int client_id,
-                             const uint8_t* data,
-                             size_t len);
 
 // ============================================================================
 // VIEW CONVERSIONS
 // ============================================================================
 
-// Recovers the backend struct from the vtable-shaped public pointer.
-static poseidon_unix_transport_t* _unix_from_public(poseidon_transport_t* transport) {
-    return (poseidon_unix_transport_t*)((char*)transport -
-        offsetof(poseidon_unix_transport_t, public));
-}
-
-// Recovers the backend struct from the actor-shaped internal pointer.
-// base is the first member, so this is a plain upcast.
-static poseidon_unix_transport_t* _unix_from_base(poseidon_transport_internal_t* transport) {
+// Recovers the backend struct from the transport body. base is the
+// first member, so this is a plain upcast.
+static poseidon_unix_transport_t* _unix_from_base(poseidon_transport_t* transport) {
     return (poseidon_unix_transport_t*)transport;
 }
 
@@ -243,7 +223,7 @@ static void _accept_callback(pd_loop_t* loop,
         return;
     }
     session->client_fd = client_fd;
-    session->transport = &transport->public;
+    session->transport = &transport->base;
 
     if (transport->base.manager != NULL) {
         poseidon_channel_manager_register_session(transport->base.manager,
@@ -340,7 +320,7 @@ poseidon_transport_t* poseidon_transport_unix_create(const char* socket_path,
             sizeof(poseidon_unix_transport_t));
     if (transport == NULL) return NULL;
 
-    poseidon_transport_internal_t* base = &transport->base;
+    poseidon_transport_t* base = &transport->base;
 
     base->loop = pd_loop_create(NULL);
     if (base->loop == NULL) {
@@ -435,29 +415,14 @@ poseidon_transport_t* poseidon_transport_unix_create(const char* socket_path,
 
     platform_socket_set_nonblocking(transport->listen_sock);
 
-    // The vtable-shaped public view lives in the same allocation as
-    // the actor-shaped body, side by side.
-    transport->public.name = transport->socket_path;
-    transport->public.type = POSEIDON_TRANSPORT_UNIX_SOCKET;
-    transport->public.thread = NULL;
-    transport->public.loop = base->loop;
-    transport->public.manager = manager;
-    transport->public.on_message = on_message;
-    transport->public.ctx = ctx;
-    transport->public.lock = transport->conn_lock;
-    transport->public.running = false;
-    transport->public.start = poseidon_transport_unix_start;
-    transport->public.stop = poseidon_transport_unix_stop;
-    transport->public.send = _unix_vtable_send;
-    transport->public.destroy = NULL;
 
-    return &transport->public;
+    return &transport->base;
 }
 
 int poseidon_transport_unix_start(poseidon_transport_t* transport) {
     if (transport == NULL) return -1;
 
-    poseidon_unix_transport_t* unix_transport = _unix_from_public(transport);
+    poseidon_unix_transport_t* unix_transport = _unix_from_base(transport);
 
     if (ATOMIC_LOAD(&unix_transport->base.running)) {
         return 0;
@@ -474,8 +439,6 @@ int poseidon_transport_unix_start(poseidon_transport_t* transport) {
         return -1;
     }
     unix_transport->base.thread = thread;
-    unix_transport->public.thread = thread;
-    unix_transport->public.running = true;
 
     return 0;
 }
@@ -483,7 +446,7 @@ int poseidon_transport_unix_start(poseidon_transport_t* transport) {
 int poseidon_transport_unix_stop(poseidon_transport_t* transport) {
     if (transport == NULL) return 0;
 
-    poseidon_unix_transport_t* unix_transport = _unix_from_public(transport);
+    poseidon_unix_transport_t* unix_transport = _unix_from_base(transport);
 
     if (!ATOMIC_LOAD(&unix_transport->base.running)) {
         return 0;
@@ -501,8 +464,6 @@ int poseidon_transport_unix_stop(poseidon_transport_t* transport) {
         platform_thread_join(unix_transport->base.thread);
         unix_transport->base.thread = NULL;
     }
-    unix_transport->public.thread = NULL;
-    unix_transport->public.running = false;
 
     return 0;
 }
@@ -510,8 +471,8 @@ int poseidon_transport_unix_stop(poseidon_transport_t* transport) {
 void poseidon_transport_unix_destroy(poseidon_transport_t* transport) {
     if (transport == NULL) return;
 
-    poseidon_unix_transport_t* unix_transport = _unix_from_public(transport);
-    poseidon_transport_internal_t* base = &unix_transport->base;
+    poseidon_unix_transport_t* unix_transport = _unix_from_base(transport);
+    poseidon_transport_t* base = &unix_transport->base;
 
     // Stop the I/O thread first: after this returns no callback can
     // fire on a connection, so the teardown below runs without a race
@@ -641,7 +602,7 @@ void poseidon_transport_unix_destroy(poseidon_transport_t* transport) {
 
 // Frames the payload with its 4-byte big-endian length prefix and
 // hands it to the connection's write actor.
-static int _unix_transport_send_to_client(poseidon_transport_internal_t* transport,
+static int _unix_transport_send_to_client(poseidon_transport_t* transport,
                                            int client_id,
                                            const uint8_t* data,
                                            size_t len) {
@@ -674,30 +635,16 @@ static int _unix_transport_send_to_client(poseidon_transport_internal_t* transpo
     return 0;
 }
 
-// The vtable-shaped send hook. The public view and the internal body
-// are two members of the same allocation, so the internal body is
-// reached through the public pointer.
-static int _unix_vtable_send(poseidon_transport_t* self,
-                             int client_id,
-                             const uint8_t* data,
-                             size_t len) {
-    if (self == NULL) return -1;
-    poseidon_unix_transport_t* unix_transport = _unix_from_public(self);
-    return _unix_transport_send_to_client(&unix_transport->base, client_id,
-                                           data, len);
-}
-
 int poseidon_transport_unix_send(poseidon_transport_t* transport,
                                   int client_id,
                                   const uint8_t* data,
                                   size_t len) {
     if (transport == NULL) return -1;
-    return _unix_transport_send_to_client(
-        (poseidon_transport_internal_t*)transport, client_id, data, len);
+    return _unix_transport_send_to_client(transport, client_id, data, len);
 }
 
 int poseidon_transport_unix_send_to_client(
-    struct poseidon_transport_internal_t* transport,
+    struct poseidon_transport_t* transport,
     int client_id,
     const uint8_t* data,
     size_t len) {
@@ -709,7 +656,7 @@ int poseidon_transport_unix_send_to_client(
 // ============================================================================
 
 client_session_t* poseidon_transport_unix_session_for_client_id(
-    struct poseidon_transport_internal_t* transport,
+    struct poseidon_transport_t* transport,
     int client_id) {
     if (transport == NULL) return NULL;
 
@@ -725,7 +672,7 @@ client_session_t* poseidon_transport_unix_session_for_client_id(
 }
 
 void* poseidon_transport_unix_context(
-    struct poseidon_transport_internal_t* transport) {
+    struct poseidon_transport_t* transport) {
     if (transport == NULL) return NULL;
     return _unix_from_base(transport)->ctx;
 }

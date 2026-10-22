@@ -3,6 +3,10 @@
 //
 
 #include "ClientAPIs/transport.h"
+#include "ClientAPIs/transport_tcp.h"
+#include "ClientAPIs/transport_ws.h"
+#include "ClientAPIs/transport_quic.h"
+#include "ClientAPIs/transport_webtransport.h"
 #include "ClientAPIs/transport_unix.h"
 #include "ClientAPIs/client_protocol.h"
 #include "ClientAPIs/client_session.h"
@@ -40,7 +44,7 @@ static void signal_handler(int signum) {
 // the payload of a length-prefixed message: a CBOR-encoded client
 // frame. The request is handed to the client's session actor, and the
 // response (if any) is framed and sent back to the same client.
-static void unix_on_message(struct poseidon_transport_internal_t* transport,
+static void unix_on_message(struct poseidon_transport_t* transport,
                             int client_id,
                             const uint8_t* data,
                             size_t len) {
@@ -250,7 +254,7 @@ int main(int argc, char* argv[]) {
                                                           unix_on_message,
                                                           NULL);
         if (g_unix_transport != NULL) {
-            if (g_unix_transport->start(g_unix_transport) == 0) {
+            if (poseidon_transport_start(g_unix_transport) == 0) {
                 log_info("poseidond: Unix transport listening on %s", config.unix_socket_path);
             } else {
                 log_error("poseidond: failed to start Unix transport");
@@ -269,7 +273,7 @@ int main(int argc, char* argv[]) {
             g_tcp_transport = poseidon_transport_tcp_create(
                 config.tcp_port, config.tls_cert_path, config.tls_key_path, mgr);
             if (g_tcp_transport != NULL) {
-                if (g_tcp_transport->start(g_tcp_transport) == 0) {
+                if (poseidon_transport_start(g_tcp_transport) == 0) {
                     log_info("poseidond: TCP transport listening on port %u", config.tcp_port);
                 } else {
                     log_error("poseidond: failed to start TCP transport");
@@ -289,7 +293,7 @@ int main(int argc, char* argv[]) {
             g_ws_transport = poseidon_transport_ws_create(
                 config.ws_port, config.tls_cert_path, config.tls_key_path, mgr);
             if (g_ws_transport != NULL) {
-                if (g_ws_transport->start(g_ws_transport) == 0) {
+                if (poseidon_transport_start(g_ws_transport) == 0) {
                     log_info("poseidond: WebSocket transport listening on port %u", config.ws_port);
                 } else {
                     log_error("poseidond: failed to start WebSocket transport");
@@ -309,7 +313,7 @@ int main(int argc, char* argv[]) {
             g_quic_transport = poseidon_transport_quic_create(
                 config.quic_port, config.tls_cert_path, config.tls_key_path, mgr);
             if (g_quic_transport != NULL) {
-                if (g_quic_transport->start(g_quic_transport) == 0) {
+                if (poseidon_transport_start(g_quic_transport) == 0) {
                     log_info("poseidond: QUIC transport listening on port %u", config.quic_port);
                 } else {
                     log_error("poseidond: failed to start QUIC transport");
@@ -329,7 +333,7 @@ int main(int argc, char* argv[]) {
             g_wt_transport = poseidon_transport_webtransport_create(
                 config.wt_port, config.tls_cert_path, config.tls_key_path, mgr);
             if (g_wt_transport != NULL) {
-                if (g_wt_transport->start(g_wt_transport) == 0) {
+                if (poseidon_transport_start(g_wt_transport) == 0) {
                     log_info("poseidond: WebTransport listening on port %u", config.wt_port);
                 } else {
                     log_error("poseidond: failed to start WebTransport");
@@ -362,19 +366,19 @@ int main(int argc, char* argv[]) {
         g_unix_transport = NULL;
     }
     if (g_tcp_transport != NULL) {
-        g_tcp_transport->stop(g_tcp_transport);
+        poseidon_transport_stop(g_tcp_transport);
         poseidon_transport_destroy(g_tcp_transport);
     }
     if (g_ws_transport != NULL) {
-        g_ws_transport->stop(g_ws_transport);
+        poseidon_transport_stop(g_ws_transport);
         poseidon_transport_destroy(g_ws_transport);
     }
     if (g_quic_transport != NULL) {
-        g_quic_transport->stop(g_quic_transport);
+        poseidon_transport_stop(g_quic_transport);
         poseidon_transport_destroy(g_quic_transport);
     }
     if (g_wt_transport != NULL) {
-        g_wt_transport->stop(g_wt_transport);
+        poseidon_transport_stop(g_wt_transport);
         poseidon_transport_destroy(g_wt_transport);
     }
 

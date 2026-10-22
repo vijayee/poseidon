@@ -7,9 +7,9 @@
  * poseidon_ws_connection_t whose actor runs on the transport's
  * scheduler pool.
  *
- * The public transport object is still the vtable-shaped
- * poseidon_transport_t declared in transport.h; the actor-shaped body
- * behind it is the internal transport body from transport_internal.h.
+ * The transport object is the actor-shaped body declared in
+ * transport.h; the backend's private state lives in a backend struct
+ * whose first member is that body.
  * The listener's own state (listening socket, accept watcher, TLS
  * context, port, connection lock) lives in a backend-private struct
  * whose first member is the shared body, so the backend is recovered
@@ -29,7 +29,6 @@
 
 #include "transport.h"
 
-struct poseidon_transport_internal_t;
 struct client_session_t;
 
 #ifdef __cplusplus

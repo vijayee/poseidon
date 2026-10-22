@@ -27,11 +27,10 @@
 #include "../../deps/poll-dancer/include/poll-dancer/types.h"
 #include "../Actor/actor.h"
 
-struct poseidon_transport_internal_t;
 struct client_session_t;
 struct wtf_stream;
 
-#include "transport_internal.h"
+#include "transport.h"
 #include "wt_connection_messages.h"
 
 /* Per-connection actor. One instance per WebTransport session. The
@@ -58,7 +57,7 @@ struct wtf_stream;
  */
 typedef struct poseidon_wt_connection_t {
   actor_t actor;
-  poseidon_transport_internal_t* transport;
+  poseidon_transport_t* transport;
   client_session_t* session;
   struct wtf_stream* stream;
   uint32_t session_id;
@@ -76,7 +75,7 @@ typedef struct poseidon_wt_connection_t {
  *
  * Returns false on failure; the caller must not call any other function
  * on a NULL connection pointer. */
-bool poseidon_wt_connection_create(poseidon_transport_internal_t* transport,
+bool poseidon_wt_connection_create(poseidon_transport_t* transport,
                                     client_session_t* session,
                                     uint32_t session_id,
                                     poseidon_wt_connection_t** out_conn);

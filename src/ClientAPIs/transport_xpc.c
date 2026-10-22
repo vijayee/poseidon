@@ -24,7 +24,7 @@
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
 #include "../Util/vec.h"
-#include "transport_internal.h"
+#include "transport.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -37,21 +37,15 @@
 // every backend needs. The XPC-specific state — the service name and
 // the connection lock — lives here.
 //
-// Two views of the transport exist side by side:
-//   - base is the actor-shaped body every backend shares. It is the
-//     FIRST member, so a pointer to it IS a pointer to this struct and
-//     the backend can be recovered from the internal body alone.
-//   - public is the vtable-shaped view that transport.h still
-//     declares. It is reached from the public pointer through
-//     offsetof.
+// The shared body is the FIRST member, so a pointer to it IS a pointer
+// to this struct: the backend is recovered from the transport body with
+// a plain upcast.
 
 typedef struct poseidon_xpc_transport_t {
     // The shared transport body. First so that a pointer to this
     // struct IS a pointer to the shared body.
-    poseidon_transport_internal_t base;
+    poseidon_transport_t base;
 
-    // The vtable-shaped public view.
-    poseidon_transport_t public;
 
     // Copy of the XPC service name. Freed by the destroy path.
     char* service_name;
@@ -67,17 +61,12 @@ typedef struct poseidon_xpc_transport_t {
 // ============================================================================
 
 static void _xpc_transport_dispatch(void* state, message_t* msg);
-static int _xpc_vtable_send(poseidon_transport_t* self,
-                             int client_id,
-                             const uint8_t* data,
-                             size_t len);
 
 // ============================================================================
 // VIEW CONVERSIONS
 // ============================================================================
 
-// Recovers the backend struct from the vtable-shaped public pointer.
-static poseidon_xpc_transport_t* _xpc_from_public(poseidon_transport_t* transport) {
+static poseidon_xpc_transport_t* _xpc_from_base(poseidon_transport_t* transport) {
     return (poseidon_xpc_transport_t*)((char*)transport -
         offsetof(poseidon_xpc_transport_t, public));
 }
@@ -110,7 +99,7 @@ poseidon_transport_t* poseidon_transport_xpc_create(
             sizeof(poseidon_xpc_transport_t));
     if (transport == NULL) return NULL;
 
-    poseidon_transport_internal_t* base = &transport->base;
+    poseidon_transport_t* base = &transport->base;
 
     base->manager = manager;
     base->on_message = NULL;
@@ -143,29 +132,14 @@ poseidon_transport_t* poseidon_transport_xpc_create(
     base->pool = manager->actor.pool;
     actor_init(&base->actor, base, _xpc_transport_dispatch, base->pool);
 
-    // The vtable-shaped public view lives in the same allocation as
-    // the actor-shaped body, side by side.
-    transport->public.name = transport->service_name;
-    transport->public.type = POSEIDON_TRANSPORT_XPC;
-    transport->public.thread = NULL;
-    transport->public.loop = NULL;
-    transport->public.manager = manager;
-    transport->public.on_message = NULL;
-    transport->public.ctx = NULL;
-    transport->public.lock = transport->conn_lock;
-    transport->public.running = false;
-    transport->public.start = poseidon_transport_xpc_start;
-    transport->public.stop = poseidon_transport_xpc_stop;
-    transport->public.send = _xpc_vtable_send;
-    transport->public.destroy = poseidon_transport_xpc_destroy;
 
-    return &transport->public;
+    return &transport->base;
 }
 
 int poseidon_transport_xpc_start(poseidon_transport_t* transport) {
     if (transport == NULL) return -1;
 
-    poseidon_xpc_transport_t* xpc_transport = _xpc_from_public(transport);
+    poseidon_xpc_transport_t* xpc_transport = _xpc_from_base(transport);
     if (ATOMIC_LOAD(&xpc_transport->base.running)) {
         return 0;
     }
@@ -175,28 +149,26 @@ int poseidon_transport_xpc_start(poseidon_transport_t* transport) {
     log_info("xpc transport: starting (macOS/iOS only)");
 
     ATOMIC_STORE(&xpc_transport->base.running, 1);
-    xpc_transport->public.running = true;
     return 0;
 }
 
 int poseidon_transport_xpc_stop(poseidon_transport_t* transport) {
     if (transport == NULL) return 0;
 
-    poseidon_xpc_transport_t* xpc_transport = _xpc_from_public(transport);
+    poseidon_xpc_transport_t* xpc_transport = _xpc_from_base(transport);
     if (!ATOMIC_LOAD(&xpc_transport->base.running)) {
         return 0;
     }
 
     ATOMIC_STORE(&xpc_transport->base.running, 0);
-    xpc_transport->public.running = false;
     return 0;
 }
 
 void poseidon_transport_xpc_destroy(poseidon_transport_t* transport) {
     if (transport == NULL) return;
 
-    poseidon_xpc_transport_t* xpc_transport = _xpc_from_public(transport);
-    poseidon_transport_internal_t* base = &xpc_transport->base;
+    poseidon_xpc_transport_t* xpc_transport = _xpc_from_base(transport);
+    poseidon_transport_t* base = &xpc_transport->base;
 
     if (ATOMIC_LOAD(&base->running)) {
         poseidon_transport_xpc_stop(transport);
@@ -227,7 +199,7 @@ void poseidon_transport_xpc_destroy(poseidon_transport_t* transport) {
 
 // The reply dictionary is written by the XPC bridge, so there is
 // nothing to enqueue here yet.
-static int _xpc_vtable_send(poseidon_transport_t* self,
+static int _xpc_send(poseidon_transport_t* self,
                              int client_id,
                              const uint8_t* data,
                              size_t len) {
@@ -243,7 +215,7 @@ int poseidon_transport_xpc_send(poseidon_transport_t* transport,
                                 const uint8_t* data,
                                 size_t len) {
     if (transport == NULL) return -1;
-    return _xpc_vtable_send(transport, client_id, data, len);
+    return _xpc_send(transport, client_id, data, len);
 }
 
 #endif // __APPLE__

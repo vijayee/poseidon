@@ -29,14 +29,13 @@
 #include "../Actor/actor.h"
 #include "../Buffer/buffer.h"
 
-struct poseidon_transport_internal_t;
 struct client_session_t;
 struct platform_socket_t;
 struct pd_watcher;
 struct ssl_ctx_st;
 struct ssl_st;
 
-#include "transport_internal.h"
+#include "transport.h"
 #include "ws_connection_messages.h"
 
 /* Per-connection actor. One instance per accepted socket. The actor_t
@@ -84,7 +83,7 @@ struct ssl_st;
  */
 typedef struct poseidon_ws_connection_t {
   actor_t actor;
-  poseidon_transport_internal_t* transport;
+  poseidon_transport_t* transport;
   platform_socket_t* sock;
   client_session_t* session;
   struct ssl_ctx_st* ssl_ctx;
@@ -115,7 +114,7 @@ typedef struct poseidon_ws_connection_t {
  * Returns false on failure; the caller must not call any other function
  * on a NULL connection pointer. */
 bool poseidon_ws_connection_create(
-    poseidon_transport_internal_t* transport,
+    poseidon_transport_t* transport,
     struct platform_socket_t* sock,
     struct client_session_t* session,
     struct ssl_ctx_st* ssl_ctx,

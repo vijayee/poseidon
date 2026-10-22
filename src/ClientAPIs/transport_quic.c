@@ -31,7 +31,7 @@
 #include "../Channel/channel_manager.h"
 #include "client_session.h"
 #include "quic_connection.h"
-#include "transport_internal.h"
+#include "transport.h"
 
 #include <msquic.h>
 
@@ -57,21 +57,15 @@ static uint64_t s_next_session_id = 1;
 // every backend needs. The QUIC-specific state — the msquic handles,
 // the port and the certificate paths — lives here.
 //
-// Two views of the transport exist side by side:
-//   - base is the actor-shaped body every backend shares. It is the
-//     FIRST member, so a pointer to it IS a pointer to this struct and
-//     the backend can be recovered from the internal body alone.
-//   - public is the vtable-shaped view that transport.h still
-//     declares. It is reached from the public pointer through
-//     offsetof.
+// The shared body is the FIRST member, so a pointer to it IS a pointer
+// to this struct: the backend is recovered from the transport body with
+// a plain upcast.
 
 typedef struct poseidon_quic_transport_t {
     // The shared transport body. First so that a pointer to this
     // struct IS a pointer to the shared body.
-    poseidon_transport_internal_t base;
+    poseidon_transport_t base;
 
-    // The vtable-shaped public view.
-    poseidon_transport_t public;
 
     // The msquic handles. The registration is opened by create, the
     // configuration and the listener by start.
@@ -108,28 +102,18 @@ static QUIC_STATUS QUIC_API _quic_stream_callback(HQUIC stream,
                                                    void* context,
                                                    QUIC_STREAM_EVENT* event);
 static void _quic_transport_dispatch(void* state, message_t* msg);
-static int _quic_transport_send_to_client(poseidon_transport_internal_t* transport,
+static int _quic_transport_send_to_client(poseidon_transport_t* transport,
                                           int client_id,
                                           const uint8_t* data,
                                           size_t len);
-static int _quic_vtable_send(poseidon_transport_t* self,
-                             int client_id,
-                             const uint8_t* data,
-                             size_t len);
 
 // ============================================================================
 // VIEW CONVERSIONS
 // ============================================================================
 
-// Recovers the backend struct from the vtable-shaped public pointer.
-static poseidon_quic_transport_t* _quic_from_public(poseidon_transport_t* transport) {
-    return (poseidon_quic_transport_t*)((char*)transport -
-        offsetof(poseidon_quic_transport_t, public));
-}
-
-// Recovers the backend struct from the actor-shaped internal pointer.
-// base is the first member, so this is a plain upcast.
-static poseidon_quic_transport_t* _quic_from_base(poseidon_transport_internal_t* transport) {
+// Recovers the backend struct from the transport body. base is the
+// first member, so this is a plain upcast.
+static poseidon_quic_transport_t* _quic_from_base(poseidon_transport_t* transport) {
     return (poseidon_quic_transport_t*)transport;
 }
 
@@ -289,7 +273,7 @@ static QUIC_STATUS QUIC_API _quic_connection_callback(HQUIC connection,
         }
         // The session id is the connection's identity on the wire.
         session->client_fd = (int)session_id;
-        session->transport = &transport->public;
+        session->transport = &transport->base;
 
         poseidon_quic_connection_t* conn = NULL;
         if (!poseidon_quic_connection_create(&transport->base, session,
@@ -432,7 +416,7 @@ poseidon_transport_t* poseidon_transport_quic_create(uint16_t port,
         return NULL;
     }
 
-    poseidon_transport_internal_t* base = &transport->base;
+    poseidon_transport_t* base = &transport->base;
 
     base->manager = manager;
     base->on_message = NULL;
@@ -475,29 +459,14 @@ poseidon_transport_t* poseidon_transport_quic_create(uint16_t port,
     base->pool = manager->actor.pool;
     actor_init(&base->actor, base, _quic_transport_dispatch, base->pool);
 
-    // The vtable-shaped public view lives in the same allocation as
-    // the actor-shaped body, side by side.
-    transport->public.name = transport->base.name;
-    transport->public.type = POSEIDON_TRANSPORT_QUIC;
-    transport->public.thread = NULL;
-    transport->public.loop = NULL;
-    transport->public.manager = manager;
-    transport->public.on_message = NULL;
-    transport->public.ctx = NULL;
-    transport->public.lock = transport->conn_lock;
-    transport->public.running = false;
-    transport->public.start = poseidon_transport_quic_start;
-    transport->public.stop = poseidon_transport_quic_stop;
-    transport->public.send = _quic_vtable_send;
-    transport->public.destroy = poseidon_transport_quic_destroy;
 
-    return &transport->public;
+    return &transport->base;
 }
 
 int poseidon_transport_quic_start(poseidon_transport_t* transport) {
     if (transport == NULL) return -1;
 
-    poseidon_quic_transport_t* quic_transport = _quic_from_public(transport);
+    poseidon_quic_transport_t* quic_transport = _quic_from_base(transport);
     if (ATOMIC_LOAD(&quic_transport->base.running)) {
         return 0;
     }
@@ -562,7 +531,6 @@ int poseidon_transport_quic_start(poseidon_transport_t* transport) {
     }
 
     ATOMIC_STORE(&quic_transport->base.running, 1);
-    quic_transport->public.running = true;
     log_info("quic transport: listening on port %u",
              (unsigned)quic_transport->port);
     return 0;
@@ -571,13 +539,12 @@ int poseidon_transport_quic_start(poseidon_transport_t* transport) {
 int poseidon_transport_quic_stop(poseidon_transport_t* transport) {
     if (transport == NULL) return 0;
 
-    poseidon_quic_transport_t* quic_transport = _quic_from_public(transport);
+    poseidon_quic_transport_t* quic_transport = _quic_from_base(transport);
     if (!ATOMIC_LOAD(&quic_transport->base.running)) {
         return 0;
     }
 
     ATOMIC_STORE(&quic_transport->base.running, 0);
-    quic_transport->public.running = false;
 
     const struct QUIC_API_TABLE* api = quic_transport->api;
 
@@ -617,8 +584,8 @@ int poseidon_transport_quic_stop(poseidon_transport_t* transport) {
 void poseidon_transport_quic_destroy(poseidon_transport_t* transport) {
     if (transport == NULL) return;
 
-    poseidon_quic_transport_t* quic_transport = _quic_from_public(transport);
-    poseidon_transport_internal_t* base = &quic_transport->base;
+    poseidon_quic_transport_t* quic_transport = _quic_from_base(transport);
+    poseidon_transport_t* base = &quic_transport->base;
 
     if (ATOMIC_LOAD(&base->running)) {
         poseidon_transport_quic_stop(transport);
@@ -715,7 +682,7 @@ void poseidon_transport_quic_destroy(poseidon_transport_t* transport) {
 // Hands the payload to the connection's write actor. The connection
 // frames it and serializes the write, so a reply never interleaves
 // with another reply on the same stream.
-static int _quic_transport_send_to_client(poseidon_transport_internal_t* transport,
+static int _quic_transport_send_to_client(poseidon_transport_t* transport,
                                           int client_id,
                                           const uint8_t* data,
                                           size_t len) {
@@ -741,25 +708,12 @@ static int _quic_transport_send_to_client(poseidon_transport_internal_t* transpo
     return 0;
 }
 
-// The vtable-shaped send hook. The public view and the internal body
-// are two members of the same allocation, so the internal body is
-// reached through the public pointer.
-static int _quic_vtable_send(poseidon_transport_t* self,
-                             int client_id,
-                             const uint8_t* data,
-                             size_t len) {
-    if (self == NULL) return -1;
-    poseidon_quic_transport_t* quic_transport = _quic_from_public(self);
-    return _quic_transport_send_to_client(&quic_transport->base, client_id,
-                                          data, len);
-}
-
 int poseidon_transport_quic_send(poseidon_transport_t* transport,
                                  int client_id,
                                  const uint8_t* data,
                                  size_t len) {
     if (transport == NULL) return -1;
-    poseidon_quic_transport_t* quic_transport = _quic_from_public(transport);
+    poseidon_quic_transport_t* quic_transport = _quic_from_base(transport);
     return _quic_transport_send_to_client(&quic_transport->base, client_id,
                                           data, len);
 }

@@ -24,7 +24,7 @@
 #include "../Actor/actor.h"
 #include "../Actor/message.h"
 #include "../Util/vec.h"
-#include "transport_internal.h"
+#include "transport.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -37,21 +37,15 @@
 // every backend needs. The Binder-specific state — the service name
 // and the connection lock — lives here.
 //
-// Two views of the transport exist side by side:
-//   - base is the actor-shaped body every backend shares. It is the
-//     FIRST member, so a pointer to it IS a pointer to this struct and
-//     the backend can be recovered from the internal body alone.
-//   - public is the vtable-shaped view that transport.h still
-//     declares. It is reached from the public pointer through
-//     offsetof.
+// The shared body is the FIRST member, so a pointer to it IS a pointer
+// to this struct: the backend is recovered from the transport body with
+// a plain upcast.
 
 typedef struct poseidon_binder_transport_t {
     // The shared transport body. First so that a pointer to this
     // struct IS a pointer to the shared body.
-    poseidon_transport_internal_t base;
+    poseidon_transport_t base;
 
-    // The vtable-shaped public view.
-    poseidon_transport_t public;
 
     // Copy of the Binder service name. Freed by the destroy path.
     char* service_name;
@@ -67,17 +61,12 @@ typedef struct poseidon_binder_transport_t {
 // ============================================================================
 
 static void _binder_transport_dispatch(void* state, message_t* msg);
-static int _binder_vtable_send(poseidon_transport_t* self,
-                               int client_id,
-                               const uint8_t* data,
-                               size_t len);
 
 // ============================================================================
 // VIEW CONVERSIONS
 // ============================================================================
 
-// Recovers the backend struct from the vtable-shaped public pointer.
-static poseidon_binder_transport_t* _binder_from_public(poseidon_transport_t* transport) {
+static poseidon_binder_transport_t* _binder_from_base(poseidon_transport_t* transport) {
     return (poseidon_binder_transport_t*)((char*)transport -
         offsetof(poseidon_binder_transport_t, public));
 }
@@ -110,7 +99,7 @@ poseidon_transport_t* poseidon_transport_binder_create(
             sizeof(poseidon_binder_transport_t));
     if (transport == NULL) return NULL;
 
-    poseidon_transport_internal_t* base = &transport->base;
+    poseidon_transport_t* base = &transport->base;
 
     base->manager = manager;
     base->on_message = NULL;
@@ -143,29 +132,14 @@ poseidon_transport_t* poseidon_transport_binder_create(
     base->pool = manager->actor.pool;
     actor_init(&base->actor, base, _binder_transport_dispatch, base->pool);
 
-    // The vtable-shaped public view lives in the same allocation as
-    // the actor-shaped body, side by side.
-    transport->public.name = transport->service_name;
-    transport->public.type = POSEIDON_TRANSPORT_BINDER;
-    transport->public.thread = NULL;
-    transport->public.loop = NULL;
-    transport->public.manager = manager;
-    transport->public.on_message = NULL;
-    transport->public.ctx = NULL;
-    transport->public.lock = transport->conn_lock;
-    transport->public.running = false;
-    transport->public.start = poseidon_transport_binder_start;
-    transport->public.stop = poseidon_transport_binder_stop;
-    transport->public.send = _binder_vtable_send;
-    transport->public.destroy = poseidon_transport_binder_destroy;
 
-    return &transport->public;
+    return &transport->base;
 }
 
 int poseidon_transport_binder_start(poseidon_transport_t* transport) {
     if (transport == NULL) return -1;
 
-    poseidon_binder_transport_t* binder_transport = _binder_from_public(transport);
+    poseidon_binder_transport_t* binder_transport = _binder_from_base(transport);
     if (ATOMIC_LOAD(&binder_transport->base.running)) {
         return 0;
     }
@@ -176,28 +150,26 @@ int poseidon_transport_binder_start(poseidon_transport_t* transport) {
     log_info("binder transport: starting (Android only)");
 
     ATOMIC_STORE(&binder_transport->base.running, 1);
-    binder_transport->public.running = true;
     return 0;
 }
 
 int poseidon_transport_binder_stop(poseidon_transport_t* transport) {
     if (transport == NULL) return 0;
 
-    poseidon_binder_transport_t* binder_transport = _binder_from_public(transport);
+    poseidon_binder_transport_t* binder_transport = _binder_from_base(transport);
     if (!ATOMIC_LOAD(&binder_transport->base.running)) {
         return 0;
     }
 
     ATOMIC_STORE(&binder_transport->base.running, 0);
-    binder_transport->public.running = false;
     return 0;
 }
 
 void poseidon_transport_binder_destroy(poseidon_transport_t* transport) {
     if (transport == NULL) return;
 
-    poseidon_binder_transport_t* binder_transport = _binder_from_public(transport);
-    poseidon_transport_internal_t* base = &binder_transport->base;
+    poseidon_binder_transport_t* binder_transport = _binder_from_base(transport);
+    poseidon_transport_t* base = &binder_transport->base;
 
     if (ATOMIC_LOAD(&base->running)) {
         poseidon_transport_binder_stop(transport);
@@ -228,7 +200,7 @@ void poseidon_transport_binder_destroy(poseidon_transport_t* transport) {
 
 // The reply parcel is written by the JNI bridge, so there is nothing
 // to enqueue here yet.
-static int _binder_vtable_send(poseidon_transport_t* self,
+static int _binder_send(poseidon_transport_t* self,
                                int client_id,
                                const uint8_t* data,
                                size_t len) {
@@ -244,7 +216,7 @@ int poseidon_transport_binder_send(poseidon_transport_t* transport,
                                    const uint8_t* data,
                                    size_t len) {
     if (transport == NULL) return -1;
-    return _binder_vtable_send(transport, client_id, data, len);
+    return _binder_send(transport, client_id, data, len);
 }
 
 #endif // __ANDROID__
