@@ -622,3 +622,59 @@ not be freed with `free()`.
   when they are called concurrently. The WebTransport teardown
   unregisters a session, so it reaches the same code. The defect and
   its reproduction are described in the WebSocket section above.
+
+## Phase 7 — QUIC backend split landed (commit `9e2c2e8`)
+
+The QUIC backend is the fifth backend moved to the actor model. It
+follows the WebTransport split: msquic owns the I/O and delivers the
+data through the transport's callbacks.
+
+### New file layout (src/ClientAPIs/)
+
+| File | Role |
+|---|---|
+| `transport_quic.h` / `transport_quic.c` | The listener: the msquic registration, configuration and listener, the connection and stream callbacks, the connection table. |
+| `quic_connection.h` / `quic_connection.c` | The per-connection actor: the stream, the frame decoder, the CBOR request handling, the write path. |
+| `quic_connection_messages.h` | Payload structs for the `POSEIDON_QUIC_*` message family. |
+
+### The message family
+
+`POSEIDON_QUIC_CONNECTION_DATA / _WRITE / _CLOSE / _STREAM_READY /
+_PEER_SHUTDOWN` — 5 entries, appended to the global `message_type_e`.
+The family mirrors the WebTransport one: msquic owns the I/O, so `DATA`
+carries the bytes themselves instead of a readiness signal.
+
+### The connection is per stream, not per connection
+
+A QUIC connection can carry several streams. The old backend created
+one client per peer stream and looked the client up by its session id.
+The split keeps that: the connection callback's `PEER_STREAM_STARTED`
+event creates the connection actor, and the stream handle is handed to
+it at creation.
+
+### Fixed along the way
+
+- **The backend state was kept in the vtable's `loop` field.** The
+  `void* loop` slot now holds the poll-dancer loop (NULL here), and
+  the msquic handles live in the backend struct next to the shared
+  actor-shaped body.
+- **The connection callback freed the client structs.** The old
+  `SHUTDOWN_COMPLETE` path removed the clients from the table and
+  freed them while msquic could still call back into them. The
+  callback now only closes the connections; the transport's teardown
+  frees them once their actors are quiesced.
+- **The transport had two mutexes** (the vtable's `lock` and the
+  backend's own) and destroyed both; there is one now.
+
+### Verification performed for this commit
+
+- `cmake --build build/` green, **25/25 ctest**, **9/9 conn suite**.
+- The transport's lifecycle — create, start (the listener binds), stop,
+  destroy — over ten consecutive runs, no failures.
+- **The data path cannot be exercised in this tree.** The in-tree QUIC
+  client fails to establish its stream against the QUIC server:
+  "quic client: failed to establish stream". The pre-split backend
+  fails identically (verified by linking the previous commit's
+  `transport_quic.c` against the same test), so the split does not
+  regress anything — the QUIC transport simply does not work in this
+  tree yet, for reasons that predate the actor conversion.
