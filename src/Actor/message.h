@@ -334,6 +334,38 @@ typedef enum {
    * payload: the actor drops the stream and tears the connection
    * down. */
   POSEIDON_WT_CONNECTION_STREAM_CLOSED,
+
+  /* ========================================================================
+   * 2.15 QUIC ClientAPI transport — per-connection actor messages
+   * ========================================================================
+   *
+   * Splits the QUIC client-side file into a listener (transport_quic.c)
+   * and a per-connection actor (quic_connection.c). Payload structs
+   * live in src/ClientAPIs/quic_connection_messages.h; this enum only
+   * carries the type tags.
+   *
+   * The family mirrors the WebTransport one: msquic owns the I/O and
+   * delivers the data through the transport's callbacks, so DATA
+   * carries the bytes themselves instead of a readiness signal.
+   */
+  __POSEIDON_QUIC_MESSAGE_BASE,
+  /* Inbound bytes received on the client's stream. The payload is a
+   * poseidon_quic_connection_data_payload_t* holding a copy of the
+   * bytes as they arrived; the connection actor reassembles the frames
+   * from them. */
+  POSEIDON_QUIC_CONNECTION_DATA = __POSEIDON_QUIC_MESSAGE_BASE,
+  /* Outbound frame submitted by the session actor. Payload is a
+   * poseidon_quic_connection_write_payload_t* (already-framed bytes);
+   * freed via the static destroyer registered with the message. */
+  POSEIDON_QUIC_CONNECTION_WRITE,
+  /* Session actor or timer requested close. Payload is a
+   * poseidon_quic_connection_close_payload_t* (graceful bool). */
+  POSEIDON_QUIC_CONNECTION_CLOSE,
+  /* The stream is ready to carry the outbound frames. No payload. */
+  POSEIDON_QUIC_CONNECTION_STREAM_READY,
+  /* The peer shut down its sending side. The connection answers with a
+   * graceful shutdown of its own. No payload. */
+  POSEIDON_QUIC_CONNECTION_PEER_SHUTDOWN,
 } message_type_e;
 
 /* Base message. The actor's dispatch receives one of these; type selects the
@@ -468,4 +500,16 @@ typedef struct message_t {
  * deliberate difference: libwtf owns the I/O and hands the received
  * bytes to the transport's callback, so DATA carries the bytes
  * themselves instead of a readiness signal.
+ *
+ * Phase 2 (commit 2.15) adds the POSEIDON_QUIC_* family (5 entries)
+ * above the local-modifications block. The enum is still the global
+ * message_type_e; the per-connection payload structs live in the
+ * per-subsystem header ClientAPIs/quic_connection_messages.h, keeping
+ * message.h free of poll-dancer / platform-socket / client-session
+ * dependencies. The change is purely additive to the enum; the 4
+ * TIMER_*, 11 MERIDIAN_CONN_*, 11 POSEIDON_CHANNEL_MANAGER_*, 8
+ * POSEIDON_UNIX_*, 6 POSEIDON_TCP_*, 6 POSEIDON_WS_* and 5 POSEIDON_WT_*
+ * families are unchanged. The QUIC family mirrors the WebTransport one:
+ * msquic owns the I/O and delivers the data through the transport's
+ * callbacks, so DATA carries the bytes themselves.
  */
