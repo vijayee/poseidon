@@ -678,3 +678,33 @@ it at creation.
   `transport_quic.c` against the same test), so the split does not
   regress anything — the QUIC transport simply does not work in this
   tree yet, for reasons that predate the actor conversion.
+
+## Phase 7 — Binder and XPC backends moved to the actor shape (commits `cb0f13e`, `5385823`)
+
+The last two backends are placeholders: the Binder service is
+registered through JNI and XPC connections are managed by launchd.
+Neither has a connection path yet — no accept callback, no per-client
+state, a `send` that always returns -1.
+
+What they own now is the actor-shaped transport body every backend
+shares: the backend struct carries `poseidon_transport_internal_t` as
+its first member, the transport owns an actor bound to the manager's
+scheduler pool, and the vtable-shaped public view is filled from the
+same allocation. That is the starting point the platform bridge needs.
+
+**There is no per-connection actor in either backend.** With no
+connection path there would be nothing for one to own, and the plan's
+"splits" for these two are therefore listener-only. When the Android
+and iOS work lands, the connection follows the Unix and TCP shape: an
+actor per client that owns the frame decoder and the write path, fed
+by the platform bridge.
+
+Fixed along the way in both: the service name was a borrowed pointer
+to the caller's string (it is copied now and freed in the destroy
+path), the backend state was kept in the vtable's `void* loop` slot
+(which holds the poll-dancer loop as everywhere else), and the
+transport had a lock that was never taken and never freed.
+
+Neither file is compiled on this platform (`__ANDROID__` and
+`__APPLE__` guards). Both were checked by compiling them with the
+platform guard defined: clean, no warnings.
