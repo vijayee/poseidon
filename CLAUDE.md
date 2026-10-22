@@ -530,3 +530,95 @@ are handed to the frame decoder.
   The fix belongs in the actor machinery, not in a backend: an actor
   must only ever be run by one thread at a time. It is not in this
   commit.
+
+## Phase 7 — WebTransport backend split landed (commit `5e88f99`)
+
+The WebTransport backend is the fourth backend moved to the actor model.
+It is the first one that does **not** sit on a poll-dancer loop: libwtf
+owns the I/O, runs its own worker threads and delivers the data through
+the transport's session and stream callbacks.
+
+### New file layout (src/ClientAPIs/)
+
+| File | Role |
+|---|---|
+| `transport_webtransport.h` / `transport_webtransport.c` | The listener: libwtf context and server, the session and stream callbacks, the connection table. |
+| `wt_connection.h` / `wt_connection.c` | The per-connection actor: the stream, the frame decoder, the CBOR request handling, the write path. |
+| `wt_connection_messages.h` | Payload structs for the `POSEIDON_WT_*` message family. |
+
+### The message family
+
+`POSEIDON_WT_CONNECTION_DATA / _WRITE / _CLOSE / _STREAM_OPENED /
+_STREAM_CLOSED` — 5 entries, appended to the global `message_type_e`.
+
+The family mirrors the TCP one with one difference: there is no socket
+to read from. libwtf hands the received bytes to the transport's
+callback, so `DATA` carries the bytes themselves instead of a
+readiness signal. `STREAM_OPENED` announces the session's bidirectional
+stream, so the actor is the only thread that ever touches it.
+
+### The payloads are plain heap buffers, not `buffer_t`
+
+libwtf frees the buffer of a completed send itself, and the buffers it
+hands over for received data belong to libwtf as well. Both directions
+therefore use plain `malloc`'d memory instead of the pooled
+`buffer_t`: the `buffer_t` struct comes from the memory pool and must
+not be freed with `free()`.
+
+### The thread split
+
+- libwtf's worker threads: the session and stream callbacks. They copy
+  what libwtf handed them and hand it to the actor. They never decode
+  a frame and never answer a request.
+- Scheduler pool workers: the per-connection actors. They own the
+  stream, decode the frames, answer the client session and write to
+  the stream.
+- Caller thread: create / start / stop / destroy.
+
+### Teardown order
+
+1. `poseidon_transport_webtransport_stop` — the libwtf server stops
+   accepting sessions and the connections are asked to close.
+2. `actor_destroy` on every connection actor. This has to happen
+   **before** the libwtf context goes away: a running dispatch may
+   still be writing to a stream, and the stream belongs to the context.
+3. `wtf_server_destroy` and `wtf_context_destroy`. The context owns the
+   worker threads that call the callbacks, so after this no callback can
+   fire. A callback that arrives after the actors are quiesced is
+   harmless: `actor_send` on a destroyed actor drops the message and
+   frees its payload.
+4. `scheduler_pool_wait_for_idle`.
+5. Free the connections: detach the session, unregister it from the
+   manager, free the connection.
+
+### Fixed along the way
+
+- **The transport kept its state in the vtable's `loop` field.** The
+  `void* loop` slot now holds the poll-dancer loop (NULL here), and
+  the backend state lives in the backend struct next to the shared
+  actor-shaped body.
+- **The port was stored in the vtable's name field** in the older
+  backends. The WebTransport transport already used a real name; it
+  keeps it.
+- **The libwtf handles were destroyed before the clients.** The old
+  teardown destroyed the client structs while libwtf could still call
+  back into them. The order above closes that window.
+- The transport had two mutexes (the vtable's `lock` and the backend's
+  own) and destroyed both; there is one now.
+
+### Verification performed for this commit
+
+- `cmake --build build/` green, **25/25 ctest**, **9/9 conn suite**.
+- The transport's lifecycle — create, start (the server binds and
+  listens), stop, destroy — over 15 consecutive runs, no failures.
+- **The data path is not covered by a test**: a WebTransport client
+  needs HTTP/3, and neither the in-tree client library nor a test
+  harness speaks it. The frame decoding and the request handling are
+  the same code path the TCP backend exercises.
+
+### Pre-existing issues hit by this commit (NOT from this commit)
+
+- The channel manager's synchronous session wrappers corrupt the heap
+  when they are called concurrently. The WebTransport teardown
+  unregisters a session, so it reaches the same code. The defect and
+  its reproduction are described in the WebSocket section above.
