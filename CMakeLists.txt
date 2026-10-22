@@ -125,6 +125,7 @@ set(POSEIDON_SOURCES
     ${CLIENT_APIS_SRC_DIR}/transport_tcp.c
     ${CLIENT_APIS_SRC_DIR}/tcp_connection.c
     ${CLIENT_APIS_SRC_DIR}/transport_ws.c
+    ${CLIENT_APIS_SRC_DIR}/ws_connection.c
     ${CLIENT_APIS_SRC_DIR}/transport_quic.c
     ${CLIENT_APIS_SRC_DIR}/transport_webtransport.c
     ${CLIENT_LIBS_SRC_DIR}/poseidon_client.c
