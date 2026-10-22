@@ -282,3 +282,139 @@ serialize the response, send it back with
 - `poseidond` fails at "failed to start channel manager dial channel"
   before any transport is created. Reproduces identically on a clean
   checkout of the parent commit, so it is not from this work.
+
+
+## Phase 7 — TCP backend split landed (commit `e2efe87`)
+
+The TCP backend is the second backend moved to the actor model. The Unix
+split is the template; every difference below is a consequence of TLS.
+
+### New file layout (src/ClientAPIs/)
+
+| File | Role |
+|---|---|
+| `transport_tcp.h` / `transport_tcp.c` | The listener: listening socket, accept watcher, TLS context, I/O thread, connection table. |
+| `tcp_connection.h` / `tcp_connection.c` | The per-connection actor: TLS handshake, frame decoding, CBOR request handling, write path, watcher ownership. |
+| `tcp_connection_messages.h` | Payload structs for the `POSEIDON_TCP_*` message family. |
+
+### The message family
+
+`POSEIDON_TCP_CONNECTION_READ / _HANGUP / _ERROR / _WRITABLE / _WRITE /
+_CLOSE` — 6 entries, appended to the global `message_type_e` in
+`src/Actor/message.h` (the type tags live there, the payload structs in
+`tcp_connection_messages.h`).
+
+`READ` takes the place of the Unix family's `DATA`: READ carries no
+payload, because the connection actor pulls the bytes off the socket
+itself instead of receiving them from the I/O thread.
+
+### The TLS rule (the one real difference from Unix)
+
+**An SSL object may only be used from one thread.** The Unix backend
+reads on the I/O thread and hands the bytes to the actor; the TCP
+backend cannot, because the connection's `SSL*` is used for the read,
+the write and the handshake. So:
+
+- The I/O thread's watcher callback only *signals* readiness. It never
+  touches the socket, never touches the `SSL*`, and never parses a
+  frame. It sends `READ` / `WRITABLE` / `HANGUP` / `ERROR` to the
+  connection actor.
+- The connection actor performs `SSL_accept` (retrying on
+  `SSL_ERROR_WANT_READ` / `SSL_ERROR_WANT_WRITE`), `SSL_read`,
+  `SSL_write`, the frame decoding and the CBOR handling.
+- The `SSL*` is created on the actor thread, not in the accept path.
+  The `SSL_CTX*` is created by the listener and borrowed.
+
+The handshake used to be a **blocking** `SSL_accept` inside the accept
+callback, which stalled the whole I/O thread for the duration of the
+handshake. That is gone.
+
+### The write path
+
+The old `tcp_transport_send` issued two separate `send()` calls (header,
+then body) on a raw descriptor. Two replies could interleave their bytes
+on the same socket, and the call was not safe from the session actor's
+thread.
+
+Now the connection owns a **write queue**: `write_buffer` is the head
+(the frame being written) and `write_queue` holds the frames behind it.
+`poseidon_tcp_connection_write(conn, data, len)` frames the payload with
+the 4-byte big-endian length prefix, copies it, and hands it to the
+actor through `actor_send`. The actor serializes the writes, so the
+vtable's `send` — which the client session calls from the session
+actor's own thread — is now thread-safe and cannot interleave.
+
+A TLS write that cannot be completed keeps the head buffer **exactly
+where it is**: OpenSSL has to be retried with the very same buffer and
+length, so the tail is never slid forward while a write is in flight.
+The plain-socket path does slide the tail, as the Unix backend does.
+
+### Connection identity
+
+`client_id` is the file descriptor of the accepted socket, as in the Unix
+backend. The connection keeps that number in an immutable `client_fd`
+field, and a `ATOMIC(uint8_t) closed` flag that is raised **before** the
+descriptor is closed. The listener skips closed connections when it
+resolves a `client_id`, so a recycled descriptor number is never
+mistaken for a live connection.
+
+### Teardown order
+
+1. `poseidon_transport_tcp_stop` — join the I/O thread. The connections
+   are asked to close gracefully, so their pending frames are flushed
+   while the scheduler pool is still alive.
+2. `destroy_stack_drain` — free the watchers the connections asked for.
+3. Destroy the listen socket.
+4. `actor_destroy` on every connection actor, then
+   `destroy_stack_drain` **again**: an actor that ran its close path
+   while it was being quiesced pushed its watcher onto the stack.
+5. `scheduler_pool_wait_for_idle`.
+6. Free the connections under `conn_lock`: socket, watcher, SSL, write
+   buffers, session. The lock is deliberately **not** held while the
+   actors are quiesced in step 4 (a dispatch may reach back into the
+   transport's send path, which takes the same lock) but **is** held
+   while the connections are freed, because the send path resolves a
+   connection under it.
+7. `actor_destroy` on the transport's own actor, `destroy_stack_destroy`,
+   `pd_loop_destroy`, `SSL_CTX_free`, free.
+
+The SSL session is released **before** the pending write buffers: a
+write that could not be completed leaves the frame inside the SSL
+object, so the frame's memory has to outlive it.
+
+### API surface added (backend-specific, in `transport_tcp.h`)
+
+- `poseidon_transport_tcp_create(port, cert_path, key_path, manager)` —
+  same signature as before, so `poseidond.c` is unchanged. The transport
+  still requires a channel manager.
+- `poseidon_transport_tcp_destroy` — the backend's own destroy. It is
+  installed in the vtable's `destroy` slot, because `poseidond.c` tears
+  the TCP transport down through the generic
+  `poseidon_transport_destroy`.
+- `poseidon_transport_tcp_start` / `_stop` / `_send`.
+
+The listener binds the wildcard address in `create` (not in `start` as
+before) through `platform_listen_socket_create`, so a taken port fails
+the factory instead of the start call.
+
+### Verification performed for this commit
+
+- `cmake --build build/` green, **25/25 ctest**, **9/9 conn suite**.
+- A request/response round trip over a real socket, **plain and over
+  TLS** (self-signed certificate): framed request → decoded → framed
+  response → decoded, in both cases.
+- 25 consecutive plain runs and 25 consecutive TLS runs, no failures.
+- valgrind on the TLS round trip: **0 errors**.
+- The teardown path runs clean; the transport is stopped and destroyed
+  with the pool still alive.
+
+### Pre-existing issues hit again (NOT from this commit)
+
+- The `scheduler_pool_destroy` / freed-manager defect documented above
+  was hit again by the round-trip harness: the harness destroys the
+  channel manager and then the scheduler pool, and the pool's registry
+  walk touches the freed manager. Reproduces with a manager and a pool
+  and **no transport at all**, so it is independent of this work. The
+  fix belongs to `poseidon_channel_manager_destroy` (it frees the
+  manager without detaching the manager's actor from the pool registry)
+  and is not in this commit.
