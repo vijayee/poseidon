@@ -418,3 +418,115 @@ the factory instead of the start call.
   fix belongs to `poseidon_channel_manager_destroy` (it frees the
   manager without detaching the manager's actor from the pool registry)
   and is not in this commit.
+
+## Phase 7 — WebSocket backend split landed (commit `68e2c55`)
+
+The WebSocket backend is the third backend moved to the actor model. It
+follows the TCP split: the difference is the WebSocket framing and the
+HTTP upgrade, not the threading.
+
+### New file layout (src/ClientAPIs/)
+
+| File | Role |
+|---|---|
+| `transport_ws.h` / `transport_ws.c` | The listener: listening socket, accept watcher, TLS context, I/O thread, connection table. |
+| `ws_connection.h` / `ws_connection.c` | The per-connection actor: TLS handshake, HTTP upgrade, WebSocket frame decoder, CBOR request handling, write path, watcher ownership. |
+| `ws_connection_messages.h` | Payload structs for the `POSEIDON_WS_*` message family. |
+
+### The message family
+
+`POSEIDON_WS_CONNECTION_READ / _HANGUP / _ERROR / _WRITABLE / _WRITE /
+_CLOSE` — 6 entries, appended to the global `message_type_e`. The family
+mirrors the TCP one for the same reason: a TLS connection's SSL object
+may only be used from one thread, so the I/O thread's watcher callback
+only signals readiness and the actor performs the read, the write and
+the handshake.
+
+### The wire format
+
+A WebSocket **binary** frame carrying a 4-byte big-endian length prefix
+followed by the CBOR payload. The connection owns the framing in both
+directions: `poseidon_ws_connection_write()` builds the length prefix
+and wraps it in a binary frame, and the frame decoder strips both.
+
+### The HTTP upgrade
+
+The connection actor owns the upgrade: it accumulates the request in its
+receive buffer, computes the `Sec-WebSocket-Accept` value (the
+base64-encoded SHA-1 of the client's key concatenated with the RFC 6455
+handshake GUID) and queues the 101 response **on the write queue**, so
+the response is ordered before the first WebSocket frame. The bytes
+that follow the request in the same read stay in the receive buffer and
+are handed to the frame decoder.
+
+### Fixed along the way
+
+- **`Sec-WebSocket-Accept` was a hardcoded constant.** The old backend
+  answered every upgrade with the RFC's sample value
+  (`dGhlIHNhbXBsZSBub25jZQ==`), so no real client could complete the
+  handshake. The accept value is now computed from the client's key.
+- **The send path was a stub.** `ws_transport_send` returned -1
+  unconditionally, so the client session's deliveries never reached a
+  WebSocket client. The send path is now a framed queue on the
+  connection's write actor, like the TCP one.
+- **The upgrade parser scanned past the receive buffer.** The old code
+  walked the key with an unbounded `while (*p == ' ')` and then used
+  `strstr` on a buffer that is not NUL-terminated. Both scans are now
+  bounded by the number of bytes that are actually in the buffer.
+- **A 64-bit frame length could overflow the length check.** The old
+  decoder added the announced payload length to the header size without
+  bounding it first, so a client that announced a huge length could
+  make the check pass and push the parser past the buffer. The length
+  is now bounded against the receive buffer first.
+- **The pong frame's length byte was wrong for payloads over 125
+  bytes.** The pong is now built by the same frame encoder as every
+  other frame.
+- **The blocking `SSL_accept` in the accept callback** stalled the I/O
+  thread, as in the TCP backend. The handshake moved to the connection
+  actor and retries on `SSL_ERROR_WANT_READ` / `SSL_ERROR_WANT_WRITE`.
+- **The response frame was built in a stack VLA** whose size was the
+  payload length. The frame builders allocate a `buffer_t` instead.
+- **The sessions were never registered with the channel manager**, so a
+  WebSocket client never received a channel delivery. The sessions are
+  registered and unregistered now, like the Unix and TCP backends.
+- The transport stored the listen port in the vtable's name field. The
+  port has a real field now and the name is a name.
+
+### API surface added (backend-specific, in `transport_ws.h`)
+
+- `poseidon_transport_ws_create(port, cert_path, key_path, manager)` —
+  same signature as before, so `poseidond.c` is unchanged.
+- `poseidon_transport_ws_destroy` — the backend's own destroy, also
+  installed in the vtable's `destroy` slot.
+- `poseidon_transport_ws_start` / `_stop` / `_send`.
+
+### Verification performed for this commit
+
+- `cmake --build build/` green, **25/25 ctest**, **9/9 conn suite**.
+- A full round trip over a real socket, **plain and over TLS**: the
+  HTTP upgrade (with the accept value checked against the RFC 6455
+  sample vector), a masked binary frame carrying a length-prefixed CBOR
+  request, the framed answer, and a ping answered with a pong.
+- 30 consecutive plain runs and 30 consecutive TLS runs, no failures.
+- valgrind on the round trip: **0 errors**.
+
+### Pre-existing issues hit by this commit (NOT from this commit)
+
+- **The channel manager's synchronous session wrappers corrupt the heap
+  when they are called concurrently.** `poseidon_channel_manager_register_session`
+  and `..._unregister_session` do `actor_send` + an inline
+  `actor_run(actor, 32)`. The `actor_send` injects the actor into the
+  scheduler pool, and the pool worker then runs the **same** actor while
+  the wrapper is still running it inline. `message_queue_pop` is not
+  safe against two concurrent pops: both threads read the same tail,
+  both advance the queue and both free the same node — the sentinel
+  included — which glibc reports as "double free or corruption
+  (fasttop)".
+  Reproduces with no transport at all: four threads hammering
+  register/unregister on one manager crash 5 runs out of 5. The
+  transport teardown paths reach the same code when they unregister a
+  client's session, so a WebSocket transport teardown hits it
+  occasionally (about 1 run in 15 over TLS).
+  The fix belongs in the actor machinery, not in a backend: an actor
+  must only ever be run by one thread at a time. It is not in this
+  commit.
