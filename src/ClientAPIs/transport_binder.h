@@ -1,0 +1,83 @@
+/* Poseidon — Android Binder transport backend
+ *
+ * The Binder backend is a placeholder: the Binder service is registered
+ * through JNI and the Java side calls back into native code. What
+ * lives here is the actor-shaped transport body every backend shares,
+ * so the platform bridge has the same starting point as the other
+ * backends once it lands.
+ *
+ * There is no connection path yet: the bridge has no accept callback
+ * and no per-connection actor, so the connection table stays empty
+ * until the platform work arrives. The shape to follow then is the one
+ * of the Unix and TCP backends.
+ *
+ * The public transport object is still the vtable-shaped
+ * poseidon_transport_t declared in transport.h; the actor-shaped body
+ * behind it is the internal transport body from transport_internal.h.
+ */
+
+#ifndef POSEIDON_TRANSPORT_BINDER_H
+#define POSEIDON_TRANSPORT_BINDER_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "transport.h"
+
+struct poseidon_transport_internal_t;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#ifdef __ANDROID__
+/**
+ * Creates a Binder transport.
+ *
+ * @param service_name  Name of the Binder service
+ * @param manager       Shared channel manager
+ * @return              New transport, or NULL on failure
+ */
+poseidon_transport_t* poseidon_transport_binder_create(
+    const char* service_name,
+    poseidon_channel_manager_t* manager);
+
+/**
+ * Releases every resource the transport owns: the connection table,
+ * the I/O loop and the transport actor. The transport pointer is
+ * invalid after this call.
+ */
+void poseidon_transport_binder_destroy(poseidon_transport_t* transport);
+
+/**
+ * Starts the transport. The Binder service itself is registered
+ * through JNI.
+ *
+ * @return 0 on success, -1 on failure
+ */
+int poseidon_transport_binder_start(poseidon_transport_t* transport);
+
+/**
+ * Stops the transport. Safe to call on a transport that was never
+ * started.
+ */
+int poseidon_transport_binder_stop(poseidon_transport_t* transport);
+
+/**
+ * Sends a payload to the client identified by client_id. The reply
+ * parcel is written by the JNI bridge.
+ *
+ * @return 0 on success, -1 if the client is unknown
+ */
+int poseidon_transport_binder_send(poseidon_transport_t* transport,
+                                   int client_id,
+                                   const uint8_t* data,
+                                   size_t len);
+#endif /* __ANDROID__ */
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* POSEIDON_TRANSPORT_BINDER_H */
