@@ -123,6 +123,7 @@ set(POSEIDON_SOURCES
     ${CLIENT_APIS_SRC_DIR}/transport_unix.c
     ${CLIENT_APIS_SRC_DIR}/unix_connection.c
     ${CLIENT_APIS_SRC_DIR}/transport_tcp.c
+    ${CLIENT_APIS_SRC_DIR}/tcp_connection.c
     ${CLIENT_APIS_SRC_DIR}/transport_ws.c
     ${CLIENT_APIS_SRC_DIR}/transport_quic.c
     ${CLIENT_APIS_SRC_DIR}/transport_webtransport.c

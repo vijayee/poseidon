@@ -217,6 +217,45 @@ typedef enum {
    * the next drain, and (if payload->sock is non-NULL) calls
    * platform_socket_destroy on the snapshot fd. */
   POSEIDON_UNIX_SERVER_STOP_WATCHER,
+
+  /* ========================================================================
+   * 2.12 TCP ClientAPI transport — per-connection actor messages
+   * ========================================================================
+   *
+   * Splits the TCP client-side file into a listener (transport_tcp.c) and
+   * a per-connection actor (tcp_connection.c). Payload structs live in
+   * src/ClientAPIs/tcp_connection_messages.h; this enum only carries the
+   * type tags.
+   *
+   * Unlike the Unix family, the TCP connection reads its socket on the
+   * actor thread: a TLS connection's SSL object may only be used from a
+   * single thread, so the I/O thread's watcher callback only signals
+   * readiness and the actor performs the read, the write and the
+   * handshake. That is why the family has a READ entry instead of the
+   * Unix family's DATA entry: READ carries no payload, the bytes are
+   * pulled off the socket by the actor itself. */
+  __POSEIDON_TCP_MESSAGE_BASE,
+  /* The socket is readable. The connection actor drains the socket and
+   * reassembles the frames from the bytes it read. No payload. */
+  POSEIDON_TCP_CONNECTION_READ = __POSEIDON_TCP_MESSAGE_BASE,
+  /* Peer closed or half-closed the socket (PD_EVENT_HANGUP). No
+   * payload. */
+  POSEIDON_TCP_CONNECTION_HANGUP,
+  /* Watcher reported an error (PD_EVENT_ERROR). No payload. */
+  POSEIDON_TCP_CONNECTION_ERROR,
+  /* The socket became writable again. The connection actor retries the
+   * send of the frame that did not fit into the kernel's send buffer.
+   * No payload: the pending bytes live in the connection's write
+   * buffer. */
+  POSEIDON_TCP_CONNECTION_WRITABLE,
+  /* Outbound frame submitted by the session actor. Payload is a
+   * poseidon_tcp_connection_write_payload_t* (already-framed
+   * buffer_t*); freed via the static destroyer registered with the
+   * message. */
+  POSEIDON_TCP_CONNECTION_WRITE,
+  /* Session actor or timer requested close. Payload is a
+   * poseidon_tcp_connection_close_payload_t* (graceful bool). */
+  POSEIDON_TCP_CONNECTION_CLOSE,
 } message_type_e;
 
 /* Base message. The actor's dispatch receives one of these; type selects the
@@ -308,4 +347,20 @@ typedef struct message_t {
  * the listener draining the transport's destroy_stack_t at the bottom of
  * each pd_loop_run_once iteration so watchers torn down off the I/O
  * thread are freed back on the I/O thread.
+ *
+ * Phase 2 (commit 2.12) adds the POSEIDON_TCP_* family (6 entries) above
+ * the local-modifications block. The enum is still the global
+ * message_type_e; the per-connection payload structs live in the
+ * per-subsystem header ClientAPIs/tcp_connection_messages.h, keeping
+ * message.h free of poll-dancer / platform-socket / client-session
+ * dependencies. The change is purely additive to the enum; the 4 TIMER_*,
+ * 11 MERIDIAN_CONN_*, 11 POSEIDON_CHANNEL_MANAGER_* and 8 POSEIDON_UNIX_*
+ * families are unchanged. The TCP family mirrors the Unix one, with one
+ * deliberate difference: READ replaces DATA, because a TLS connection's
+ * SSL object may only be used from a single thread, so the connection
+ * actor pulls the bytes off the socket itself instead of receiving them
+ * from the I/O thread. Every connection-level mutator (write, close)
+ * routes through actor_send on the per-connection actor, and the
+ * connection's watcher is torn down through the transport's
+ * destroy_stack_t so it is unregistered on the I/O thread.
  */

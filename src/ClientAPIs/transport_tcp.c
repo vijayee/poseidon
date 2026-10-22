@@ -1,439 +1,327 @@
 //
-// Created by victor on 4/22/26.
+// transport_tcp.c
+//
+// TCP transport backend.
+//
+// The transport owns a poll-dancer event loop driven by one platform
+// thread. The listening socket is registered with the loop through an
+// accept watcher; every accepted socket becomes a per-connection actor
+// (tcp_connection.c) that runs on the transport's scheduler pool.
+//
+// Threading model:
+//   - the I/O thread runs the poll-dancer loop and is the only thread
+//     that touches the accept watcher and the loop's watcher registry;
+//   - the scheduler pool workers run the per-connection actors, which
+//     own the TLS session, the frame decoder and the write path;
+//   - the caller's thread creates and destroys the transport.
+//
+// Because a watcher may only be registered or unregistered on the loop
+// thread, a connection that needs its watcher torn down pushes the
+// watcher onto the transport's destroy stack and the I/O thread drains
+// that stack at the bottom of every loop iteration. The socket
+// descriptor is closed only after the watcher has been unregistered, so
+// the descriptor number cannot be recycled under a live registration.
+//
+// Wire protocol: 4-byte big-endian length prefix followed by a CBOR
+// payload. The connection actor strips the prefix, decodes the frame
+// and hands it to the client session; the send path adds the prefix
+// back.
 //
 
-#include "transport.h"
+#include "transport_tcp.h"
+
+#include "../Platform/platform.h"
 #include "../Util/allocator.h"
 #include "../Util/log.h"
+#include "../Actor/actor.h"
+#include "../Actor/message.h"
+#include "../Buffer/buffer.h"
+#include "../Channel/channel_manager.h"
+#include "client_session.h"
+#include "tcp_connection.h"
+#include "transport_internal.h"
+
 #include <poll-dancer/poll-dancer.h>
-#include <cbor.h>
-#include <string.h>
-#include <stdio.h>
-#include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <errno.h>
-#include "../Platform/platform_thread.h"
-#include <openssl/ssl.h>
+
 #include <openssl/err.h>
+#include <openssl/ssl.h>
 
-#define TCP_MAX_CLIENTS 256
-#define TCP_READ_BUF_SIZE 65536
-#define TCP_FRAME_HEADER_SIZE 4
+#include <errno.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
 
-// Per-client connection state
-typedef struct tcp_client_t {
-    int fd;
-    SSL* ssl;
-    client_session_t* session;
-    pd_watcher_t* watcher;
-    uint8_t read_buf[TCP_READ_BUF_SIZE];
-    size_t read_len;
-    poseidon_transport_t* transport;
-    bool ssl_connected;
-} tcp_client_t;
+// ============================================================================
+// CONSTANTS
+// ============================================================================
 
-// TCP transport internal state
-typedef struct tcp_transport_data_t tcp_transport_data_t;
+// How long the I/O thread blocks in epoll_wait before it re-checks the
+// running flag and drains the destroy stack. 100ms is short enough that
+// a stop request is honoured promptly and long enough that an idle
+// transport does not spin.
+#define TCP_LOOP_TICK_MS 100
 
-typedef struct {
-    poseidon_transport_t* transport;
-    tcp_transport_data_t* data;
-} tcp_accept_ctx_t;
+// The pending-connection queue of the listening socket.
+#define TCP_LISTEN_BACKLOG 16
 
-struct tcp_transport_data_t {
-    int listen_fd;
-    SSL_CTX* ssl_ctx;
-    pd_loop_t* loop;
+// Session ids are handed to client_session_create. They only have to be
+// unique among the live sessions of one transport.
+static uint64_t s_next_session_id = 1;
+
+// ============================================================================
+// BACKEND PRIVATE STATE
+// ============================================================================
+//
+// The shared transport body (transport_internal.h) carries the fields
+// every backend needs. The TCP-specific state — the listening socket,
+// the accept watcher, the TLS context and the port — lives here.
+//
+// Two views of the transport exist side by side:
+//   - base is the actor-shaped body every backend shares. It is the
+//     FIRST member, so a pointer to it IS a pointer to this struct and
+//     the backend can be recovered from the internal body alone.
+//   - public is the vtable-shaped view that transport.h still
+//     declares. It is reached from the public pointer through
+//     offsetof.
+//
+// The public view is what the daemon and the client session call
+// through (start / stop / send), the internal view is what the
+// per-connection actors hold.
+
+typedef struct poseidon_tcp_transport_t {
+    // The shared transport body. First so that a pointer to this
+    // struct IS a pointer to the shared body.
+    poseidon_transport_internal_t base;
+
+    // The vtable-shaped public view.
+    poseidon_transport_t public;
+
+    // Listening socket and its accept watcher. The watcher is created
+    // on the I/O thread, right before the loop starts running.
+    platform_socket_t* listen_sock;
     pd_watcher_t* listen_watcher;
-    tcp_accept_ctx_t* accept_ctx;
-    tcp_client_t* clients[TCP_MAX_CLIENTS];
-    size_t num_clients;
-};
+
+    // The port the transport listens on.
+    uint16_t port;
+
+    // TLS context shared by every connection. NULL when the transport
+    // runs without TLS.
+    SSL_CTX* ssl_ctx;
+
+    // Guards the connection table below. The accept callback (I/O
+    // thread) adds connections; the send path (session actor thread)
+    // looks them up; the destroy path (caller thread) walks them. The
+    // scheduler pool workers never touch the table.
+    platform_mutex_t* conn_lock;
+} poseidon_tcp_transport_t;
 
 // ============================================================================
-// FRAME PROTOCOL: same 4-byte length prefix as Unix transport
+// FORWARD DECLARATIONS
 // ============================================================================
 
-static bool read_frame_header(const uint8_t* buf, uint32_t* len) {
-    *len = ((uint32_t)buf[0] << 24) | ((uint32_t)buf[1] << 16) |
-           ((uint32_t)buf[2] << 8)  |  (uint32_t)buf[3];
-    return *len > 0 && *len <= TCP_READ_BUF_SIZE;
+static void* _server_thread(void* arg);
+static void _accept_callback(pd_loop_t* loop,
+                             pd_watcher_t* watcher,
+                             pd_event_t events,
+                             void* user_data);
+static void _tcp_transport_dispatch(void* state, message_t* msg);
+static int _tcp_transport_send_to_client(poseidon_transport_internal_t* transport,
+                                          int client_id,
+                                          const uint8_t* data,
+                                          size_t len);
+static int _tcp_vtable_send(poseidon_transport_t* self,
+                             int client_id,
+                             const uint8_t* data,
+                             size_t len);
+
+// ============================================================================
+// VIEW CONVERSIONS
+// ============================================================================
+
+// Recovers the backend struct from the vtable-shaped public pointer.
+static poseidon_tcp_transport_t* _tcp_from_public(poseidon_transport_t* transport) {
+    return (poseidon_tcp_transport_t*)((char*)transport -
+        offsetof(poseidon_tcp_transport_t, public));
 }
 
-static void write_frame_header(uint8_t* buf, uint32_t len) {
-    buf[0] = (uint8_t)(len >> 24);
-    buf[1] = (uint8_t)(len >> 16);
-    buf[2] = (uint8_t)(len >> 8);
-    buf[3] = (uint8_t)(len);
-}
-
-// ============================================================================
-// CLIENT MANAGEMENT
-// ============================================================================
-
-static void tcp_client_destroy(tcp_client_t* client) {
-    if (client == NULL) return;
-    if (client->watcher != NULL) {
-        pd_watcher_stop(client->watcher);
-        pd_watcher_destroy(client->watcher);
-    }
-    if (client->ssl != NULL) {
-        SSL_shutdown(client->ssl);
-        SSL_free(client->ssl);
-    }
-    if (client->fd >= 0) {
-        close(client->fd);
-    }
-    client_session_destroy(client->session);
-    free(client);
-}
-
-// ============================================================================
-// FRAME PROCESSING
-// ============================================================================
-
-static void process_client_data(tcp_client_t* client) {
-    while (client->read_len >= TCP_FRAME_HEADER_SIZE) {
-        uint32_t frame_len = 0;
-        if (!read_frame_header(client->read_buf, &frame_len)) {
-            log_warn("tcp transport: invalid frame header, disconnecting client");
-            return;
-        }
-
-        size_t total_len = TCP_FRAME_HEADER_SIZE + frame_len;
-        if (client->read_len < total_len) break;
-
-        struct cbor_load_result result;
-        cbor_item_t* item = cbor_load(client->read_buf + TCP_FRAME_HEADER_SIZE,
-                                       frame_len, &result);
-        if (item == NULL) {
-            log_warn("tcp transport: failed to decode CBOR frame");
-            memmove(client->read_buf, client->read_buf + total_len,
-                    client->read_len - total_len);
-            client->read_len -= total_len;
-            continue;
-        }
-
-        client_frame_t frame;
-        memset(&frame, 0, sizeof(frame));
-        if (client_protocol_decode(item, &frame) == 0) {
-            cbor_item_t* response = NULL;
-            int rc = client_session_handle_request(client->session, &frame, &response);
-            if (response != NULL) {
-                uint8_t* resp_buf = NULL;
-                size_t resp_len = 0;
-                if (client_protocol_serialize(response, &resp_buf, &resp_len) == 0) {
-                    uint8_t header[TCP_FRAME_HEADER_SIZE];
-                    write_frame_header(header, (uint32_t)resp_len);
-                    if (client->ssl != NULL && client->ssl_connected) {
-                        SSL_write(client->ssl, header, TCP_FRAME_HEADER_SIZE);
-                        SSL_write(client->ssl, resp_buf, (int)resp_len);
-                    } else {
-                        send(client->fd, header, TCP_FRAME_HEADER_SIZE, MSG_NOSIGNAL);
-                        send(client->fd, resp_buf, resp_len, MSG_NOSIGNAL);
-                    }
-                    free(resp_buf);
-                }
-                cbor_decref(&response);
-            }
-            (void)rc;
-        }
-
-        cbor_decref(&item);
-        memmove(client->read_buf, client->read_buf + total_len,
-                client->read_len - total_len);
-        client->read_len -= total_len;
-    }
+// Recovers the backend struct from the actor-shaped internal pointer.
+// base is the first member, so this is a plain upcast.
+static poseidon_tcp_transport_t* _tcp_from_base(poseidon_transport_internal_t* transport) {
+    return (poseidon_tcp_transport_t*)transport;
 }
 
 // ============================================================================
-// CLIENT DISCONNECT
+// HELPERS
 // ============================================================================
 
-static void tcp_client_disconnect(tcp_client_t* client) {
-    if (client == NULL) return;
-
-    poseidon_transport_t* transport = client->transport;
-    tcp_transport_data_t* data = (tcp_transport_data_t*)transport->loop;
-
-    // Clean up Quasar subscriptions before unregistering from session registry
-    client_session_cleanup_subscriptions(client->session);
-    poseidon_channel_manager_unregister_session(transport->manager, client->session);
-
-    for (size_t i = 0; i < data->num_clients; i++) {
-        if (data->clients[i] == client) {
-            data->clients[i] = data->clients[data->num_clients - 1];
-            data->clients[data->num_clients - 1] = NULL;
-            data->num_clients--;
-            break;
+// Finds the connection whose socket descriptor is client_id. The
+// descriptor is the connection's identity on the wire: the client
+// session reports it back on every reply.
+//
+// A closed connection is skipped: its descriptor number may have been
+// handed to a new connection in the meantime, and the reply has to go
+// to the live one.
+static poseidon_tcp_connection_t* _find_connection_by_fd(
+    poseidon_tcp_transport_t* transport,
+    int client_id) {
+    for (int i = 0; i < transport->base.connections.length; i++) {
+        poseidon_tcp_connection_t* conn =
+            (poseidon_tcp_connection_t*)transport->base.connections.data[i];
+        if (conn == NULL) continue;
+        if (ATOMIC_LOAD(&conn->closed)) continue;
+        if (conn->client_fd == client_id) {
+            return conn;
         }
     }
-
-    tcp_client_destroy(client);
-}
-
-// ============================================================================
-// READ CALLBACK
-// ============================================================================
-
-static void tcp_read_callback(pd_loop_t* loop, pd_watcher_t* watcher,
-                               pd_event_t events, void* user_data) {
-    (void)loop;
-    tcp_client_t* client = (tcp_client_t*)user_data;
-
-    if (events & PD_EVENT_READ) {
-        int fd = pd_watcher_get_fd(watcher);
-        ssize_t bytes;
-
-        if (client->ssl != NULL && client->ssl_connected) {
-            bytes = SSL_read(client->ssl, client->read_buf + client->read_len,
-                            TCP_READ_BUF_SIZE - client->read_len);
-        } else {
-            bytes = recv(fd, client->read_buf + client->read_len,
-                        TCP_READ_BUF_SIZE - client->read_len, 0);
-        }
-
-        if (bytes <= 0) {
-            tcp_client_disconnect(client);
-            return;
-        }
-
-        client->read_len += bytes;
-        process_client_data(client);
-    }
-
-    if (events & PD_EVENT_HANGUP) {
-        tcp_client_disconnect(client);
-        return;
-    }
-
-    if (events & PD_EVENT_ERROR) {
-        log_warn("tcp transport: socket error");
-        tcp_client_disconnect(client);
-        return;
-    }
-}
-
-// ============================================================================
-// ACCEPT CALLBACK — TLS handshake then register read watcher
-// ============================================================================
-
-static void tcp_accept_callback(pd_loop_t* loop, pd_watcher_t* watcher,
-                                pd_event_t events, void* user_data) {
-    tcp_accept_ctx_t* ctx = (tcp_accept_ctx_t*)user_data;
-    tcp_transport_data_t* data = ctx->data;
-    poseidon_transport_t* transport = ctx->transport;
-    int listen_fd = pd_watcher_get_fd(watcher);
-
-    if (!(events & PD_EVENT_READ)) return;
-
-    struct sockaddr_in client_addr;
-    socklen_t client_len = sizeof(client_addr);
-    int client_fd = accept(listen_fd, (struct sockaddr*)&client_addr, &client_len);
-    if (client_fd < 0) {
-        log_warn("tcp transport: accept failed: %s", strerror(errno));
-        return;
-    }
-
-    if (data->num_clients >= TCP_MAX_CLIENTS) {
-        log_warn("tcp transport: max clients reached, rejecting connection");
-        close(client_fd);
-        return;
-    }
-
-    // Create client
-    static uint32_t next_session_id = 1;
-    tcp_client_t* client = get_clear_memory(sizeof(tcp_client_t));
-    if (client == NULL) {
-        close(client_fd);
-        return;
-    }
-
-    client->fd = client_fd;
-    client->transport = transport;
-    client->session = client_session_create(next_session_id++, transport->manager);
-    if (client->session == NULL) {
-        free(client);
-        close(client_fd);
-        return;
-    }
-    client->session->client_fd = client_fd;
-    client->session->transport = transport;
-    client->read_len = 0;
-
-    // Wrap with SSL if TLS is configured
-    if (data->ssl_ctx != NULL) {
-        client->ssl = SSL_new(data->ssl_ctx);
-        if (client->ssl == NULL) {
-            log_warn("tcp transport: SSL_new failed");
-            client_session_destroy(client->session);
-            free(client);
-            close(client_fd);
-            return;
-        }
-        SSL_set_fd(client->ssl, client_fd);
-        int ssl_rc = SSL_accept(client->ssl);
-        if (ssl_rc <= 0) {
-            int ssl_err = SSL_get_error(client->ssl, ssl_rc);
-            log_warn("tcp transport: TLS handshake failed (err=%d)", ssl_err);
-            SSL_free(client->ssl);
-            client_session_destroy(client->session);
-            free(client);
-            close(client_fd);
-            return;
-        }
-        client->ssl_connected = true;
-    }
-
-    client->watcher = pd_watcher_create(loop, client_fd, PD_EVENT_READ,
-                                         tcp_read_callback, client);
-    if (client->watcher == NULL) {
-        log_warn("tcp transport: failed to create watcher for client");
-        tcp_client_destroy(client);
-        return;
-    }
-
-    data->clients[data->num_clients++] = client;
-    poseidon_channel_manager_register_session(transport->manager, client->session);
-    log_info("tcp transport: client connected (fd=%d, total=%zu)",
-             client_fd, data->num_clients);
-}
-
-// ============================================================================
-// TRANSPORT THREAD
-// ============================================================================
-
-static void* tcp_transport_thread(void* arg) {
-    poseidon_transport_t* transport = (poseidon_transport_t*)arg;
-    tcp_transport_data_t* data = (tcp_transport_data_t*)transport->loop;
-
-    log_info("tcp transport: event loop starting");
-    pd_loop_run(data->loop);
-    log_info("tcp transport: event loop stopped");
-
     return NULL;
 }
 
 // ============================================================================
-// TRANSPORT INTERFACE
+// DISPATCH
 // ============================================================================
+//
+// The transport body is actor-shaped: it owns an actor_t that carries
+// the listener-level messages. The TCP backend does not currently need
+// to receive cross-actor messages (the per-connection actors talk to
+// their peers directly), so the dispatch is a no-op that keeps the
+// actor contract satisfied.
 
-static int tcp_transport_start(poseidon_transport_t* self) {
-    tcp_transport_data_t* data = (tcp_transport_data_t*)self->loop;
-
-    data->listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (data->listen_fd < 0) {
-        log_error("tcp transport: socket() failed: %s", strerror(errno));
-        return -1;
-    }
-
-    int opt = 1;
-    setsockopt(data->listen_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons((uint16_t)(uintptr_t)self->name);
-
-    if (bind(data->listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        log_error("tcp transport: bind() failed: %s", strerror(errno));
-        close(data->listen_fd);
-        data->listen_fd = -1;
-        return -1;
-    }
-
-    if (listen(data->listen_fd, 16) < 0) {
-        log_error("tcp transport: listen() failed: %s", strerror(errno));
-        close(data->listen_fd);
-        data->listen_fd = -1;
-        return -1;
-    }
-
-    tcp_accept_ctx_t* ctx = get_clear_memory(sizeof(tcp_accept_ctx_t));
-    if (ctx == NULL) {
-        close(data->listen_fd);
-        data->listen_fd = -1;
-        return -1;
-    }
-    ctx->transport = self;
-    ctx->data = data;
-    data->accept_ctx = ctx;
-
-    data->listen_watcher = pd_watcher_create(data->loop, data->listen_fd,
-                                              PD_EVENT_READ,
-                                              tcp_accept_callback, ctx);
-    if (data->listen_watcher == NULL) {
-        log_error("tcp transport: failed to create accept watcher");
-        free(ctx);
-        data->accept_ctx = NULL;
-        close(data->listen_fd);
-        data->listen_fd = -1;
-        return -1;
-    }
-
-    self->running = true;
-
-    self->thread = platform_thread_create((platform_thread_fn_t)tcp_transport_thread, self);
-    if (self->thread == NULL) {
-        log_error("tcp transport: failed to create thread");
-        pd_watcher_destroy(data->listen_watcher);
-        data->listen_watcher = NULL;
-        free(ctx);
-        data->accept_ctx = NULL;
-        close(data->listen_fd);
-        data->listen_fd = -1;
-        self->running = false;
-        return -1;
-    }
-
-    return 0;
+static void _tcp_transport_dispatch(void* state, message_t* msg) {
+    (void)state;
+    (void)msg;
 }
 
-static int tcp_transport_stop(poseidon_transport_t* self) {
-    if (!self->running) return 0;
+// ============================================================================
+// ACCEPT CALLBACK
+// ============================================================================
+//
+// Runs on the I/O thread. Accepts one connection, binds a client
+// session to it and registers the connection actor.
 
-    self->running = false;
-    tcp_transport_data_t* data = (tcp_transport_data_t*)self->loop;
+static void _accept_callback(pd_loop_t* loop,
+                             pd_watcher_t* watcher,
+                             pd_event_t events,
+                             void* user_data) {
+    (void)loop;
+    (void)watcher;
 
-    pd_loop_stop(data->loop);
-    platform_thread_join(self->thread);
-    self->thread = NULL;
+    poseidon_tcp_transport_t* transport = (poseidon_tcp_transport_t*)user_data;
+    if (transport == NULL) return;
 
-    for (size_t i = 0; i < data->num_clients; i++) {
-        if (data->clients[i] != NULL) {
-            tcp_client_destroy(data->clients[i]);
-            data->clients[i] = NULL;
+    if (!(events & PD_EVENT_READ)) {
+        return;
+    }
+
+    platform_address_t remote;
+    platform_socket_t* client_sock =
+        platform_socket_accept(transport->listen_sock, &remote);
+    if (client_sock == NULL) {
+        // A failed accept is normally transient (the peer gave up
+        // between the readiness notification and the accept call).
+        // Only the permanent errors are worth logging.
+        if (errno == EBADF || errno == EINVAL || errno == ENOTSOCK ||
+            errno == EOPNOTSUPP) {
+            log_error("tcp transport: accept failed permanently (errno=%d)",
+                      errno);
         }
-    }
-    data->num_clients = 0;
-
-    if (data->listen_watcher != NULL) {
-        pd_watcher_destroy(data->listen_watcher);
-        data->listen_watcher = NULL;
-    }
-    if (data->accept_ctx != NULL) {
-        free(data->accept_ctx);
-        data->accept_ctx = NULL;
-    }
-    if (data->listen_fd >= 0) {
-        close(data->listen_fd);
-        data->listen_fd = -1;
+        return;
     }
 
-    return 0;
+    // The accepted socket inherits the listener's blocking mode, so
+    // it has to be switched explicitly before the connection's actor
+    // starts pulling from it.
+    platform_socket_set_nonblocking(client_sock);
+
+    int client_fd = platform_socket_fd(client_sock);
+
+    // Bind a client session to the connection. The session is the
+    // per-client state the channel manager registry holds.
+    client_session_t* session =
+        client_session_create((uint32_t)s_next_session_id++,
+                              transport->base.manager);
+    if (session == NULL) {
+        log_error("tcp transport: failed to create client session");
+        platform_socket_destroy(client_sock);
+        return;
+    }
+    session->client_fd = client_fd;
+    session->transport = &transport->public;
+
+    if (transport->base.manager != NULL) {
+        poseidon_channel_manager_register_session(transport->base.manager,
+                                                   session);
+    }
+
+    poseidon_tcp_connection_t* conn = NULL;
+    if (!poseidon_tcp_connection_create(&transport->base, client_sock,
+                                        session, transport->ssl_ctx, &conn)) {
+        log_error("tcp transport: failed to create connection actor");
+        if (transport->base.manager != NULL) {
+            poseidon_channel_manager_unregister_session(
+                transport->base.manager, session);
+        }
+        client_session_destroy(session);
+        platform_socket_destroy(client_sock);
+        return;
+    }
+
+    platform_mutex_lock(transport->conn_lock);
+    vec_push(&transport->base.connections, (void*)conn);
+    platform_mutex_unlock(transport->conn_lock);
+
+    ATOMIC_FETCH_ADD(&transport->base.active_connections, 1);
+
+    log_info("tcp transport: client connected (fd=%d)", client_fd);
 }
 
-static int tcp_transport_send(poseidon_transport_t* self, int client_id,
-                                const uint8_t* data, size_t len) {
-    (void)self;
-    uint8_t header[TCP_FRAME_HEADER_SIZE];
-    write_frame_header(header, (uint32_t)len);
+// ============================================================================
+// SERVER THREAD
+// ============================================================================
+//
+// Runs the poll-dancer loop until the transport is stopped.
 
-    ssize_t h = send(client_id, header, TCP_FRAME_HEADER_SIZE, MSG_NOSIGNAL);
-    ssize_t d = send(client_id, data, len, MSG_NOSIGNAL);
-    return (h == TCP_FRAME_HEADER_SIZE && (size_t)d == len) ? 0 : -1;
+static void* _server_thread(void* arg) {
+    poseidon_tcp_transport_t* transport = (poseidon_tcp_transport_t*)arg;
+    if (transport == NULL) return NULL;
+
+    platform_thread_setup_stack();
+
+    // The accept watcher is created here, on the I/O thread, so that
+    // it is registered with the loop on the thread that runs it.
+    transport->listen_watcher =
+        platform_socket_watcher_create(transport->base.loop,
+                                       transport->listen_sock,
+                                       PD_EVENT_READ,
+                                       _accept_callback,
+                                       transport);
+    if (transport->listen_watcher == NULL) {
+        log_error("tcp transport: failed to create accept watcher");
+        return NULL;
+    }
+    pd_watcher_start(transport->listen_watcher);
+
+    while (ATOMIC_LOAD(&transport->base.running)) {
+        // Drain the destroy stack before blocking again: watchers
+        // that a connection actor asked to tear down are freed here,
+        // on the I/O thread, so the unregister never races a live
+        // registration.
+        destroy_stack_drain(&transport->base.destroy_stack);
+        pd_loop_run_once(transport->base.loop, TCP_LOOP_TICK_MS);
+    }
+
+    // One last drain: a connection actor may have pushed a watcher
+    // after the loop noticed the stop flag.
+    destroy_stack_drain(&transport->base.destroy_stack);
+
+    if (transport->listen_watcher != NULL) {
+        pd_watcher_stop(transport->listen_watcher);
+        pd_watcher_destroy(transport->listen_watcher);
+        transport->listen_watcher = NULL;
+    }
+
+    pd_loop_stop(transport->base.loop);
+
+    return NULL;
 }
 
 // ============================================================================
@@ -441,35 +329,56 @@ static int tcp_transport_send(poseidon_transport_t* self, int client_id,
 // ============================================================================
 
 poseidon_transport_t* poseidon_transport_tcp_create(uint16_t port,
-                                                      const char* cert_path,
-                                                      const char* key_path,
-                                                      poseidon_channel_manager_t* manager) {
+                                                    const char* cert_path,
+                                                    const char* key_path,
+                                                    poseidon_channel_manager_t* manager) {
     if (manager == NULL) return NULL;
 
-    poseidon_transport_t* transport = get_clear_memory(sizeof(poseidon_transport_t));
+    poseidon_tcp_transport_t* transport =
+        (poseidon_tcp_transport_t*)get_clear_memory(
+            sizeof(poseidon_tcp_transport_t));
     if (transport == NULL) return NULL;
 
-    tcp_transport_data_t* data = get_clear_memory(sizeof(tcp_transport_data_t));
-    if (data == NULL) {
+    poseidon_transport_internal_t* base = &transport->base;
+
+    base->loop = pd_loop_create(NULL);
+    if (base->loop == NULL) {
         free(transport);
         return NULL;
     }
 
-    data->loop = pd_loop_create(NULL);
-    if (data->loop == NULL) {
-        free(data);
+    base->manager = manager;
+    base->on_message = NULL;
+    base->type = POSEIDON_TRANSPORT_TCP;
+    base->name = "tcp";
+    base->thread = NULL;
+    base->pool = NULL;
+    vec_init(&base->connections);
+    ATOMIC_STORE(&base->running, 0);
+    ATOMIC_STORE(&base->active_connections, 0);
+    destroy_stack_init(&base->destroy_stack);
+
+    transport->listen_sock = NULL;
+    transport->listen_watcher = NULL;
+    transport->port = port;
+    transport->ssl_ctx = NULL;
+    transport->conn_lock = platform_mutex_create();
+    if (transport->conn_lock == NULL) {
+        destroy_stack_destroy(&base->destroy_stack);
+        pd_loop_destroy(base->loop);
         free(transport);
         return NULL;
     }
-    data->listen_fd = -1;
 
-    // Set up TLS if cert/key provided
+    // Set up TLS if a cert and a key were provided. Without them the
+    // transport speaks plain TCP.
     if (cert_path != NULL && key_path != NULL) {
         SSL_CTX* ssl_ctx = SSL_CTX_new(TLS_server_method());
         if (ssl_ctx == NULL) {
             log_error("tcp transport: SSL_CTX_new failed");
-            pd_loop_destroy(data->loop);
-            free(data);
+            platform_mutex_destroy(transport->conn_lock);
+            destroy_stack_destroy(&base->destroy_stack);
+            pd_loop_destroy(base->loop);
             free(transport);
             return NULL;
         }
@@ -478,22 +387,329 @@ poseidon_transport_t* poseidon_transport_tcp_create(uint16_t port,
             SSL_CTX_use_PrivateKey_file(ssl_ctx, key_path, SSL_FILETYPE_PEM) <= 0) {
             log_error("tcp transport: failed to load TLS cert/key");
             SSL_CTX_free(ssl_ctx);
-            pd_loop_destroy(data->loop);
-            free(data);
+            platform_mutex_destroy(transport->conn_lock);
+            destroy_stack_destroy(&base->destroy_stack);
+            pd_loop_destroy(base->loop);
             free(transport);
             return NULL;
         }
-        data->ssl_ctx = ssl_ctx;
+        transport->ssl_ctx = ssl_ctx;
     }
 
-    transport->name = (const char*)(uintptr_t)port;
-    transport->type = POSEIDON_TRANSPORT_TCP;
-    transport->manager = manager;
-    transport->loop = data;
-    transport->start = tcp_transport_start;
-    transport->stop = tcp_transport_stop;
-    transport->send = tcp_transport_send;
-    transport->lock = platform_mutex_create();;
+    // The transport body is actor-shaped: bind it to the scheduler
+    // pool the manager uses, so the transport's actor lives on the
+    // same pool as the channel manager and the client sessions. The
+    // per-connection actors dispatch their messages through it as
+    // well: an actor with a NULL pool is never scheduled, so its
+    // mailbox would fill up and never be drained.
+    base->pool = manager->actor.pool;
+    actor_init(&base->actor, base, _tcp_transport_dispatch, base->pool);
 
-    return transport;
+    // Bind the wildcard address: the listener serves IPv4 and IPv6
+    // clients on the one socket.
+    platform_address_t addr;
+    platform_socket_t* listen_sock =
+        platform_listen_socket_create("0.0.0.0", port, &addr);
+    if (listen_sock == NULL) {
+        log_error("tcp transport: failed to bind port %u", (unsigned)port);
+        actor_destroy(&base->actor);
+        platform_mutex_destroy(transport->conn_lock);
+        destroy_stack_destroy(&base->destroy_stack);
+        pd_loop_destroy(base->loop);
+        free(transport);
+        return NULL;
+    }
+    if (platform_socket_listen(listen_sock, TCP_LISTEN_BACKLOG) < 0) {
+        log_error("tcp transport: listen() failed on port %u (errno=%d)",
+                  (unsigned)port, errno);
+        platform_socket_destroy(listen_sock);
+        actor_destroy(&base->actor);
+        platform_mutex_destroy(transport->conn_lock);
+        destroy_stack_destroy(&base->destroy_stack);
+        pd_loop_destroy(base->loop);
+        free(transport);
+        return NULL;
+    }
+    platform_socket_set_nonblocking(listen_sock);
+    transport->listen_sock = listen_sock;
+
+    // The vtable-shaped public view lives in the same allocation as
+    // the actor-shaped body, side by side.
+    transport->public.name = transport->base.name;
+    transport->public.type = POSEIDON_TRANSPORT_TCP;
+    transport->public.thread = NULL;
+    transport->public.loop = base->loop;
+    transport->public.manager = manager;
+    transport->public.on_message = NULL;
+    transport->public.ctx = NULL;
+    transport->public.lock = transport->conn_lock;
+    transport->public.running = false;
+    transport->public.start = poseidon_transport_tcp_start;
+    transport->public.stop = poseidon_transport_tcp_stop;
+    transport->public.send = _tcp_vtable_send;
+    transport->public.destroy = poseidon_transport_tcp_destroy;
+
+    return &transport->public;
+}
+
+int poseidon_transport_tcp_start(poseidon_transport_t* transport) {
+    if (transport == NULL) return -1;
+
+    poseidon_tcp_transport_t* tcp_transport = _tcp_from_public(transport);
+
+    if (ATOMIC_LOAD(&tcp_transport->base.running)) {
+        return 0;
+    }
+
+    log_info("tcp transport: starting on port %u", (unsigned)tcp_transport->port);
+
+    ATOMIC_STORE(&tcp_transport->base.running, 1);
+    platform_thread_t* thread =
+        platform_thread_create(_server_thread, tcp_transport);
+    if (thread == NULL) {
+        ATOMIC_STORE(&tcp_transport->base.running, 0);
+        log_error("tcp transport: failed to create I/O thread");
+        return -1;
+    }
+    tcp_transport->base.thread = thread;
+    tcp_transport->public.thread = thread;
+    tcp_transport->public.running = true;
+
+    return 0;
+}
+
+int poseidon_transport_tcp_stop(poseidon_transport_t* transport) {
+    if (transport == NULL) return 0;
+
+    poseidon_tcp_transport_t* tcp_transport = _tcp_from_public(transport);
+
+    if (!ATOMIC_LOAD(&tcp_transport->base.running)) {
+        return 0;
+    }
+
+    ATOMIC_STORE(&tcp_transport->base.running, 0);
+
+    // Wake the I/O thread so it notices the stop flag without waiting
+    // for the tick to expire. The wake-up is best-effort: on the
+    // epoll backend it is a no-op and the thread wakes on its own
+    // when the tick expires.
+    pd_loop_async_send(tcp_transport->base.loop, tcp_transport);
+
+    if (tcp_transport->base.thread != NULL) {
+        platform_thread_join(tcp_transport->base.thread);
+        tcp_transport->base.thread = NULL;
+    }
+    tcp_transport->public.thread = NULL;
+    tcp_transport->public.running = false;
+
+    // Ask the connections to close gracefully. Their pending frames
+    // are flushed by the connection actors while the scheduler pool is
+    // still alive.
+    platform_mutex_lock(tcp_transport->conn_lock);
+    for (int i = 0; i < tcp_transport->base.connections.length; i++) {
+        poseidon_tcp_connection_t* conn =
+            (poseidon_tcp_connection_t*)tcp_transport->base.connections.data[i];
+        if (conn == NULL) continue;
+        if (ATOMIC_LOAD(&conn->closed)) continue;
+        poseidon_tcp_connection_close(conn, true);
+    }
+    platform_mutex_unlock(tcp_transport->conn_lock);
+
+    return 0;
+}
+
+void poseidon_transport_tcp_destroy(poseidon_transport_t* transport) {
+    if (transport == NULL) return;
+
+    poseidon_tcp_transport_t* tcp_transport = _tcp_from_public(transport);
+    poseidon_transport_internal_t* base = &tcp_transport->base;
+
+    // Stop the I/O thread first: after this returns no callback can
+    // fire on a connection, so the teardown below runs without a race
+    // against the accept path.
+    if (ATOMIC_LOAD(&base->running)) {
+        poseidon_transport_tcp_stop(transport);
+    }
+
+    // Drain the destroy stack BEFORE tearing down the connection
+    // watchers. The stack holds the watchers a connection actor asked
+    // to tear down; destroying them a second time from the loop below
+    // would double-free the watcher and corrupt the heap.
+    destroy_stack_drain(&base->destroy_stack);
+
+    if (tcp_transport->listen_sock != NULL) {
+        platform_socket_destroy(tcp_transport->listen_sock);
+        tcp_transport->listen_sock = NULL;
+    }
+
+    // Quiesce the connection actors first. actor_destroy sets the
+    // DESTROY flag (so the scheduler stops picking the actor up and
+    // actor_send drops its messages), waits for any dispatch that is
+    // already running to finish, and drains the mailbox.
+    //
+    // The order matters: the connection's fields (sock, watcher, ssl,
+    // write_buffer) are read and written by the actor's dispatch, so
+    // they may only be touched once the actor is quiesced. Tearing
+    // the connection down before the actor is stopped would race the
+    // dispatch against the free.
+    for (int i = 0; i < base->connections.length; i++) {
+        poseidon_tcp_connection_t* conn =
+            (poseidon_tcp_connection_t*)base->connections.data[i];
+        if (conn == NULL) continue;
+        actor_destroy(&conn->actor);
+    }
+
+    // A connection actor that ran its close path while it was being
+    // quiesced pushed its watcher onto the destroy stack: free those
+    // watchers now, before the connections themselves go away.
+    destroy_stack_drain(&base->destroy_stack);
+
+    // Wait for the rest of the pool to go quiet as well: a client
+    // session actor may still be dispatching a delivery that reaches
+    // back into this transport.
+    if (base->pool != NULL &&
+        !ATOMIC_LOAD(&base->pool->terminate)) {
+        scheduler_pool_wait_for_idle(base->pool);
+    }
+
+    // Release the connection resources. The actors are quiesced, so
+    // nothing touches these fields any more.
+    //
+    // The connection table is held while the connections are freed:
+    // the send path looks a connection up under the same lock, so a
+    // reply that is on its way can never land on a freed connection.
+    // The lock is deliberately not held while the actors are quiesced
+    // above: a dispatch may reach back into the transport's send path.
+    platform_mutex_lock(tcp_transport->conn_lock);
+    for (int i = base->connections.length - 1; i >= 0; i--) {
+        poseidon_tcp_connection_t* conn =
+            (poseidon_tcp_connection_t*)base->connections.data[i];
+        if (conn == NULL) continue;
+
+        conn->is_closing = 1;
+
+        // The watcher is unregistered before the socket is closed: the
+        // closed descriptor number must not be reused while the
+        // registration is still live.
+        if (conn->watcher != NULL) {
+            pd_watcher_t* watcher = conn->watcher;
+            conn->watcher = NULL;
+            pd_watcher_stop(watcher);
+            pd_watcher_destroy(watcher);
+        }
+        if (conn->sock != NULL) {
+            platform_socket_destroy(conn->sock);
+            conn->sock = NULL;
+        }
+        ATOMIC_STORE(&conn->closed, 1);
+        if (conn->ssl != NULL) {
+            SSL_free(conn->ssl);
+            conn->ssl = NULL;
+        }
+        if (conn->write_buffer != NULL) {
+            buffer_destroy(conn->write_buffer);
+            conn->write_buffer = NULL;
+        }
+        if (conn->write_queue != NULL) {
+            buffer_destroy(conn->write_queue);
+            conn->write_queue = NULL;
+        }
+        conn->transport = NULL;
+        if (conn->session != NULL) {
+            // Detach the session from the transport before the
+            // transport's memory goes away: a session that is still
+            // registered with the manager must not reach back into a
+            // freed transport when it delivers a message.
+            conn->session->transport = NULL;
+            client_session_cleanup_subscriptions(conn->session);
+            if (base->manager != NULL) {
+                poseidon_channel_manager_unregister_session(base->manager,
+                                                            conn->session);
+            }
+            client_session_destroy(conn->session);
+            conn->session = NULL;
+        }
+        free(conn);
+    }
+    vec_deinit(&base->connections);
+    platform_mutex_unlock(tcp_transport->conn_lock);
+
+    // The shared body is actor-shaped: destroy its actor before the
+    // loop goes away.
+    actor_destroy(&base->actor);
+
+    destroy_stack_destroy(&base->destroy_stack);
+
+    if (base->loop != NULL) {
+        pd_loop_destroy(base->loop);
+        base->loop = NULL;
+    }
+
+    if (tcp_transport->conn_lock != NULL) {
+        platform_mutex_destroy(tcp_transport->conn_lock);
+        tcp_transport->conn_lock = NULL;
+    }
+
+    if (tcp_transport->ssl_ctx != NULL) {
+        SSL_CTX_free(tcp_transport->ssl_ctx);
+        tcp_transport->ssl_ctx = NULL;
+    }
+
+    free(tcp_transport);
+}
+
+// ============================================================================
+// SEND
+// ============================================================================
+
+// Hands the payload to the connection's write actor. The connection
+// frames it and serializes the write, so a reply never interleaves
+// with another reply on the same socket.
+static int _tcp_transport_send_to_client(poseidon_transport_internal_t* transport,
+                                         int client_id,
+                                         const uint8_t* data,
+                                         size_t len) {
+    if (transport == NULL || (data == NULL && len > 0)) return -1;
+
+    poseidon_tcp_transport_t* tcp_transport = _tcp_from_base(transport);
+
+    platform_mutex_lock(tcp_transport->conn_lock);
+    poseidon_tcp_connection_t* conn =
+        _find_connection_by_fd(tcp_transport, client_id);
+    if (conn != NULL) {
+        // The enqueue happens under the lock, so a connection that is
+        // being torn down cannot be freed while the frame is on its
+        // way to it.
+        poseidon_tcp_connection_write(conn, data, len);
+    }
+    platform_mutex_unlock(tcp_transport->conn_lock);
+
+    if (conn == NULL) {
+        return -1;
+    }
+
+    return 0;
+}
+
+// The vtable-shaped send hook. The public view and the internal body
+// are two members of the same allocation, so the internal body is
+// reached through the public pointer.
+static int _tcp_vtable_send(poseidon_transport_t* self,
+                            int client_id,
+                            const uint8_t* data,
+                            size_t len) {
+    if (self == NULL) return -1;
+    poseidon_tcp_transport_t* tcp_transport = _tcp_from_public(self);
+    return _tcp_transport_send_to_client(&tcp_transport->base, client_id,
+                                          data, len);
+}
+
+int poseidon_transport_tcp_send(poseidon_transport_t* transport,
+                                int client_id,
+                                const uint8_t* data,
+                                size_t len) {
+    if (transport == NULL) return -1;
+    poseidon_tcp_transport_t* tcp_transport = _tcp_from_public(transport);
+    return _tcp_transport_send_to_client(&tcp_transport->base, client_id, data,
+                                          len);
 }
