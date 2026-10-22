@@ -708,3 +708,128 @@ transport had a lock that was never taken and never freed.
 Neither file is compiled on this platform (`__ANDROID__` and
 `__APPLE__` guards). Both were checked by compiling them with the
 platform guard defined: clean, no warnings.
+
+## Phase 7 — the transport vtable is gone (commit `b35a579`)
+
+`poseidon_transport_t` is the actor-shaped transport body now, and it is
+declared in `transport.h`. The vtable that used to sit on it — `start`,
+`stop`, `send` and `destroy` as function pointers — is gone, and with
+it the second view of the transport.
+
+### One view instead of two
+
+A backend used to hold **both** the actor-shaped body and a
+vtable-shaped public view, and converted between them with `offsetof`:
+
+```c
+typedef struct poseidon_unix_transport_t {
+    poseidon_transport_internal_t base;   /* FIRST */
+    poseidon_transport_t public;          /* the vtable view */
+    ...
+} poseidon_unix_transport_t;
+```
+
+There is one view now. The body is the FIRST member of the backend
+struct, so a pointer to the transport **is** a pointer to the backend
+and the conversion is a plain upcast:
+
+```c
+static poseidon_unix_transport_t* _unix_from_base(poseidon_transport_t* transport) {
+    return (poseidon_unix_transport_t*)transport;
+}
+```
+
+`poseidon_transport_internal_t` and `transport_internal.h` are gone: the
+body, the destroy-stack types and the seven per-backend forward
+declarations all live in the public header.
+
+### The generic lifecycle functions
+
+The vtable is replaced by four functions that dispatch on the body's
+type field:
+
+```c
+int  poseidon_transport_start(poseidon_transport_t* transport);
+int  poseidon_transport_stop(poseidon_transport_t* transport);
+int  poseidon_transport_send(poseidon_transport_t* transport, int client_id,
+                              const uint8_t* data, size_t len);
+void poseidon_transport_destroy(poseidon_transport_t* transport);
+```
+
+They live in `transport.c`, which is the one place that includes every
+backend header. They exist because not every caller knows the backend
+at compile time: the client session sends through whatever transport its
+session was created on (`client_session.c` calls
+`poseidon_transport_send`), and the daemon drives five transports from
+one place. A caller that does know the backend can still call
+`poseidon_transport_tcp_start(...)` and friends directly.
+
+### The plan's commits 9, 10 and 11 landed as one
+
+The header rewrite breaks every vtable call site at once, so it cannot
+be separated from the call-site updates without leaving the tree
+unbuildable. They are one commit.
+
+### Fixed along the way
+
+- `poseidon_transport_unix_send` cast the public pointer to the
+  internal body and then took the backend's address off it, which read
+  past the end of the allocation. The cast is a no-op now.
+- The transport carried a `lock` that the generic destroy released and
+  nothing else ever used. It is gone; each backend owns the lock that
+  guards its connection table.
+
+### Where Phase 7 landed
+
+| Commit | What |
+|---|---|
+| `afb9f4e` | `transport_internal.h` — the shared actor-shaped body |
+| `97ea4a8` | The Unix backend split |
+| `e2efe87` | The TCP backend split |
+| `68e2c55` | The WebSocket backend split |
+| `5e88f99` | The WebTransport backend split |
+| `9e2c2e8` | The QUIC backend split |
+| `cb0f13e` | The Binder backend, moved to the actor shape |
+| `5385823` | The XPC backend, moved to the actor shape |
+| `b35a579` | The vtable removed, the body renamed and made public |
+
+Each backend commit has a CLAUDE.md record next to it.
+
+### The shape every backend now has
+
+- A listener (`transport_<backend>.c`) that owns the I/O: the
+  poll-dancer loop and the I/O thread for the socket backends, the
+  libwtf context and server for WebTransport, the msquic registration,
+  configuration and listener for QUIC.
+- A per-connection actor (`<backend>_connection.c`) on the transport's
+  scheduler pool that owns the frame decoder, the CBOR request
+  handling and the write path. The Binder and XPC backends have none
+  yet: they have no connection path.
+- A `POSEIDON_<BACKEND>_CONNECTION_*` message family in the global
+  `message_type_e`.
+- The transport body as the FIRST member of the backend struct.
+- Watchers released through the transport's `destroy_stack_t`, so they
+  are unregistered on the loop thread.
+
+### Open items, in the order they should be picked up
+
+1. **The channel manager's synchronous session wrappers corrupt the
+   heap when called concurrently.** The wrapper does `actor_send` +
+   an inline `actor_run`; the `actor_send` injects the actor into the
+   scheduler pool and the pool worker then runs the **same** actor
+   while the wrapper is still running it inline. `message_queue_pop` is
+   not safe against two concurrent pops: both threads read the same
+   tail, both advance the queue and both free the same node, the
+   sentinel included. Reproduces with four threads and no transport at
+   all. The upstream `liboffs` has no inline `actor_run` callers at
+   all — the pattern is poseidon's. The fix belongs in the actor
+   machinery: an actor must only ever be run by one thread at a time.
+2. **`poseidon_channel_manager_destroy` frees the manager while its
+   actor is still registered in the scheduler pool**, so the pool's
+   teardown writes into the freed block. Five invalid reads under
+   valgrind, and the daemon's own teardown order triggers it.
+3. **The QUIC and WebTransport data paths are not exercised.** The
+   in-tree QUIC client fails to establish its stream against the server,
+   and the pre-split backend fails identically, so this predates the
+   actor conversion. WebTransport needs an HTTP/3 client, which neither
+   the in-tree client library nor a test harness speaks.
