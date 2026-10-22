@@ -295,6 +295,45 @@ typedef enum {
   /* Session actor or timer requested close. Payload is a
    * poseidon_ws_connection_close_payload_t* (graceful bool). */
   POSEIDON_WS_CONNECTION_CLOSE,
+
+  /* ========================================================================
+   * 2.14 WebTransport ClientAPI transport — per-connection actor messages
+   * ========================================================================
+   *
+   * Splits the WebTransport client-side file into a listener
+   * (transport_webtransport.c) and a per-connection actor
+   * (wt_connection.c). Payload structs live in
+   * src/ClientAPIs/wt_connection_messages.h; this enum only carries the
+   * type tags.
+   *
+   * The family mirrors the TCP one, with one difference: there is no
+   * socket to read from. libwtf owns the I/O and hands the received
+   * bytes to the transport's callback, so DATA carries the bytes
+   * themselves instead of a readiness signal. The stream that the
+   * session opened is announced with STREAM_OPENED, so the actor is
+   * the only thread that ever touches it.
+   */
+  __POSEIDON_WT_MESSAGE_BASE,
+  /* Inbound bytes received on the session's stream. The payload is a
+   * poseidon_wt_connection_data_payload_t* holding a copy of the bytes
+   * as they arrived; the connection actor reassembles the frames from
+   * them. */
+  POSEIDON_WT_CONNECTION_DATA = __POSEIDON_WT_MESSAGE_BASE,
+  /* Outbound frame submitted by the session actor. Payload is a
+   * poseidon_wt_connection_write_payload_t* (already-framed bytes);
+   * freed via the static destroyer registered with the message. */
+  POSEIDON_WT_CONNECTION_WRITE,
+  /* Session actor or timer requested close. Payload is a
+   * poseidon_wt_connection_close_payload_t* (graceful bool). */
+  POSEIDON_WT_CONNECTION_CLOSE,
+  /* The session opened a bidirectional stream. Payload is a
+   * poseidon_wt_connection_stream_payload_t* holding the stream
+   * pointer; the actor owns it from then on. */
+  POSEIDON_WT_CONNECTION_STREAM_OPENED,
+  /* The stream closed, was aborted, or the peer closed its side. No
+   * payload: the actor drops the stream and tears the connection
+   * down. */
+  POSEIDON_WT_CONNECTION_STREAM_CLOSED,
 } message_type_e;
 
 /* Base message. The actor's dispatch receives one of these; type selects the
@@ -416,4 +455,17 @@ typedef struct message_t {
  * mutator (write, close) routes through actor_send on the per-connection
  * actor, with the watcher torn down through the transport's
  * destroy_stack_t.
+ *
+ * Phase 2 (commit 2.14) adds the POSEIDON_WT_* family (5 entries) above
+ * the local-modifications block. The enum is still the global
+ * message_type_e; the per-connection payload structs live in the
+ * per-subsystem header ClientAPIs/wt_connection_messages.h, keeping
+ * message.h free of poll-dancer / platform-socket / client-session
+ * dependencies. The change is purely additive to the enum; the 4
+ * TIMER_*, 11 MERIDIAN_CONN_*, 11 POSEIDON_CHANNEL_MANAGER_*, 8
+ * POSEIDON_UNIX_*, 6 POSEIDON_TCP_* and 6 POSEIDON_WS_* families are
+ * unchanged. The WebTransport family mirrors the TCP one, with one
+ * deliberate difference: libwtf owns the I/O and hands the received
+ * bytes to the transport's callback, so DATA carries the bytes
+ * themselves instead of a readiness signal.
  */

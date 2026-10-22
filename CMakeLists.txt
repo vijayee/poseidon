@@ -128,6 +128,7 @@ set(POSEIDON_SOURCES
     ${CLIENT_APIS_SRC_DIR}/ws_connection.c
     ${CLIENT_APIS_SRC_DIR}/transport_quic.c
     ${CLIENT_APIS_SRC_DIR}/transport_webtransport.c
+    ${CLIENT_APIS_SRC_DIR}/wt_connection.c
     ${CLIENT_LIBS_SRC_DIR}/poseidon_client.c
     ${PLATFORM_SRC_DIR}/platform_atomic.c
     ${PLATFORM_SRC_DIR}/platform_dirs.c
