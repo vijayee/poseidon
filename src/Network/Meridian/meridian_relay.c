@@ -111,6 +111,21 @@ static void relay_remove_stream(meridian_relay_t* relay,
 // RELAY CLIENT LIFECYCLE
 // ============================================================================
 
+/**
+ * @brief Releases the pool the relay created for itself, if it created one.
+ *
+ * Called on the failure paths of the create and on the way out of the
+ * destroy. The pool is the relay's own, so the relay stops it before
+ * it lets it go.
+ */
+static void relay_release_own_pool(meridian_relay_t* relay) {
+    if (relay == NULL || relay->own_pool == NULL) return;
+    scheduler_pool_stop(relay->own_pool);
+    scheduler_pool_destroy(relay->own_pool);
+    relay->own_pool = NULL;
+    relay->pool = NULL;
+}
+
 meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
                                         HQUIC registration,
                                         meridian_rendv_t* server,
@@ -134,11 +149,27 @@ meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
     relay->on_addr_response = NULL;
     relay->on_addr_response_ctx = NULL;
     relay->pool = pool;
+    relay->own_pool = NULL;
+
+    // An actor with no pool is never scheduled, and a mailbox that is
+    // never drained is a leak, not a fallback. The relay therefore
+    // creates and owns a pool of its own when the caller gave none —
+    // the same rule the unix transport follows.
+    if (relay->pool == NULL) {
+        relay->own_pool = scheduler_pool_create(1);
+        if (relay->own_pool == NULL) {
+            free(relay);
+            return NULL;
+        }
+        scheduler_pool_start(relay->own_pool);
+        relay->pool = relay->own_pool;
+    }
 
     relay->active_streams_cap = 16;
     relay->active_streams = (meridian_stream_entry_t**)
         get_clear_memory(relay->active_streams_cap * sizeof(meridian_stream_entry_t*));
     if (relay->active_streams == NULL) {
+        relay_release_own_pool(relay);
         free(relay);
         return NULL;
     }
@@ -183,6 +214,7 @@ meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
         if (QUIC_FAILED(Status)) {
             free(relay->active_streams);
             platform_mutex_destroy(relay->lock);
+            relay_release_own_pool(relay);
             free(relay);
             return NULL;
         }
@@ -210,6 +242,7 @@ meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
             relay->configuration = NULL;
             free(relay->active_streams);
             platform_mutex_destroy(relay->lock);
+            relay_release_own_pool(relay);
             free(relay);
             return NULL;
         }
@@ -248,6 +281,7 @@ void meridian_relay_destroy(meridian_relay_t* relay) {
 
         actor_destroy(&relay->actor);
         platform_mutex_destroy(relay->lock);
+        relay_release_own_pool(relay);
         free(relay);
     }
 }
@@ -849,16 +883,14 @@ RelayConnectionCallback(HQUIC Connection, void* Context,
 
         // Ask the relay server for our reflexive address. The request is
         // handed to the relay's actor so it is not built on msquic's
-        // worker thread; with no pool the tree's convention is
-        // caller-thread dispatch.
+        // worker thread; the actor's pool owns the work, the way
+        // upstream's relay client hands its work to the pool.
         message_t msg = {
             .type = MERIDIAN_RELAY_ADDR_REQUEST,
             .payload = NULL,
             .payload_destroy = NULL,
         };
-        if (actor_send(&relay->actor, &msg) && relay->pool == NULL) {
-            actor_run(&relay->actor, 32);
-        }
+        actor_send(&relay->actor, &msg);
         return QUIC_STATUS_SUCCESS;
     }
 

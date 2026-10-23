@@ -93,12 +93,12 @@ typedef enum {
    * expire_tombstones, register_session, unregister_session)
    * through actor_send. All callers (client_session.c
    * create/join, channel_manager_bootstrap_intercept from the
-   * subscriber thread, and the in-process notice handlers)
-   * dispatch + drain synchronously on the calling thread using
-   * actor_run(actor, 32) so the public function return values
+   * subscriber thread, and the in-process notice handlers) do a
+   * round trip - the request carries a reply the actor answers and
+   * the caller waits for it - so the public function return values
    * (poseidon_channel_t* / int) remain available to the wrapper
    * through borrowed int** / X** out-params on the payload
-   * struct.
+   * struct. 2.21 replaced the last inline drain with this.
    */
 
   /* Create a new locally-owned channel. The wrapper's stack frame

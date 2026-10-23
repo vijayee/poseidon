@@ -92,7 +92,8 @@ typedef struct meridian_relay_t {
     size_t num_active_streams;                       /**< Number of active streams */
     size_t active_streams_cap;                       /**< Capacity of active_streams array */
     platform_mutex_t* lock;                         /**< Guards the stream table, the callbacks and the connection handle */
-    scheduler_pool_t* pool;                          /**< Scheduler pool owning this actor (NULL = caller-thread dispatch) */
+    scheduler_pool_t* pool;                          /**< Scheduler pool owning this actor */
+    scheduler_pool_t* own_pool;                      /**< The pool this relay created for itself, when it was given none */
     actor_t actor;                                   /**< Work queue (embedded by value) */
 } meridian_relay_t;
 
@@ -109,7 +110,10 @@ typedef struct meridian_relay_t {
  * @param registration msquic registration handle (borrowed from parent protocol)
  * @param server      Relay server rendezvous point (caller retains ownership)
  * @param config      Client configuration parameters
- * @param pool        Scheduler pool for actor dispatch (NULL = caller-thread dispatch)
+ * @param pool        Scheduler pool for actor dispatch. NULL means the relay
+ *                    creates and owns a pool of its own — an actor with no
+ *                    pool is never scheduled, and a mailbox that is never
+ *                    drained is a leak, not a fallback.
  * @return            New relay client with refcount=1, or NULL on failure
  */
 meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
