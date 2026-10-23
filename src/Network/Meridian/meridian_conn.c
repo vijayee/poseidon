@@ -9,6 +9,7 @@
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
 #include "../../Actor/actor.h"
+#include "../../Actor/actor_reply.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
@@ -37,6 +38,11 @@ meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_rel
                                        const struct QUIC_API_TABLE* msquic,
                                        struct scheduler_pool_t* pool) {
     if (peer == NULL) return NULL;
+    /* The connection's actor needs a pool: the public calls send a
+     * request and wait for the actor's answer, and only a pool worker
+     * runs the actor. Without a pool the request would never be
+     * answered. */
+    if (pool == NULL) return NULL;
 
     meridian_conn_t* conn = (meridian_conn_t*)get_clear_memory(sizeof(meridian_conn_t));
     if (conn == NULL) return NULL;
@@ -101,53 +107,88 @@ meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_rel
 static void meridian_conn_dispatch(void* state, message_t* msg) {
     meridian_conn_t* conn = (meridian_conn_t*)state;
     switch (msg->type) {
-        case MERIDIAN_CONN_DISCONNECT:
+        case MERIDIAN_CONN_DISCONNECT: {
+            assert(msg->payload != NULL);
+            meridian_conn_disconnect_msg_t* p =
+                (meridian_conn_disconnect_msg_t*)msg->payload;
             meridian_conn_handle_disconnect(conn);
+            if (actor_reply_complete(&p->reply)) {
+                /* The caller gave up on the request and handed it over:
+                 * the dispatch frees it. */
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
+        }
         case MERIDIAN_CONN_SEND: {
             assert(msg->payload != NULL);
-            const meridian_conn_send_msg_t* p = (const meridian_conn_send_msg_t*)msg->payload;
-            meridian_conn_handle_send(conn, p->data, p->len, p->result);
+            meridian_conn_send_msg_t* p = (meridian_conn_send_msg_t*)msg->payload;
+            meridian_conn_handle_send(conn, p->data, p->len, &p->result);
+            free(p->data);
+            p->data = NULL;
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case MERIDIAN_CONN_SET_PEER_NAT_TYPE: {
             assert(msg->payload != NULL);
-            const meridian_conn_set_peer_nat_type_msg_t* p =
-                (const meridian_conn_set_peer_nat_type_msg_t*)msg->payload;
+            meridian_conn_set_peer_nat_type_msg_t* p =
+                (meridian_conn_set_peer_nat_type_msg_t*)msg->payload;
             meridian_conn_handle_set_peer_nat_type(conn, p->type);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case MERIDIAN_CONN_SET_PEER_REFLEXIVE: {
             assert(msg->payload != NULL);
-            const meridian_conn_set_peer_reflexive_msg_t* p =
-                (const meridian_conn_set_peer_reflexive_msg_t*)msg->payload;
+            meridian_conn_set_peer_reflexive_msg_t* p =
+                (meridian_conn_set_peer_reflexive_msg_t*)msg->payload;
             meridian_conn_handle_set_peer_reflexive(conn, p->addr, p->port);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case MERIDIAN_CONN_UPGRADE_TO_DIRECT: {
             assert(msg->payload != NULL);
-            const meridian_conn_upgrade_to_direct_msg_t* p =
-                (const meridian_conn_upgrade_to_direct_msg_t*)msg->payload;
-            meridian_conn_handle_upgrade_to_direct(conn, p->result);
+            meridian_conn_upgrade_to_direct_msg_t* p =
+                (meridian_conn_upgrade_to_direct_msg_t*)msg->payload;
+            meridian_conn_handle_upgrade_to_direct(conn, &p->result);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case MERIDIAN_CONN_CONNECT: {
             assert(msg->payload != NULL);
-            const meridian_conn_connect_msg_t* p =
-                (const meridian_conn_connect_msg_t*)msg->payload;
-            meridian_conn_handle_connect(conn, p->result);
+            meridian_conn_connect_msg_t* p =
+                (meridian_conn_connect_msg_t*)msg->payload;
+            meridian_conn_handle_connect(conn, &p->result);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case MERIDIAN_CONN_TEST_FORCE_STATE: {
             assert(msg->payload != NULL);
-            const meridian_conn_test_force_state_msg_t* p =
-                (const meridian_conn_test_force_state_msg_t*)msg->payload;
+            meridian_conn_test_force_state_msg_t* p =
+                (meridian_conn_test_force_state_msg_t*)msg->payload;
             meridian_conn_handle_test_force_state(conn, p->force_state);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         default:
-            /* Unhandled message type: no-op. The message_node_t wrapper is
-             * freed by the drain after this function returns. */
+            /* Unhandled message type: no-op. */
             break;
     }
 }
@@ -174,19 +215,36 @@ void meridian_conn_destroy(meridian_conn_t* conn) {
 int meridian_conn_connect(meridian_conn_t* conn) {
     if (conn == NULL) return -1;
 
-    int result = 0;
-    meridian_conn_connect_msg_t payload = { .result = &result };
-    message_t msg = { .type = MERIDIAN_CONN_CONNECT,
-                      .payload = &payload,
-                      .payload_destroy = NULL };
-    if (!actor_send(&conn->actor, &msg)) {
+    meridian_conn_connect_msg_t* request = (meridian_conn_connect_msg_t*)
+        get_clear_memory(sizeof(meridian_conn_connect_msg_t));
+    if (request == NULL) return -1;
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
         return -1;
     }
-    actor_run_inline(&conn->actor, 32);
+
+    int trip = actor_round_trip(&conn->actor, MERIDIAN_CONN_CONNECT,
+                                &request->reply, MERIDIAN_CONN_TIMEOUT_MS);
+    if (trip == 1) {
+        /* The actor is gone: nobody will ever look at the request. */
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) {
+        /* The caller gave up: the actor owns the request now and frees
+         * it when it is done with it. */
+        return -1;
+    }
+
+    int result = request->result;
+    actor_reply_destroy(&request->reply);
+    free(request);
     return result;
 }
 
 /**
+ * @brief Actor-thread handler for MERIDIAN_CONN_DISCONNECT./**
  * @brief Actor-thread handler for MERIDIAN_CONN_DISCONNECT.
  *
  * Runs serially on the actor's owning thread. Actor dispatch already
@@ -211,27 +269,29 @@ static void meridian_conn_handle_disconnect(meridian_conn_t* conn) {
 void meridian_conn_disconnect(meridian_conn_t* conn) {
     if (conn == NULL) return;
 
-    /* Post a disconnect message to the actor and drain synchronously. The
-     * drain claims the actor for this thread: actor_send injects the
-     * actor into the scheduler pool when the mailbox was empty, so a
-     * pool worker could otherwise pick the very same actor up and run it
-     * while this thread runs it. Two threads popping one mailbox corrupt
-     * it. With pool == NULL the claim is uncontended and the drain
-     * happens on the caller's thread. */
-    message_t msg = {
-        .type = MERIDIAN_CONN_DISCONNECT,
-        .payload = NULL,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&conn->actor, &msg)) {
-        /* DESTROY flag already set or queue rejected the push — nothing to
-         * do; the connection is on its way out. */
+    meridian_conn_disconnect_msg_t* request = (meridian_conn_disconnect_msg_t*)
+        get_clear_memory(sizeof(meridian_conn_disconnect_msg_t));
+    if (request == NULL) return;
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
         return;
     }
-    actor_run_inline(&conn->actor, 32);
+
+    int trip = actor_round_trip(&conn->actor, MERIDIAN_CONN_DISCONNECT,
+                                &request->reply, MERIDIAN_CONN_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return;
+    }
+    if (trip != 0) return;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
 }
 
 /**
+ * @brief Actor-thread handler for MERIDIAN_CONN_SEND./**
  * @brief Actor-thread handler for MERIDIAN_CONN_SEND.
  *
  * Runs serially on the actor's owning thread. Actor dispatch already
@@ -261,52 +321,75 @@ static void meridian_conn_handle_send(meridian_conn_t* conn, const uint8_t* data
 int meridian_conn_send(meridian_conn_t* conn, const uint8_t* data, uint32_t len) {
     if (conn == NULL || data == NULL || len == 0) return -1;
 
-    /* Result lives on our stack; the actor is drained synchronously below
-     * so it stays live across the dispatch. */
-    int result = -1;
-    meridian_conn_send_msg_t payload = {
-        .data = data,
-        .len = len,
-        .result = &result,
-    };
-    message_t msg = {
-        .type = MERIDIAN_CONN_SEND,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&conn->actor, &msg)) {
-        /* DESTROY flag already set or queue rejected the push — connection
-         * is on its way out. Return -1 to mirror the pre-2.5 contract. */
+    /* The request carries its own copy of the buffer: the caller may give
+     * up on the request, and then the actor finishes it and frees it — so
+     * nothing in a request may point at the caller's stack. */
+    meridian_conn_send_msg_t* request = (meridian_conn_send_msg_t*)
+        get_clear_memory(sizeof(meridian_conn_send_msg_t));
+    if (request == NULL) return -1;
+    request->data = (uint8_t*)get_memory(len);
+    if (request->data == NULL) {
+        free(request);
         return -1;
     }
-    actor_run_inline(&conn->actor, 32);
+    memcpy(request->data, data, len);
+    request->len = len;
+    request->result = -1;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->data);
+        free(request);
+        return -1;
+    }
+
+    int trip = actor_round_trip(&conn->actor, MERIDIAN_CONN_SEND,
+                                &request->reply, MERIDIAN_CONN_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request->data);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    int result = request->result;
+    actor_reply_destroy(&request->reply);
+    free(request->data);
+    free(request);
     return result;
 }
 
 int meridian_conn_upgrade_to_direct(meridian_conn_t* conn) {
     if (conn == NULL) return -1;
 
-    /* Result lives on our stack; the actor is drained synchronously below
-     * so it stays live across the dispatch. */
-    int result = -1;
-    meridian_conn_upgrade_to_direct_msg_t payload = {
-        .result = &result,
-    };
-    message_t msg = {
-        .type = MERIDIAN_CONN_UPGRADE_TO_DIRECT,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&conn->actor, &msg)) {
-        /* DESTROY flag already set or queue rejected the push — connection
-         * is on its way out. Return -1 to mirror the pre-2.7 contract. */
+    meridian_conn_upgrade_to_direct_msg_t* request =
+        (meridian_conn_upgrade_to_direct_msg_t*)
+        get_clear_memory(sizeof(meridian_conn_upgrade_to_direct_msg_t));
+    if (request == NULL) return -1;
+    request->result = -1;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
         return -1;
     }
-    actor_run_inline(&conn->actor, 32);
+
+    int trip = actor_round_trip(&conn->actor, MERIDIAN_CONN_UPGRADE_TO_DIRECT,
+                                &request->reply, MERIDIAN_CONN_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    int result = request->result;
+    actor_reply_destroy(&request->reply);
+    free(request);
     return result;
 }
 
 // ============================================================================
+// PEER INFORMATION UPDATES// ============================================================================
 // PEER INFORMATION UPDATES
 // ============================================================================
 
@@ -331,17 +414,32 @@ static void meridian_conn_handle_set_peer_nat_type(meridian_conn_t* conn,
 void meridian_conn_set_peer_nat_type(meridian_conn_t* conn, meridian_nat_type_t type) {
     if (conn == NULL) return;
 
-    meridian_conn_set_peer_nat_type_msg_t payload = {.type = type};
-    message_t msg = {
-        .type = MERIDIAN_CONN_SET_PEER_NAT_TYPE,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&conn->actor, &msg)) return;
-    actor_run_inline(&conn->actor, 32);
+    meridian_conn_set_peer_nat_type_msg_t* request =
+        (meridian_conn_set_peer_nat_type_msg_t*)
+        get_clear_memory(sizeof(meridian_conn_set_peer_nat_type_msg_t));
+    if (request == NULL) return;
+    request->type = type;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return;
+    }
+
+    int trip = actor_round_trip(&conn->actor, MERIDIAN_CONN_SET_PEER_NAT_TYPE,
+                                &request->reply, MERIDIAN_CONN_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return;
+    }
+    if (trip != 0) return;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
 }
 
 /**
+ * @brief Actor-thread handler for MERIDIAN_CONN_SET_PEER_REFLEXIVE./**
  * @brief Actor-thread body for MERIDIAN_CONN_SET_PEER_REFLEXIVE.
  *
  * Runs serially on the actor's owning thread. Records the reflexive
@@ -357,17 +455,33 @@ static void meridian_conn_handle_set_peer_reflexive(meridian_conn_t* conn,
 void meridian_conn_set_peer_reflexive(meridian_conn_t* conn, uint32_t addr, uint16_t port) {
     if (conn == NULL) return;
 
-    meridian_conn_set_peer_reflexive_msg_t payload = {.addr = addr, .port = port};
-    message_t msg = {
-        .type = MERIDIAN_CONN_SET_PEER_REFLEXIVE,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&conn->actor, &msg)) return;
-    actor_run_inline(&conn->actor, 32);
+    meridian_conn_set_peer_reflexive_msg_t* request =
+        (meridian_conn_set_peer_reflexive_msg_t*)
+        get_clear_memory(sizeof(meridian_conn_set_peer_reflexive_msg_t));
+    if (request == NULL) return;
+    request->addr = addr;
+    request->port = port;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return;
+    }
+
+    int trip = actor_round_trip(&conn->actor, MERIDIAN_CONN_SET_PEER_REFLEXIVE,
+                                &request->reply, MERIDIAN_CONN_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return;
+    }
+    if (trip != 0) return;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
 }
 
 // ============================================================================
+// PATH UPGRADE// ============================================================================
 // PATH UPGRADE
 // ============================================================================
 
@@ -511,15 +625,32 @@ static void meridian_conn_handle_test_force_state(meridian_conn_t* conn,
 void meridian_conn_test_force_state(meridian_conn_t* conn, meridian_conn_state_t state) {
     if (conn == NULL) return;
 
-    meridian_conn_test_force_state_msg_t payload = { .force_state = state };
-    message_t msg = { .type = MERIDIAN_CONN_TEST_FORCE_STATE,
-                      .payload = &payload,
-                      .payload_destroy = NULL };
-    if (!actor_send(&conn->actor, &msg)) return;
-    actor_run_inline(&conn->actor, 32);
+    meridian_conn_test_force_state_msg_t* request =
+        (meridian_conn_test_force_state_msg_t*)
+        get_clear_memory(sizeof(meridian_conn_test_force_state_msg_t));
+    if (request == NULL) return;
+    request->force_state = state;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return;
+    }
+
+    int trip = actor_round_trip(&conn->actor, MERIDIAN_CONN_TEST_FORCE_STATE,
+                                &request->reply, MERIDIAN_CONN_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return;
+    }
+    if (trip != 0) return;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
 }
 
 // ============================================================================
+// STATE QUERIES// ============================================================================
 // STATE QUERIES
 // ============================================================================
 

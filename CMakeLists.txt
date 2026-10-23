@@ -143,6 +143,7 @@ set(POSEIDON_SOURCES
     ${PLATFORM_SRC_DIR}/platform_thread.c
     ${PLATFORM_SRC_DIR}/platform_time.c
     ${ACTOR_SRC_DIR}/actor.c
+    ${ACTOR_SRC_DIR}/actor_reply.c
     ${ACTOR_SRC_DIR}/message_queue.c
     ${ACTOR_SRC_DIR}/pool.c
     # Timer/timer_actor.c is staged in src/Timer/ but NOT compiled here: it

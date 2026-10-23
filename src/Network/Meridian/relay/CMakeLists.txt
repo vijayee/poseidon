@@ -102,6 +102,7 @@ set(MERIDIAN_RELAY_SOURCES
     ${POSEIDON_SRC_DIR}/Workers/join.c
     ${POSEIDON_SRC_DIR}/Workers/transaction_id.c
     ${POSEIDON_SRC_DIR}/Actor/actor.c
+    ${POSEIDON_SRC_DIR}/Actor/actor_reply.c
     ${POSEIDON_SRC_DIR}/Actor/message_queue.c
     ${POSEIDON_SRC_DIR}/Scheduler/scheduler.c
     ${POSEIDON_SRC_DIR}/Scheduler/deque.c

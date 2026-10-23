@@ -96,13 +96,26 @@ typedef struct meridian_conn_t {
 // ============================================================================
 
 /**
+ * How long a public call waits for the connection's actor to answer.
+ *
+ * The call sends a request and waits on the request's condition
+ * variable — the round trip upstream's peer book uses. The actor runs on
+ * a pool worker, never on the calling thread.
+ */
+#define MERIDIAN_CONN_TIMEOUT_MS 5000
+
+/**
  * Creates a new connection to a peer.
+ *
+ * The connection's actor needs a scheduler pool: the public calls send a
+ * request to the actor and wait for its answer, and only a pool worker
+ * runs the actor. A NULL pool is rejected.
  *
  * @param peer           Peer node to connect to
  * @param relay          Relay client (NULL if direct-only)
  * @param local_nat_type Our NAT type for this connection
  * @param msquic         msquic API table (may be NULL for tests)
- * @param pool           Scheduler pool for actor dispatch (NULL = caller-thread dispatch)
+ * @param pool           Scheduler pool that runs the connection's actor
  * @return               New connection with refcount=1, or NULL on failure
  */
 meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_relay_t* relay,

@@ -16,6 +16,7 @@
 
 #include <stdint.h>
 #include "meridian_rendv.h"
+#include "../../Actor/actor_reply.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -84,62 +85,56 @@ extern "C" {
  * the entire family's lifetime.
  * ============================================================================ */
 
-/* MERIDIAN_CONN_SEND payload. Borrowed: the caller's data buffer AND
- * the caller's result slot must outlive the actor's processing of the
- * message. The handler writes the send outcome into *result: (int)len on
- * success, -1 on no-path or send failure. The wrapper's stack frame is
- * the natural owner; it stays live across actor_run() in the
- * caller-thread-dispatch path. */
+/* Every MERIDIAN_CONN_* request is a heap-allocated shell whose FIRST
+ * member is the reply block, so the wrapper can wait for the answer and
+ * the dispatch can hand the request back.
+ *
+ * A request owns everything it carries. The caller may give up on a
+ * request it sent, and then the actor finishes it and frees it — so
+ * nothing in a request may point at the caller's stack. The send
+ * request therefore holds its own copy of the caller's buffer.
+ */
+
 typedef struct meridian_conn_send_msg_t {
-    const uint8_t* data;   /**< Borrowed: caller-owned send buffer. */
-    uint32_t       len;    /**< Buffer length in bytes. */
-    int*           result; /**< Borrowed: caller-owned int where the handler
-                                writes the send outcome. Must be non-NULL. */
+    actor_reply_t reply;   /**< Must stay first: the round trip addresses
+                                the request through this pointer. */
+    uint8_t* data;         /**< Owned: the request's copy of the caller's
+                                buffer. The dispatch frees it. */
+    uint32_t len;          /**< Buffer length in bytes. */
+    int result;            /**< The actor writes the send outcome here:
+                                (int)len on success, -1 otherwise. */
 } meridian_conn_send_msg_t;
 
-/* MERIDIAN_CONN_SET_PEER_NAT_TYPE payload. Borrowed-by-value: the enum
- * is copied into the struct, no heap lifetime to manage. */
+typedef struct meridian_conn_disconnect_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
+} meridian_conn_disconnect_msg_t;
+
 typedef struct meridian_conn_set_peer_nat_type_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
     meridian_nat_type_t type;  /**< New peer NAT classification. */
 } meridian_conn_set_peer_nat_type_msg_t;
 
-/* MERIDIAN_CONN_SET_PEER_REFLEXIVE payload. Borrowed-by-value: the
- * address tuple is copied into the struct, no heap lifetime to manage. */
 typedef struct meridian_conn_set_peer_reflexive_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
     uint32_t addr;   /**< Peer reflexive IPv4 address (network byte order). */
     uint16_t port;   /**< Peer reflexive port (host byte order). */
 } meridian_conn_set_peer_reflexive_msg_t;
 
-/* MERIDIAN_CONN_UPGRADE_TO_DIRECT payload. Borrowed: the caller's result
- * slot must outlive the actor's processing of the message. The handler
- * writes the upgrade outcome into *result: 0 on a state transition to
- * TRYING_DIRECT, -1 on each rejection branch (already-DIRECT, neither
- * RELAY state, peer/local symmetric NAT, or missing reflexive address).
- * The wrapper's stack frame is the natural owner; it stays live across
- * actor_run() in the caller-thread-dispatch path. */
 typedef struct meridian_conn_upgrade_to_direct_msg_t {
-    int* result; /**< Borrowed: caller-owned int where the handler writes
-                      the upgrade outcome. Must be non-NULL. */
+    actor_reply_t reply;   /**< Must stay first. */
+    int result;            /**< The actor writes the upgrade outcome here:
+                                0 on a state transition, -1 on each
+                                rejection branch. */
 } meridian_conn_upgrade_to_direct_msg_t;
 
-/* MERIDIAN_CONN_CONNECT payload. Borrowed: the caller's result slot must
- * outlive the actor's processing of the message. The handler writes the
- * connect outcome into *result: 0 on success (a state transition was
- * attempted — RELAY_ONLY/TRYING_DIRECT/RELAY cases all write 0; DIRECT
- * is a no-op that also writes 0), or -1 on NULL conn. The wrapper's
- * stack frame is the natural owner; it stays live across actor_run()
- * in the caller-thread-dispatch path. */
 typedef struct meridian_conn_connect_msg_t {
-    int* result; /**< Borrowed: caller-owned int where the handler writes
-                      the connect outcome. Must be non-NULL. */
+    actor_reply_t reply;   /**< Must stay first. */
+    int result;            /**< The actor writes the connect outcome here:
+                                0 on success, -1 on failure. */
 } meridian_conn_connect_msg_t;
 
-/* MERIDIAN_CONN_TEST_FORCE_STATE payload. Borrowed-by-value: the enum
- * is copied into the struct, no heap lifetime to manage. Test-only:
- * forces conn->state to the supplied value through the actor dispatch
- * path, so the state transition is observable to any in-flight
- * messages on the same actor. */
 typedef struct meridian_conn_test_force_state_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
     meridian_conn_state_t force_state; /**< State to assign to conn->state. */
 } meridian_conn_test_force_state_msg_t;
 
