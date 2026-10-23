@@ -7,11 +7,10 @@
  * actor runs on the transport's scheduler pool.
  *
  * The transport object is the actor-shaped body declared in
- * transport.h; the backend's private state lives in a backend struct
- * whose first member is that body.
- * The listener's own state (listening socket, accept watcher, socket
- * path, connection lock) lives in a backend-private struct that the
- * shared body reaches through its backend_data field.
+ * transport.h; the listener's own state (listening socket, accept
+ * watcher, socket path, connection lock) lives in a backend-private
+ * struct whose first member is that body, so the backend is recovered
+ * from the transport with a plain upcast.
  *
  * The on_message callback is invoked with a fully decoded frame: the
  * 4-byte big-endian length prefix has already been stripped, and the

@@ -112,6 +112,7 @@ static void _connection_close_fd(poseidon_unix_connection_t* connection) {
   }
   platform_socket_t* sock = connection->sock;
   connection->sock = NULL;
+  ATOMIC_STORE(&connection->closed, 1);
   platform_socket_destroy(sock);
 }
 
@@ -358,12 +359,13 @@ static void _unix_connection_dispatch(void* state, message_t* msg) {
   poseidon_unix_connection_t* connection = (poseidon_unix_connection_t*)state;
   if (connection == NULL) return;
 
-  if (connection->is_closing) {
+  if (ATOMIC_LOAD(&connection->closed)) {
     return;
   }
 
   switch (msg->type) {
     case POSEIDON_UNIX_CONNECTION_DATA: {
+      if (connection->is_closing) break;
       poseidon_unix_connection_data_payload_t* payload =
           (poseidon_unix_connection_data_payload_t*)msg->payload;
       if (payload == NULL || payload->buffer == NULL) {
@@ -410,6 +412,7 @@ static void _unix_connection_dispatch(void* state, message_t* msg) {
     }
 
     case POSEIDON_UNIX_CONNECTION_WRITE: {
+      if (connection->is_closing) break;
       poseidon_unix_connection_write_payload_t* payload =
           (poseidon_unix_connection_write_payload_t*)msg->payload;
       if (payload == NULL || payload->buffer == NULL) {
@@ -511,6 +514,7 @@ bool poseidon_unix_connection_create(poseidon_transport_t* transport,
   connection->write_buffer = NULL;
   connection->write_pending = 0;
   connection->is_closing = 0;
+  ATOMIC_STORE(&connection->closed, 0);
 
   actor_init(&connection->actor, connection, _unix_connection_dispatch,
              transport->pool);

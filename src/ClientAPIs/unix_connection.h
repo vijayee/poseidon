@@ -69,6 +69,11 @@ typedef struct poseidon_unix_connection_t {
   client_session_t* session;
   poseidon_transport_on_message_cb on_message;
   pd_watcher_t* watcher;
+  // closed is raised once the socket is gone. The dispatch drops every
+  // message for a closed connection; is_closing only means the
+  // connection is winding down and still has to drain its pending
+  // write.
+  ATOMIC(uint8_t) closed;
   size_t expected_len;
   uint8_t header_len;
   uint8_t header_buf[4];
