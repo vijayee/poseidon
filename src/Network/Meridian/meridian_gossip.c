@@ -169,7 +169,6 @@ meridian_gossip_scheduler_t* meridian_gossip_scheduler_create(
     sched->interval_idx = 0;
     sched->is_initial_phase = true;
     gettimeofday(&sched->last_gossip, NULL);
-    sched->lock = platform_mutex_create();;
     refcounter_init(&sched->refcounter);
 
     return sched;
@@ -185,7 +184,6 @@ void meridian_gossip_scheduler_destroy(meridian_gossip_scheduler_t* sched) {
 
     refcounter_dereference(&sched->refcounter);
     if (refcounter_count(&sched->refcounter) == 0) {
-        platform_mutex_destroy(sched->lock);;
         free(sched);
     }
 }
@@ -208,8 +206,6 @@ int meridian_gossip_scheduler_tick(meridian_gossip_scheduler_t* sched,
     if (sched == NULL || should_gossip == NULL) return -1;
 
     *should_gossip = false;
-
-    platform_mutex_lock(sched->lock);
 
     struct timeval now;
     gettimeofday(&now, NULL);
@@ -241,7 +237,6 @@ int meridian_gossip_scheduler_tick(meridian_gossip_scheduler_t* sched,
         }
     }
 
-    platform_mutex_unlock(sched->lock);
     return 0;
 }
 
@@ -287,7 +282,6 @@ meridian_gossip_handle_t* meridian_gossip_handle_create(const meridian_gossip_co
 
     handle->query_table = meridian_query_table_create(64);
     ATOMIC_STORE(&handle->running, 0);
-    handle->lock = platform_mutex_create();;
 
     return handle;
 }
@@ -308,7 +302,6 @@ void meridian_gossip_handle_destroy(meridian_gossip_handle_t* handle) {
     }
 
     vec_deinit(&handle->active_gossips);
-    platform_mutex_destroy(handle->lock);;
     free(handle);
 }
 
@@ -368,7 +361,6 @@ int meridian_gossip_handle_on_packet(meridian_gossip_handle_t* handle,
     if (type == MERIDIAN_PACKET_TYPE_GOSSIP) {
         meridian_gossip_packet_t* pkt = meridian_gossip_decode(item);
         if (pkt != NULL) {
-            platform_mutex_lock(handle->lock);
             for (size_t i = 0; i < handle->active_gossips.length; i++) {
                 meridian_gossip_t* g = handle->active_gossips.data[i];
                 if (g->query_id == pkt->base.query_id) {
@@ -376,7 +368,6 @@ int meridian_gossip_handle_on_packet(meridian_gossip_handle_t* handle,
                     break;
                 }
             }
-            platform_mutex_unlock(handle->lock);
 
             if (handle->config.completed_cb != NULL && pkt->targets.length > 0) {
                 handle->config.completed_cb(handle->config.user_ctx, pkt->base.query_id,

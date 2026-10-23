@@ -414,6 +414,10 @@ typedef enum {
   /* Send a measure request to one peer. The actor finds the connection
    * and puts the PING on a stream. */
   MERIDIAN_PROTOCOL_SEND_MEASURE,
+  /* Run the gossip tick. The actor ticks the scheduler and sends. */
+  MERIDIAN_PROTOCOL_GOSSIP_TICK,
+  /* A gossip reply arrived. The actor matches it and completes it. */
+  MERIDIAN_PROTOCOL_GOSSIP_RESPONSE,
   /* Send a packet to every peer. The actor does the fan-out. */
   MERIDIAN_PROTOCOL_BROADCAST,
 
@@ -601,7 +605,7 @@ typedef struct message_t {
  * Meridian / msquic dependencies. The change is purely additive to the
  * enum.
  *
- * Phase 2 (commit 2.18) adds the MERIDIAN_PROTOCOL_* family (6 entries)
+ * Phase 2 (commit 2.18) adds the MERIDIAN_PROTOCOL_* family (8 entries)
  * above the local-modifications block. The enum is still the global
  * message_type_e; the payload structs live in the per-subsystem header
  * Network/Meridian/meridian_protocol_messages.h, keeping message.h free

@@ -78,6 +78,22 @@ typedef struct meridian_protocol_send_measure_msg_t {
     uint16_t target_port;  /**< The peer's port. */
 } meridian_protocol_send_measure_msg_t;
 
+/* Run the gossip tick. The actor ticks the scheduler and, when it is
+ * time, sends a gossip to every peer. */
+typedef struct meridian_protocol_gossip_tick_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
+} meridian_protocol_gossip_tick_msg_t;
+
+/* A gossip reply arrived. The actor matches it against the in-flight
+ * gossips and delivers the completion. */
+typedef struct meridian_protocol_gossip_response_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
+    uint8_t* data;         /**< Owned: the request's copy of the packet. */
+    size_t len;            /**< The byte count. */
+    void* from;            /**< The peer that sent it (borrowed; it belongs
+                                to the protocol's peer table). */
+} meridian_protocol_gossip_response_msg_t;
+
 /* Send a packet to every peer. The actor does the fan-out. */
 typedef struct meridian_protocol_broadcast_msg_t {
     actor_reply_t reply;   /**< Must stay first. */

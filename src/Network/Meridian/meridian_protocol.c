@@ -230,6 +230,41 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
             }
             break;
         }
+        case MERIDIAN_PROTOCOL_GOSSIP_TICK: {
+            meridian_protocol_gossip_tick_msg_t* p =
+                (meridian_protocol_gossip_tick_msg_t*)msg->payload;
+            bool should_gossip = false;
+            if (protocol->gossip_handle != NULL &&
+                protocol->gossip_handle->scheduler != NULL) {
+                meridian_gossip_scheduler_tick(protocol->gossip_handle->scheduler,
+                                               &should_gossip);
+            }
+            if (should_gossip && protocol->num_connected_peers > 0) {
+                meridian_gossip_handle_send_gossip(protocol->gossip_handle,
+                                                   protocol->peer_nodes,
+                                                   protocol->num_connected_peers);
+            }
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_PROTOCOL_GOSSIP_RESPONSE: {
+            meridian_protocol_gossip_response_msg_t* p =
+                (meridian_protocol_gossip_response_msg_t*)msg->payload;
+            if (protocol->gossip_handle != NULL) {
+                meridian_gossip_handle_on_packet(protocol->gossip_handle,
+                                                 p->data, p->len, p->from);
+            }
+            free(p->data);
+            p->data = NULL;
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
         case MERIDIAN_PROTOCOL_BROADCAST: {
             meridian_protocol_broadcast_msg_t* p =
                 (meridian_protocol_broadcast_msg_t*)msg->payload;
@@ -1143,20 +1178,29 @@ meridian_node_t** meridian_protocol_get_connected_peers(meridian_protocol_t* pro
 int meridian_protocol_gossip(meridian_protocol_t* protocol) {
     if (protocol == NULL) return -1;
 
-    bool should_gossip = false;
-    if (protocol->gossip_handle) {
-        meridian_gossip_scheduler_t* sched = protocol->gossip_handle->scheduler;
-        if (sched) {
-            meridian_gossip_scheduler_tick(sched, &should_gossip);
-        }
+    /* The gossip belongs to the protocol's actor: it knows the peers, and
+     * the scheduler and the in-flight gossips are its state. */
+    meridian_protocol_gossip_tick_msg_t* request =
+        (meridian_protocol_gossip_tick_msg_t*)
+        get_clear_memory(sizeof(meridian_protocol_gossip_tick_msg_t));
+    if (request == NULL) return -1;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
     }
 
-    if (should_gossip && protocol->num_connected_peers > 0) {
-        meridian_gossip_handle_send_gossip(protocol->gossip_handle,
-                                           protocol->peer_nodes,
-                                           protocol->num_connected_peers);
+    int trip = actor_round_trip(&protocol->actor, MERIDIAN_PROTOCOL_GOSSIP_TICK,
+                                &request->reply, MERIDIAN_PROTOCOL_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
     }
+    if (trip != 0) return -1;  /* the actor owns the request now */
 
+    actor_reply_destroy(&request->reply);
+    free(request);
     return 0;
 }
 
@@ -1263,7 +1307,39 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
     case MERIDIAN_PACKET_TYPE_GOSSIP_PULL:
         // Gossip requires a known source node; skip for stream-received packets
         if (from != NULL) {
-            rc = meridian_gossip_handle_on_packet(protocol->gossip_handle, data, len, from);
+            /* The in-flight gossips belong to the protocol's actor, so
+             * the reply is handed over: this callback runs on msquic's
+             * worker thread. The request carries its own copy of the
+             * packet — the receive buffer dies with the stream. */
+            meridian_protocol_gossip_response_msg_t* request =
+                (meridian_protocol_gossip_response_msg_t*)
+                get_clear_memory(sizeof(meridian_protocol_gossip_response_msg_t));
+            if (request != NULL) {
+                request->len = len;
+                request->from = (void*)from;
+                request->data = (uint8_t*)get_memory(len > 0 ? len : 1);
+                if (request->data != NULL) {
+                    if (len > 0) memcpy(request->data, data, len);
+                    if (actor_reply_init(&request->reply) == 0) {
+                        /* The caller does not wait: the request is the
+                         * actor's to free. */
+                        request->reply.orphaned = 1;
+                        message_t msg = {
+                            .type = MERIDIAN_PROTOCOL_GOSSIP_RESPONSE,
+                            .payload = request,
+                            .payload_destroy = NULL,
+                        };
+                        if (!actor_send(&protocol->actor, &msg)) {
+                            actor_reply_destroy(&request->reply);
+                        }
+                    } else {
+                        free(request->data);
+                        free(request);
+                    }
+                } else {
+                    free(request);
+                }
+            }
         }
         break;
     case MERIDIAN_PACKET_TYPE_QUASAR_GOSSIP:
