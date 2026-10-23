@@ -15,6 +15,10 @@ extern "C" {
 #include "Crypto/key_pair.h"
 #include "Crypto/node_id.h"
 #include "Workers/pool.h"
+
+extern "C" {
+#include "Scheduler/scheduler.h"
+}
 #include "Time/wheel.h"
 #include <cbor.h>
 }
@@ -161,6 +165,7 @@ protected:
 
     work_pool_t* pool = nullptr;
     hierarchical_timing_wheel_t* wheel = nullptr;
+    scheduler_pool_t* sched = nullptr;
     poseidon_key_pair_t* key_pair = nullptr;
     poseidon_channel_t* channel = nullptr;
 };
@@ -265,6 +270,12 @@ TEST_F(ChannelNoticeTest, VerifyNullNoticeFails) {
 class TombstoneTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // The manager's actor runs on a scheduler pool: its public calls
+        // send a request and wait for the answer.
+        sched = scheduler_pool_create(1);
+        ASSERT_NE(sched, nullptr);
+        scheduler_pool_start(sched);
+
         pool = work_pool_create(2);
         ASSERT_NE(pool, nullptr);
         work_pool_launch(pool);
@@ -277,7 +288,7 @@ protected:
         ASSERT_NE(dial_key_pair, nullptr);
 
         mgr = poseidon_channel_manager_create(dial_key_pair, 18000, 18001, 18010,
-                                               pool, wheel, nullptr);
+                                               pool, wheel, sched);
         ASSERT_NE(mgr, nullptr);
     }
 
@@ -285,6 +296,11 @@ protected:
         if (mgr != nullptr) {
             poseidon_channel_manager_destroy(mgr);
             mgr = nullptr;
+        }
+        if (sched != nullptr) {
+            scheduler_pool_stop(sched);
+            scheduler_pool_destroy(sched);
+            sched = nullptr;
         }
         if (dial_key_pair != nullptr) {
             poseidon_key_pair_destroy(dial_key_pair);
@@ -306,6 +322,7 @@ protected:
 
     work_pool_t* pool = nullptr;
     hierarchical_timing_wheel_t* wheel = nullptr;
+    scheduler_pool_t* sched = nullptr;
     poseidon_key_pair_t* dial_key_pair = nullptr;
     poseidon_channel_manager_t* mgr = nullptr;
 };

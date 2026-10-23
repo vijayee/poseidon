@@ -14,6 +14,7 @@
 #include "../Network/Meridian/meridian.h"
 #include "../Network/Meridian/meridian_packet.h"
 #include "../Workers/pool.h"
+#include "../Actor/actor_reply.h"
 #include "../Time/wheel.h"
 #include "../Actor/actor.h"
 
@@ -81,31 +82,16 @@ typedef struct poseidon_channel_manager_t {
      * manager itself never takes this lock. Tracked for removal when all
      * external readers migrate to actor queries. */
     platform_mutex_t* external_lock;
-
-    /* Out-parameter fields written by the actor dispatch and read by the
-     * synchronous public wrappers (actor_send + actor_run on caller thread). */
-    poseidon_channel_t* create_channel_out;
-    poseidon_channel_t* join_channel_out;
-    int destroy_channel_out;
-    bool hbr_first_reply;
-    meridian_protocol_t* hbr_protocol;
-    int hbr_return_value;
-    char hbrq_responder_node_id[64];
-    uint32_t hbrq_responder_addr;
-    uint16_t hbrq_responder_port;
-    poseidon_channel_t* hbrq_dial_channel;
-    uint64_t hbrq_timestamp_us;
-    unsigned char* hbrq_publish_buf;
-    size_t hbrq_publish_len;
-    cbor_item_t* hbrq_tombstone_encoded;
-    int hbrq_tombstone_type;
-    int hbrq_return_value;
-    int hdn_did_work;
-    int hmn_did_work;
-    int add_tombstone_out;
-    int register_session_out;
-    int unregister_session_out;
 } poseidon_channel_manager_t;
+
+/**
+ * How long a public call waits for the manager's actor to answer.
+ *
+ * The call sends a request to the actor and waits on the request's
+ * condition variable — the round trip upstream's peer book uses. The
+ * actor runs on a pool worker, never on the calling thread.
+ */
+#define POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS 5000
 
 // ============================================================================
 // LIFECYCLE

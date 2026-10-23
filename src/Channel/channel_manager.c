@@ -94,6 +94,10 @@ poseidon_channel_manager_t* poseidon_channel_manager_create(
     hierarchical_timing_wheel_t* wheel,
     scheduler_pool_t* sched) {
     if (dial_key_pair == NULL || pool == NULL || wheel == NULL) return NULL;
+    /* The manager's actor needs a scheduler pool: the public calls send a
+     * request and wait for the answer, and only a pool worker runs the
+     * actor. */
+    if (sched == NULL) return NULL;
 
     poseidon_channel_manager_t* mgr = (poseidon_channel_manager_t*)calloc(1, sizeof(poseidon_channel_manager_t));
     if (mgr == NULL) return NULL;
@@ -250,84 +254,209 @@ static void channel_manager_dispatch(void* state, message_t* msg) {
 
     switch (msg->type) {
         case POSEIDON_CHANNEL_MANAGER_MSG_CREATE_CHANNEL: {
-            const poseidon_channel_manager_msg_create_channel_t* p =
-                (const poseidon_channel_manager_msg_create_channel_t*)msg->payload;
-            mgr->create_channel_out = poseidon_channel_manager_create_channel_impl(
+            poseidon_channel_manager_msg_create_channel_t* p =
+                (poseidon_channel_manager_msg_create_channel_t*)msg->payload;
+            p->out_channel = poseidon_channel_manager_create_channel_impl(
                 mgr, p->key_type, p->name, &p->config);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case POSEIDON_CHANNEL_MANAGER_MSG_JOIN_CHANNEL: {
-            const poseidon_channel_manager_msg_join_channel_t* p =
-                (const poseidon_channel_manager_msg_join_channel_t*)msg->payload;
-            mgr->join_channel_out = poseidon_channel_manager_join_channel_impl(
+            poseidon_channel_manager_msg_join_channel_t* p =
+                (poseidon_channel_manager_msg_join_channel_t*)msg->payload;
+            p->out_channel = poseidon_channel_manager_join_channel_impl(
                 mgr, p->topic_id);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case POSEIDON_CHANNEL_MANAGER_MSG_DESTROY_CHANNEL: {
-            const poseidon_channel_manager_msg_destroy_channel_t* p =
-                (const poseidon_channel_manager_msg_destroy_channel_t*)msg->payload;
-            mgr->destroy_channel_out =
-                poseidon_channel_manager_destroy_channel_impl(mgr, p->node_id);
+            poseidon_channel_manager_msg_destroy_channel_t* p =
+                (poseidon_channel_manager_msg_destroy_channel_t*)msg->payload;
+            p->result = poseidon_channel_manager_destroy_channel_impl(
+                mgr, &p->node_id);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_BOOTSTRAP_REPLY: {
-            const poseidon_channel_manager_msg_handle_bootstrap_reply_t* p =
-                (const poseidon_channel_manager_msg_handle_bootstrap_reply_t*)msg->payload;
-            mgr->hbr_return_value = poseidon_channel_manager_handle_bootstrap_reply_impl(
+            poseidon_channel_manager_msg_handle_bootstrap_reply_t* p =
+                (poseidon_channel_manager_msg_handle_bootstrap_reply_t*)msg->payload;
+            p->result = poseidon_channel_manager_handle_bootstrap_reply_impl(
                 mgr, p->topic_id, p->responder_addr, p->responder_port,
                 p->timestamp_us, p->seed_addrs, p->seed_ports, p->num_seeds,
-                &mgr->hbr_first_reply, &mgr->hbr_protocol);
+                &p->out_first_reply, &p->out_protocol);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_BOOTSTRAP_REQUEST: {
-            const poseidon_channel_manager_msg_handle_bootstrap_request_t* p =
-                (const poseidon_channel_manager_msg_handle_bootstrap_request_t*)msg->payload;
+            poseidon_channel_manager_msg_handle_bootstrap_request_t* p =
+                (poseidon_channel_manager_msg_handle_bootstrap_request_t*)msg->payload;
             poseidon_channel_manager_handle_bootstrap_request_impl(
                 mgr, p->topic_id, p->sender_node_id,
-                &mgr->hbrq_responder_node_id, &mgr->hbrq_responder_addr,
-                &mgr->hbrq_responder_port, &mgr->hbrq_dial_channel,
-                &mgr->hbrq_timestamp_us, &mgr->hbrq_publish_buf,
-                &mgr->hbrq_publish_len, &mgr->hbrq_tombstone_encoded,
-                &mgr->hbrq_tombstone_type, &mgr->hbrq_return_value);
+                p->responder_node_id, &p->responder_addr,
+                &p->responder_port, &p->dial_channel,
+                &p->timestamp_us, &p->publish_buf,
+                &p->publish_len, &p->tombstone_encoded,
+                &p->tombstone_type, &p->result);
+            if (actor_reply_complete(&p->reply)) {
+                /* The caller gave up: the actor disposes of the answer. */
+                if (p->publish_buf != NULL) free(p->publish_buf);
+                if (p->tombstone_encoded != NULL) cbor_decref(&p->tombstone_encoded);
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_DELETE_NOTICE: {
             poseidon_channel_manager_msg_handle_delete_notice_t* p =
                 (poseidon_channel_manager_msg_handle_delete_notice_t*)msg->payload;
             poseidon_channel_manager_handle_delete_notice_impl(
-                mgr, p->notice, &mgr->hdn_did_work);
+                mgr, p->notice, &p->did_work);
+            if (p->did_work && mgr->dial_channel != NULL) {
+                /* The tombstone is redistributed on the dial channel from
+                 * the actor's thread — the same seam the bootstrap-request
+                 * path uses. */
+                poseidon_tombstone_t t;
+                if (poseidon_tombstone_from_delete_notice(p->notice, &t) == 0 &&
+                    t.type == POSEIDON_TOMBSTONE_DELETE) {
+                    meridian_channel_delete_notice_t n;
+                    memset(&n, 0, sizeof(n));
+                    n.type = MERIDIAN_PACKET_TYPE_CHANNEL_DELETE_NOTICE;
+                    snprintf(n.topic_id, sizeof(n.topic_id), "%s", t.topic_id);
+                    snprintf(n.node_id, sizeof(n.node_id), "%s", t.node_id);
+                    snprintf(n.key_type, sizeof(n.key_type), "%s", t.key_type);
+                    if (t.public_key_len <= sizeof(n.public_key)) {
+                        memcpy(n.public_key, t.public_key, t.public_key_len);
+                        n.public_key_len = t.public_key_len;
+                    }
+                    n.timestamp_us = t.timestamp_us;
+                    if (t.signature_len <= sizeof(n.signature)) {
+                        memcpy(n.signature, t.signature, t.signature_len);
+                        n.signature_len = t.signature_len;
+                    }
+                    cbor_item_t* encoded = meridian_channel_delete_notice_encode(&n);
+                    if (encoded != NULL) {
+                        unsigned char* buf = NULL;
+                        size_t buf_len = 0;
+                        size_t written = cbor_serialize_alloc(encoded, &buf, &buf_len);
+                        cbor_decref(&encoded);
+                        if (buf != NULL && written > 0) {
+                            (void)poseidon_channel_publish(mgr->dial_channel,
+                                (const uint8_t*)t.topic_id, strlen(t.topic_id),
+                                buf, written);
+                            free(buf);
+                        }
+                    }
+                }
+            }
+            free(p->notice);
+            p->notice = NULL;
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_MODIFY_NOTICE: {
             poseidon_channel_manager_msg_handle_modify_notice_t* p =
                 (poseidon_channel_manager_msg_handle_modify_notice_t*)msg->payload;
             poseidon_channel_manager_handle_modify_notice_impl(
-                mgr, p->notice, &mgr->hmn_did_work);
+                mgr, p->notice, &p->did_work);
+            if (p->did_work && mgr->dial_channel != NULL) {
+                poseidon_tombstone_t t;
+                if (poseidon_tombstone_from_modify_notice(p->notice, &t) == 0 &&
+                    t.type == POSEIDON_TOMBSTONE_MODIFY) {
+                    meridian_channel_modify_notice_t n;
+                    memset(&n, 0, sizeof(n));
+                    n.type = MERIDIAN_PACKET_TYPE_CHANNEL_MODIFY_NOTICE;
+                    snprintf(n.topic_id, sizeof(n.topic_id), "%s", t.topic_id);
+                    snprintf(n.node_id, sizeof(n.node_id), "%s", t.node_id);
+                    snprintf(n.key_type, sizeof(n.key_type), "%s", t.key_type);
+                    if (t.public_key_len <= sizeof(n.public_key)) {
+                        memcpy(n.public_key, t.public_key, t.public_key_len);
+                        n.public_key_len = t.public_key_len;
+                    }
+                    n.timestamp_us = t.timestamp_us;
+                    if (t.signature_len <= sizeof(n.signature)) {
+                        memcpy(n.signature, t.signature, t.signature_len);
+                        n.signature_len = t.signature_len;
+                    }
+                    n.config = t.config;
+                    cbor_item_t* encoded = meridian_channel_modify_notice_encode(&n);
+                    if (encoded != NULL) {
+                        unsigned char* buf = NULL;
+                        size_t buf_len = 0;
+                        size_t written = cbor_serialize_alloc(encoded, &buf, &buf_len);
+                        cbor_decref(&encoded);
+                        if (buf != NULL && written > 0) {
+                            (void)poseidon_channel_publish(mgr->dial_channel,
+                                (const uint8_t*)t.topic_id, strlen(t.topic_id),
+                                buf, written);
+                            free(buf);
+                        }
+                    }
+                }
+            }
+            free(p->notice);
+            p->notice = NULL;
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case POSEIDON_CHANNEL_MANAGER_MSG_ADD_TOMBSTONE: {
-            const poseidon_channel_manager_msg_add_tombstone_t* p =
-                (const poseidon_channel_manager_msg_add_tombstone_t*)msg->payload;
-            mgr->add_tombstone_out =
-                poseidon_channel_manager_add_tombstone_impl(mgr, p->tombstone);
+            poseidon_channel_manager_msg_add_tombstone_t* p =
+                (poseidon_channel_manager_msg_add_tombstone_t*)msg->payload;
+            p->result = poseidon_channel_manager_add_tombstone_impl(
+                mgr, &p->tombstone);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case POSEIDON_CHANNEL_MANAGER_MSG_EXPIRE_TOMBSTONES: {
+            poseidon_channel_manager_msg_expire_tombstones_t* p =
+                (poseidon_channel_manager_msg_expire_tombstones_t*)msg->payload;
             poseidon_channel_manager_expire_tombstones_impl(mgr);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case POSEIDON_CHANNEL_MANAGER_MSG_REGISTER_SESSION: {
-            const poseidon_channel_manager_msg_register_session_t* p =
-                (const poseidon_channel_manager_msg_register_session_t*)msg->payload;
-            mgr->register_session_out =
-                poseidon_channel_manager_register_session_impl(mgr, p->session);
+            poseidon_channel_manager_msg_register_session_t* p =
+                (poseidon_channel_manager_msg_register_session_t*)msg->payload;
+            p->result = poseidon_channel_manager_register_session_impl(
+                mgr, p->session);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         case POSEIDON_CHANNEL_MANAGER_MSG_UNREGISTER_SESSION: {
-            const poseidon_channel_manager_msg_unregister_session_t* p =
-                (const poseidon_channel_manager_msg_unregister_session_t*)msg->payload;
-            mgr->unregister_session_out =
-                poseidon_channel_manager_unregister_session_impl(mgr, p->session);
+            poseidon_channel_manager_msg_unregister_session_t* p =
+                (poseidon_channel_manager_msg_unregister_session_t*)msg->payload;
+            p->result = poseidon_channel_manager_unregister_session_impl(
+                mgr, p->session);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         default:
@@ -371,20 +500,32 @@ poseidon_channel_t* poseidon_channel_manager_create_channel(
     const poseidon_channel_config_t* config) {
     if (mgr == NULL || key_type == NULL || name == NULL || config == NULL) return NULL;
 
-    poseidon_channel_manager_msg_create_channel_t payload;
-    memset(&payload, 0, sizeof(payload));
-    snprintf(payload.key_type, sizeof(payload.key_type), "%s", key_type);
-    snprintf(payload.name, sizeof(payload.name), "%s", name);
-    payload.config = *config;
+    poseidon_channel_manager_msg_create_channel_t* request =
+        (poseidon_channel_manager_msg_create_channel_t*)
+        get_clear_memory(sizeof(poseidon_channel_manager_msg_create_channel_t));
+    if (request == NULL) return NULL;
+    snprintf(request->key_type, sizeof(request->key_type), "%s", key_type);
+    snprintf(request->name, sizeof(request->name), "%s", name);
+    request->config = *config;
 
-    message_t msg = {
-        .type = POSEIDON_CHANNEL_MANAGER_MSG_CREATE_CHANNEL,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&mgr->actor, &msg)) return NULL;
-    actor_run_inline(&mgr->actor, 32);
-    return mgr->create_channel_out;
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return NULL;
+    }
+
+    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_CREATE_CHANNEL,
+                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return NULL;
+    }
+    if (trip != 0) return NULL;  /* the actor owns the request now */
+
+    poseidon_channel_t* channel = request->out_channel;
+    actor_reply_destroy(&request->reply);
+    free(request);
+    return channel;
 }
 
 poseidon_channel_t* poseidon_channel_manager_create_channel_impl(
@@ -416,19 +557,29 @@ poseidon_channel_t* poseidon_channel_manager_join_channel(
     const char* topic_str) {
     if (mgr == NULL || topic_str == NULL) return NULL;
 
-    poseidon_channel_manager_msg_join_channel_t payload;
-    memset(&payload, 0, sizeof(payload));
-    snprintf(payload.topic_id, sizeof(payload.topic_id), "%s", topic_str);
+    poseidon_channel_manager_msg_join_channel_t* request =
+        (poseidon_channel_manager_msg_join_channel_t*)
+        get_clear_memory(sizeof(poseidon_channel_manager_msg_join_channel_t));
+    if (request == NULL) return NULL;
+    snprintf(request->topic_id, sizeof(request->topic_id), "%s", topic_str);
 
-    message_t msg = {
-        .type = POSEIDON_CHANNEL_MANAGER_MSG_JOIN_CHANNEL,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&mgr->actor, &msg)) return NULL;
-    actor_run_inline(&mgr->actor, 32);
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return NULL;
+    }
 
-    poseidon_channel_t* channel = mgr->join_channel_out;
+    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_JOIN_CHANNEL,
+                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return NULL;
+    }
+    if (trip != 0) return NULL;  /* the actor owns the request now */
+
+    poseidon_channel_t* channel = request->out_channel;
+    actor_reply_destroy(&request->reply);
+    free(request);
 
     /* I/O seam: subscribe to the topic on the dial channel, encode and
        publish a bootstrap request. */
@@ -493,18 +644,31 @@ int poseidon_channel_manager_destroy_channel(poseidon_channel_manager_t* mgr,
                                                const poseidon_node_id_t* node_id) {
     if (mgr == NULL || node_id == NULL) return -1;
 
-    poseidon_channel_manager_msg_destroy_channel_t payload;
-    memset(&payload, 0, sizeof(payload));
-    payload.node_id = node_id;
+    poseidon_channel_manager_msg_destroy_channel_t* request =
+        (poseidon_channel_manager_msg_destroy_channel_t*)
+        get_clear_memory(sizeof(poseidon_channel_manager_msg_destroy_channel_t));
+    if (request == NULL) return -1;
+    request->node_id = *node_id;
+    request->result = -1;
 
-    message_t msg = {
-        .type = POSEIDON_CHANNEL_MANAGER_MSG_DESTROY_CHANNEL,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&mgr->actor, &msg)) return -1;
-    actor_run_inline(&mgr->actor, 32);
-    return mgr->destroy_channel_out;
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
+    }
+
+    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_DESTROY_CHANNEL,
+                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    int result = request->result;
+    actor_reply_destroy(&request->reply);
+    free(request);
+    return result;
 }
 
 int poseidon_channel_manager_destroy_channel_impl(poseidon_channel_manager_t* mgr,
@@ -546,46 +710,59 @@ int poseidon_channel_manager_handle_bootstrap_reply(
     size_t num_seeds) {
     if (mgr == NULL || topic_id == NULL) return -1;
 
-    poseidon_channel_manager_msg_handle_bootstrap_reply_t payload;
-    memset(&payload, 0, sizeof(payload));
-    snprintf(payload.topic_id, sizeof(payload.topic_id), "%s", topic_id);
-    payload.responder_addr = responder_addr;
-    payload.responder_port = responder_port;
-    payload.timestamp_us = timestamp_us;
+    poseidon_channel_manager_msg_handle_bootstrap_reply_t* request =
+        (poseidon_channel_manager_msg_handle_bootstrap_reply_t*)
+        get_clear_memory(sizeof(poseidon_channel_manager_msg_handle_bootstrap_reply_t));
+    if (request == NULL) return -1;
+    snprintf(request->topic_id, sizeof(request->topic_id), "%s", topic_id);
+    request->responder_addr = responder_addr;
+    request->responder_port = responder_port;
+    request->timestamp_us = timestamp_us;
     size_t seeds_to_copy = num_seeds;
     if (seeds_to_copy > POSEIDON_BOOTSTRAP_REPLY_ADDRS_MAX) {
         seeds_to_copy = POSEIDON_BOOTSTRAP_REPLY_ADDRS_MAX;
     }
     for (size_t i = 0; i < seeds_to_copy; i++) {
-        payload.seed_addrs[i] = seed_addrs[i];
-        payload.seed_ports[i] = seed_ports[i];
+        request->seed_addrs[i] = seed_addrs[i];
+        request->seed_ports[i] = seed_ports[i];
     }
-    payload.num_seeds = seeds_to_copy;
+    request->num_seeds = seeds_to_copy;
+    request->out_first_reply = false;
+    request->out_protocol = NULL;
+    request->result = -1;
 
-    mgr->hbr_first_reply = false;
-    mgr->hbr_protocol = NULL;
-    mgr->hbr_return_value = -1;
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
+    }
 
-    message_t msg = {
-        .type = POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_BOOTSTRAP_REPLY,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&mgr->actor, &msg)) return -1;
-    actor_run_inline(&mgr->actor, 32);
+    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_BOOTSTRAP_REPLY,
+                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    bool first_reply = request->out_first_reply;
+    meridian_protocol_t* protocol = request->out_protocol;
+    int result = request->result;
+    actor_reply_destroy(&request->reply);
+    free(request);
 
     /* I/O seam: connect on first reply, then add seeds. */
-    if (mgr->hbr_first_reply && mgr->hbr_protocol != NULL) {
-        meridian_protocol_connect(mgr->hbr_protocol, responder_addr, responder_port);
+    if (first_reply && protocol != NULL) {
+        meridian_protocol_connect(protocol, responder_addr, responder_port);
         size_t seeds_to_add = num_seeds;
         if (seeds_to_add > POSEIDON_BOOTSTRAP_REPLY_ADDRS_MAX) {
             seeds_to_add = POSEIDON_BOOTSTRAP_REPLY_ADDRS_MAX;
         }
         for (size_t i = 0; i < seeds_to_add; i++) {
-            meridian_protocol_add_seed_node(mgr->hbr_protocol, seed_addrs[i], seed_ports[i]);
+            meridian_protocol_add_seed_node(protocol, seed_addrs[i], seed_ports[i]);
         }
     }
-    return mgr->hbr_return_value;
+    return result;
 }
 
 int poseidon_channel_manager_handle_bootstrap_reply_impl(
@@ -643,53 +820,59 @@ int poseidon_channel_manager_handle_bootstrap_request(
     const char* sender_node_id) {
     if (mgr == NULL || topic_id == NULL || sender_node_id == NULL) return -1;
 
-    poseidon_channel_manager_msg_handle_bootstrap_request_t payload;
-    memset(&payload, 0, sizeof(payload));
-    snprintf(payload.topic_id, sizeof(payload.topic_id), "%s", topic_id);
-    snprintf(payload.sender_node_id, sizeof(payload.sender_node_id), "%s", sender_node_id);
+    poseidon_channel_manager_msg_handle_bootstrap_request_t* request =
+        (poseidon_channel_manager_msg_handle_bootstrap_request_t*)
+        get_clear_memory(sizeof(poseidon_channel_manager_msg_handle_bootstrap_request_t));
+    if (request == NULL) return -1;
+    snprintf(request->topic_id, sizeof(request->topic_id), "%s", topic_id);
+    snprintf(request->sender_node_id, sizeof(request->sender_node_id), "%s", sender_node_id);
 
-    mgr->hbrq_responder_node_id[0] = '\0';
-    mgr->hbrq_responder_addr = 0;
-    mgr->hbrq_responder_port = 0;
-    mgr->hbrq_dial_channel = NULL;
-    mgr->hbrq_timestamp_us = 0;
-    mgr->hbrq_publish_buf = NULL;
-    mgr->hbrq_publish_len = 0;
-    mgr->hbrq_tombstone_encoded = NULL;
-    mgr->hbrq_tombstone_type = 0;
-    mgr->hbrq_return_value = -1;
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
+    }
 
-    message_t msg = {
-        .type = POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_BOOTSTRAP_REQUEST,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&mgr->actor, &msg)) return -1;
-    actor_run_inline(&mgr->actor, 32);
+    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_BOOTSTRAP_REQUEST,
+                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
 
-    /* I/O seam: branch on out-flags. */
-    if (mgr->hbrq_tombstone_encoded != NULL && mgr->hbrq_dial_channel != NULL) {
+    cbor_item_t* tombstone_encoded = request->tombstone_encoded;
+    unsigned char* publish_buf = request->publish_buf;
+    size_t publish_len = request->publish_len;
+    poseidon_channel_t* dial_channel = request->dial_channel;
+    int result = request->result;
+    actor_reply_destroy(&request->reply);
+    free(request);
+
+    /* I/O seam: the reply goes out before this returns — the requester is
+       waiting for it. */
+    if (tombstone_encoded != NULL && dial_channel != NULL) {
         unsigned char* buf = NULL;
         size_t buf_len = 0;
-        size_t written = cbor_serialize_alloc(mgr->hbrq_tombstone_encoded, &buf, &buf_len);
+        size_t written = cbor_serialize_alloc(tombstone_encoded, &buf, &buf_len);
+        cbor_decref(&tombstone_encoded);
         if (buf != NULL && written > 0) {
-            (void)poseidon_channel_publish(mgr->hbrq_dial_channel,
+            (void)poseidon_channel_publish(dial_channel,
                 (const uint8_t*)topic_id, strlen(topic_id), buf, written);
             free(buf);
         }
-        cbor_decref(&mgr->hbrq_tombstone_encoded);
         return 0;
     }
 
-    if (mgr->hbrq_publish_buf != NULL && mgr->hbrq_dial_channel != NULL) {
-        (void)poseidon_channel_publish(mgr->hbrq_dial_channel,
+    if (publish_buf != NULL && dial_channel != NULL) {
+        (void)poseidon_channel_publish(dial_channel,
             (const uint8_t*)topic_id, strlen(topic_id),
-            mgr->hbrq_publish_buf, mgr->hbrq_publish_len);
-        free(mgr->hbrq_publish_buf);
+            publish_buf, publish_len);
+        free(publish_buf);
         return 0;
     }
 
-    return mgr->hbrq_return_value;
+    return result;
 }
 
 int poseidon_channel_manager_handle_bootstrap_request_impl(
@@ -842,68 +1025,38 @@ void poseidon_channel_manager_handle_delete_notice(
     const meridian_channel_delete_notice_t* notice) {
     if (mgr == NULL || notice == NULL) return;
 
-    /* The notice is borrowed from the caller (channel_notice.c calloc'd it).
-       Copy the topic_id and node_id into a heap-owned copy so the actor
-       payload owns its own buffer, then free the caller's copy after the
-       dispatch runs. */
-    poseidon_channel_manager_msg_handle_delete_notice_t payload;
-    memset(&payload, 0, sizeof(payload));
-    payload.notice = (meridian_channel_delete_notice_t*)malloc(sizeof(meridian_channel_delete_notice_t));
-    if (payload.notice == NULL) return;
-    memcpy(payload.notice, notice, sizeof(*notice));
-
-    mgr->hdn_did_work = false;
-
-    message_t msg = {
-        .type = POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_DELETE_NOTICE,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&mgr->actor, &msg)) {
-        free(payload.notice);
+    /* The request owns its own copy of the notice: the actor may still be
+       holding it after this call returns. */
+    poseidon_channel_manager_msg_handle_delete_notice_t* request =
+        (poseidon_channel_manager_msg_handle_delete_notice_t*)
+        get_clear_memory(sizeof(poseidon_channel_manager_msg_handle_delete_notice_t));
+    if (request == NULL) return;
+    request->notice = (meridian_channel_delete_notice_t*)
+        malloc(sizeof(meridian_channel_delete_notice_t));
+    if (request->notice == NULL) {
+        free(request);
         return;
     }
-    actor_run_inline(&mgr->actor, 32);
+    memcpy(request->notice, notice, sizeof(*notice));
 
-    /* I/O seam: redistribute tombstone on dial channel. */
-    if (mgr->hdn_did_work && mgr->dial_channel != NULL) {
-        poseidon_tombstone_t t;
-        if (poseidon_tombstone_from_delete_notice(notice, &t) == 0) {
-            cbor_item_t* encoded = NULL;
-            if (t.type == POSEIDON_TOMBSTONE_DELETE) {
-                meridian_channel_delete_notice_t n;
-                memset(&n, 0, sizeof(n));
-                n.type = MERIDIAN_PACKET_TYPE_CHANNEL_DELETE_NOTICE;
-                snprintf(n.topic_id, sizeof(n.topic_id), "%s", t.topic_id);
-                snprintf(n.node_id, sizeof(n.node_id), "%s", t.node_id);
-                snprintf(n.key_type, sizeof(n.key_type), "%s", t.key_type);
-                if (t.public_key_len <= sizeof(n.public_key)) {
-                    memcpy(n.public_key, t.public_key, t.public_key_len);
-                    n.public_key_len = t.public_key_len;
-                }
-                n.timestamp_us = t.timestamp_us;
-                if (t.signature_len <= sizeof(n.signature)) {
-                    memcpy(n.signature, t.signature, t.signature_len);
-                    n.signature_len = t.signature_len;
-                }
-                encoded = meridian_channel_delete_notice_encode(&n);
-            }
-            if (encoded != NULL) {
-                unsigned char* buf = NULL;
-                size_t buf_len = 0;
-                size_t written = cbor_serialize_alloc(encoded, &buf, &buf_len);
-                cbor_decref(&encoded);
-                if (buf != NULL && written > 0) {
-                    (void)poseidon_channel_publish(mgr->dial_channel,
-                        (const uint8_t*)t.topic_id, strlen(t.topic_id),
-                        buf, written);
-                    free(buf);
-                }
-            }
-        }
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->notice);
+        free(request);
+        return;
     }
 
-    free(payload.notice);
+    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_DELETE_NOTICE,
+                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request->notice);
+        free(request);
+        return;
+    }
+    if (trip != 0) return;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
 }
 
 void poseidon_channel_manager_handle_delete_notice_impl(
@@ -914,7 +1067,10 @@ void poseidon_channel_manager_handle_delete_notice_impl(
 
     poseidon_tombstone_t tombstone;
     if (poseidon_tombstone_from_delete_notice(notice, &tombstone) != 0) return;
-    if (poseidon_channel_manager_add_tombstone(mgr, &tombstone) == 0) {
+    /* This runs on the actor's own thread: the impl is called directly. A
+       message to this same actor would wait for an answer the actor cannot
+       give while it is inside this dispatch. */
+    if (poseidon_channel_manager_add_tombstone_impl(mgr, &tombstone) == 0) {
         *out_did_work = true;
     }
 
@@ -923,9 +1079,8 @@ void poseidon_channel_manager_handle_delete_notice_impl(
         poseidon_channel_t* found = find_channel(mgr, &nid);
         if (found != NULL) {
             poseidon_channel_delete_signed(found);
-            /* recursive actor_run inside destroy_channel — same thread, same actor,
-               serial. */
-            poseidon_channel_manager_destroy_channel(mgr, &nid);
+            /* Same thread, same actor: the impl is called directly. */
+            poseidon_channel_manager_destroy_channel_impl(mgr, &nid);
         }
     }
 }
@@ -935,64 +1090,36 @@ void poseidon_channel_manager_handle_modify_notice(
     const meridian_channel_modify_notice_t* notice) {
     if (mgr == NULL || notice == NULL) return;
 
-    poseidon_channel_manager_msg_handle_modify_notice_t payload;
-    memset(&payload, 0, sizeof(payload));
-    payload.notice = (meridian_channel_modify_notice_t*)malloc(sizeof(meridian_channel_modify_notice_t));
-    if (payload.notice == NULL) return;
-    memcpy(payload.notice, notice, sizeof(*notice));
-
-    mgr->hmn_did_work = false;
-
-    message_t msg = {
-        .type = POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_MODIFY_NOTICE,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&mgr->actor, &msg)) {
-        free(payload.notice);
+    poseidon_channel_manager_msg_handle_modify_notice_t* request =
+        (poseidon_channel_manager_msg_handle_modify_notice_t*)
+        get_clear_memory(sizeof(poseidon_channel_manager_msg_handle_modify_notice_t));
+    if (request == NULL) return;
+    request->notice = (meridian_channel_modify_notice_t*)
+        malloc(sizeof(meridian_channel_modify_notice_t));
+    if (request->notice == NULL) {
+        free(request);
         return;
     }
-    actor_run_inline(&mgr->actor, 32);
+    memcpy(request->notice, notice, sizeof(*notice));
 
-    /* I/O seam: redistribute on dial channel. */
-    if (mgr->hmn_did_work && mgr->dial_channel != NULL) {
-        poseidon_tombstone_t t;
-        if (poseidon_tombstone_from_modify_notice(notice, &t) == 0) {
-            if (t.type == POSEIDON_TOMBSTONE_MODIFY) {
-                meridian_channel_modify_notice_t n;
-                memset(&n, 0, sizeof(n));
-                n.type = MERIDIAN_PACKET_TYPE_CHANNEL_MODIFY_NOTICE;
-                snprintf(n.topic_id, sizeof(n.topic_id), "%s", t.topic_id);
-                snprintf(n.node_id, sizeof(n.node_id), "%s", t.node_id);
-                snprintf(n.key_type, sizeof(n.key_type), "%s", t.key_type);
-                if (t.public_key_len <= sizeof(n.public_key)) {
-                    memcpy(n.public_key, t.public_key, t.public_key_len);
-                    n.public_key_len = t.public_key_len;
-                }
-                n.timestamp_us = t.timestamp_us;
-                if (t.signature_len <= sizeof(n.signature)) {
-                    memcpy(n.signature, t.signature, t.signature_len);
-                    n.signature_len = t.signature_len;
-                }
-                n.config = t.config;
-                cbor_item_t* encoded = meridian_channel_modify_notice_encode(&n);
-                if (encoded != NULL) {
-                    unsigned char* buf = NULL;
-                    size_t buf_len = 0;
-                    size_t written = cbor_serialize_alloc(encoded, &buf, &buf_len);
-                    cbor_decref(&encoded);
-                    if (buf != NULL && written > 0) {
-                        (void)poseidon_channel_publish(mgr->dial_channel,
-                            (const uint8_t*)t.topic_id, strlen(t.topic_id),
-                            buf, written);
-                        free(buf);
-                    }
-                }
-            }
-        }
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->notice);
+        free(request);
+        return;
     }
 
-    free(payload.notice);
+    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_MODIFY_NOTICE,
+                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request->notice);
+        free(request);
+        return;
+    }
+    if (trip != 0) return;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
 }
 
 void poseidon_channel_manager_handle_modify_notice_impl(
@@ -1003,7 +1130,8 @@ void poseidon_channel_manager_handle_modify_notice_impl(
 
     poseidon_tombstone_t tombstone;
     if (poseidon_tombstone_from_modify_notice(notice, &tombstone) != 0) return;
-    if (poseidon_channel_manager_add_tombstone(mgr, &tombstone) == 0) {
+    /* This runs on the actor's own thread: the impl is called directly. */
+    if (poseidon_channel_manager_add_tombstone_impl(mgr, &tombstone) == 0) {
         *out_did_work = true;
     }
 
@@ -1031,15 +1159,26 @@ int poseidon_channel_manager_tick_all(poseidon_channel_manager_t* mgr) {
         rc |= poseidon_channel_tick(mgr->channels[i]);
     }
 
-    /* expire_tombstones is a pure state mutator — actorize. */
-    poseidon_channel_manager_msg_expire_tombstones_t payload = { 0 };
-    message_t msg = {
-        .type = POSEIDON_CHANNEL_MANAGER_MSG_EXPIRE_TOMBSTONES,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (actor_send(&mgr->actor, &msg)) {
-        actor_run_inline(&mgr->actor, 32);
+    /* expire_tombstones is a pure state mutator — it goes to the actor and
+       the tick waits for the answer. */
+    poseidon_channel_manager_msg_expire_tombstones_t* request =
+        (poseidon_channel_manager_msg_expire_tombstones_t*)
+        get_clear_memory(sizeof(poseidon_channel_manager_msg_expire_tombstones_t));
+    if (request == NULL) return rc;
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return rc;
+    }
+    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_EXPIRE_TOMBSTONES,
+                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return rc;
+    }
+    if (trip == 0) {
+        actor_reply_destroy(&request->reply);
+        free(request);
     }
     return rc;
 }
@@ -1064,18 +1203,33 @@ int poseidon_channel_manager_add_tombstone(poseidon_channel_manager_t* mgr,
                                              const poseidon_tombstone_t* tombstone) {
     if (mgr == NULL || tombstone == NULL) return -1;
 
-    poseidon_channel_manager_msg_add_tombstone_t payload;
-    memset(&payload, 0, sizeof(payload));
-    payload.tombstone = tombstone;
+    /* The request carries its own copy of the tombstone: the actor may
+       still be holding it after this call returns. */
+    poseidon_channel_manager_msg_add_tombstone_t* request =
+        (poseidon_channel_manager_msg_add_tombstone_t*)
+        get_clear_memory(sizeof(poseidon_channel_manager_msg_add_tombstone_t));
+    if (request == NULL) return -1;
+    request->tombstone = *tombstone;
+    request->result = -1;
 
-    message_t msg = {
-        .type = POSEIDON_CHANNEL_MANAGER_MSG_ADD_TOMBSTONE,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&mgr->actor, &msg)) return -1;
-    actor_run_inline(&mgr->actor, 32);
-    return mgr->add_tombstone_out;
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
+    }
+
+    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_ADD_TOMBSTONE,
+                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    int result = request->result;
+    actor_reply_destroy(&request->reply);
+    free(request);
+    return result;
 }
 
 int poseidon_channel_manager_add_tombstone_impl(poseidon_channel_manager_t* mgr,
@@ -1108,14 +1262,27 @@ const poseidon_tombstone_t* poseidon_channel_manager_find_tombstone(
 void poseidon_channel_manager_expire_tombstones(poseidon_channel_manager_t* mgr) {
     if (mgr == NULL) return;
 
-    poseidon_channel_manager_msg_expire_tombstones_t payload = { 0 };
-    message_t msg = {
-        .type = POSEIDON_CHANNEL_MANAGER_MSG_EXPIRE_TOMBSTONES,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&mgr->actor, &msg)) return;
-    actor_run_inline(&mgr->actor, 32);
+    poseidon_channel_manager_msg_expire_tombstones_t* request =
+        (poseidon_channel_manager_msg_expire_tombstones_t*)
+        get_clear_memory(sizeof(poseidon_channel_manager_msg_expire_tombstones_t));
+    if (request == NULL) return;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return;
+    }
+
+    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_EXPIRE_TOMBSTONES,
+                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return;
+    }
+    if (trip != 0) return;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
 }
 
 void poseidon_channel_manager_expire_tombstones_impl(poseidon_channel_manager_t* mgr) {
@@ -1195,20 +1362,33 @@ int poseidon_tombstone_from_modify_notice(const meridian_channel_modify_notice_t
 // ============================================================================
 
 int poseidon_channel_manager_register_session(poseidon_channel_manager_t* mgr, void* session) {
-    if (mgr == NULL || session == NULL) return -1;
+    if (mgr == NULL) return -1;
 
-    poseidon_channel_manager_msg_register_session_t payload;
-    memset(&payload, 0, sizeof(payload));
-    payload.session = session;
+    poseidon_channel_manager_msg_register_session_t* request =
+        (poseidon_channel_manager_msg_register_session_t*)
+        get_clear_memory(sizeof(poseidon_channel_manager_msg_register_session_t));
+    if (request == NULL) return -1;
+    request->session = session;
+    request->result = -1;
 
-    message_t msg = {
-        .type = POSEIDON_CHANNEL_MANAGER_MSG_REGISTER_SESSION,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&mgr->actor, &msg)) return -1;
-    actor_run_inline(&mgr->actor, 32);
-    return mgr->register_session_out;
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
+    }
+
+    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_REGISTER_SESSION,
+                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    int result = request->result;
+    actor_reply_destroy(&request->reply);
+    free(request);
+    return result;
 }
 
 int poseidon_channel_manager_register_session_impl(poseidon_channel_manager_t* mgr, void* session) {
@@ -1218,20 +1398,33 @@ int poseidon_channel_manager_register_session_impl(poseidon_channel_manager_t* m
 }
 
 int poseidon_channel_manager_unregister_session(poseidon_channel_manager_t* mgr, void* session) {
-    if (mgr == NULL || session == NULL) return -1;
+    if (mgr == NULL) return -1;
 
-    poseidon_channel_manager_msg_unregister_session_t payload;
-    memset(&payload, 0, sizeof(payload));
-    payload.session = session;
+    poseidon_channel_manager_msg_unregister_session_t* request =
+        (poseidon_channel_manager_msg_unregister_session_t*)
+        get_clear_memory(sizeof(poseidon_channel_manager_msg_unregister_session_t));
+    if (request == NULL) return -1;
+    request->session = session;
+    request->result = -1;
 
-    message_t msg = {
-        .type = POSEIDON_CHANNEL_MANAGER_MSG_UNREGISTER_SESSION,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&mgr->actor, &msg)) return -1;
-    actor_run_inline(&mgr->actor, 32);
-    return mgr->unregister_session_out;
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
+    }
+
+    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_UNREGISTER_SESSION,
+                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    int result = request->result;
+    actor_reply_destroy(&request->reply);
+    free(request);
+    return result;
 }
 
 int poseidon_channel_manager_unregister_session_impl(poseidon_channel_manager_t* mgr, void* session) {

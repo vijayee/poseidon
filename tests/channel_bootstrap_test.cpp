@@ -10,6 +10,10 @@
 #include "Channel/channel.h"
 #include "Crypto/key_pair.h"
 #include "Workers/pool.h"
+
+extern "C" {
+#include "Scheduler/scheduler.h"
+}
 #include "Time/wheel.h"
 
 TEST(BootstrapPacketTest, EncodeDecodeBootstrap) {
@@ -121,6 +125,12 @@ TEST(BootstrapPacketTest, EncodeDecodeReplyWithNoSeeds) {
 class ChannelManagerBootstrapTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // The manager's actor runs on a scheduler pool: its public calls
+        // send a request and wait for the answer.
+        sched = scheduler_pool_create(1);
+        ASSERT_NE(sched, nullptr);
+        scheduler_pool_start(sched);
+
         pool = work_pool_create(2);
         ASSERT_NE(pool, nullptr);
         work_pool_launch(pool);
@@ -137,6 +147,12 @@ protected:
         if (mgr != nullptr) {
             poseidon_channel_manager_destroy(mgr);
             mgr = nullptr;
+        }
+
+        if (sched != nullptr) {
+            scheduler_pool_stop(sched);
+            scheduler_pool_destroy(sched);
+            sched = nullptr;
         }
 
         if (dial_key_pair != nullptr) {
@@ -167,12 +183,13 @@ protected:
 
     work_pool_t* pool = nullptr;
     hierarchical_timing_wheel_t* wheel = nullptr;
+    scheduler_pool_t* sched = nullptr;
     poseidon_key_pair_t* dial_key_pair = nullptr;
     poseidon_channel_manager_t* mgr = nullptr;
 };
 
 TEST_F(ChannelManagerBootstrapTest, JoinChannelCreatesPendingBootstrap) {
-    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel, nullptr);
+    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel, sched);
     ASSERT_NE(mgr, nullptr);
 
     const char* topic = "TestTopic123";
@@ -190,7 +207,7 @@ TEST_F(ChannelManagerBootstrapTest, JoinChannelCreatesPendingBootstrap) {
 }
 
 TEST_F(ChannelManagerBootstrapTest, HandleBootstrapRequestRejectsUnknownTopic) {
-    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel, nullptr);
+    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel, sched);
     ASSERT_NE(mgr, nullptr);
 
     // No channels joined yet, so request for any topic should fail
@@ -198,7 +215,7 @@ TEST_F(ChannelManagerBootstrapTest, HandleBootstrapRequestRejectsUnknownTopic) {
 }
 
 TEST_F(ChannelManagerBootstrapTest, HandleBootstrapReplyFindsPending) {
-    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel, nullptr);
+    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel, sched);
     ASSERT_NE(mgr, nullptr);
 
     const char* topic = "TestTopic456";
@@ -220,7 +237,7 @@ TEST_F(ChannelManagerBootstrapTest, HandleBootstrapReplyFindsPending) {
 }
 
 TEST_F(ChannelManagerBootstrapTest, HandleBootstrapReplyNotFound) {
-    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel, nullptr);
+    mgr = poseidon_channel_manager_create(dial_key_pair, 16000, 16001, 16010, pool, wheel, sched);
     ASSERT_NE(mgr, nullptr);
 
     // No pending bootstrap for this topic/timestamp
