@@ -1563,3 +1563,77 @@ start channel manager dial channel").
 
 That is the msquic binding, not the relay's shape — but the relay
 cannot be exercised end to end until it is fixed.
+
+## Phase 2 (2.28) — the relay daemon starts
+
+The relay daemon segfaulted on startup. It is fixed, and the search for
+it turned up four more bugs of the same family.
+
+### The segfault
+
+`meridian_relay_server.c` used `poseidon_msquic_open_registration()`,
+`poseidon_msquic_api()` and `poseidon_msquic_close_registration()`
+without including `Platform/poseidon_msquic.h`. C99 removed implicit
+declarations, so the compiler assumed each of them returns `int` — and
+the pointer that `poseidon_msquic_api()` returns was truncated to 32
+bits and sign extended:
+
+```
+mov    $0x0,%eax
+call   poseidon_msquic_api
+cltq                             ; eax -> rax, sign extended
+mov    %rax,%rdx
+mov    %rdx,0x8(%rax)             ; server->msquic
+```
+
+The table pointer came out as `0x559e81c0` instead of
+`0x5555559e81c0` — an address that was never mapped — and the
+`ConfigurationOpen` call through it faulted.
+
+The compiler had been saying so all along:
+
+```
+meridian_relay_server.c:118: warning: implicit declaration of function
+    'poseidon_msquic_open_registration'
+meridian_relay_server.c:124: warning: assignment to 'const struct
+    QUIC_API_TABLE *' from 'int' makes pointer from integer without a cast
+```
+
+**The build now treats that as an error.** `-Werror=implicit-function-declaration`
+and `-Werror=int-conversion` are on for the whole tree, so an
+implicitly declared function that returns a pointer cannot come back.
+
+### What else the search found
+
+With the daemon no longer crashing, it failed cleanly instead — and the
+failures were real:
+
+- **A server cannot load a NONE credential.** MsQuic v2's TLS layer
+  returns `QUIC_STATUS_INVALID_PARAMETER` for one: "Required for server"
+  (`deps/msquic/src/platform/tls_openssl.c`). The relay daemon had no
+  certificate at all, so the relay server had nothing valid to load. It
+  now generates a self-signed one at startup, the way the channel does,
+  and removes it on the way out.
+- **A client may.** The relay client's no-certificate case now sets
+  `QUIC_CREDENTIAL_FLAG_CLIENT`, which is what the TLS layer asks for
+  when the credential type is NONE.
+- **The protocol's TLS paths were dangling.** The channel builds the key
+  and certificate paths in its own create frame and hands them to the
+  protocol's config, but the protocol loads the credential later, in its
+  start — by which time the caller's frame was long gone. The protocol
+  copies the paths now.
+- **The client library lost its receive thread.** `if (client->recv_thread
+  = platform_thread_create(...) != 0)` parses as `recv_thread =
+  (create(...) != 0)`, so the handle was overwritten with 0 or 1 and the
+  thread was never joined. `platform_thread_create` returns NULL on
+  failure; the assignment now stands on its own.
+- **An OpenSSL header was missing.** `EVP_PKEY_CTX_set_rsa_keygen_bits`
+  lives in `<openssl/rsa.h>`; without it the RSA keygen was an implicit
+  declaration too.
+
+### What it is now
+
+The relay daemon starts and listens; the main daemon starts and runs.
+The gate is 25/25, and `tests/meridian_relay_test.cpp` has a server
+lifecycle test again — it starts the server on an ephemeral port, stops
+it and destroys it, which is the path the stop rewrite changed.
