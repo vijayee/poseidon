@@ -957,3 +957,76 @@ of that:
 
 Green, 25/25 ctest. The relay's own test still covers only the creation
 paths; the connection paths need a real msquic peer.
+
+## Phase 2 (2.17) — no actor runs inline any more
+
+The actor machinery gained an inline run, and the subsystems that answer
+a caller used it: the Meridian connection, the client session and the
+channel manager ran their actor on the calling thread to get the answer.
+**Upstream has no such thing.** Its `actor.h` exposes exactly:
+
+```
+actor_init  actor_destroy  actor_detach_pool  actor_send  actor_run
+backpressure_apply  backpressure_release
+```
+
+No inline run, and no caller that runs an actor: the only place an
+actor runs is a pool worker's loop.
+
+### How upstream gets an answer out of an actor
+
+`liboffs/src/Network/peer_book.c` is the reference. A caller that is not
+the owning actor sends a request that carries a reply block and waits on
+its condition variable:
+
+```c
+typedef struct peer_book_reply_t {
+  platform_mutex_t* mutex;
+  platform_condvar_t* cv;
+  int done;
+  int orphaned;
+} peer_book_reply_t;
+```
+
+The reply block is embedded as the FIRST member of the request payload.
+The caller waits; the actor fills the answer in, signals, and the caller
+frees the request. On a timeout the caller sets `orphaned` and frees
+nothing — the actor frees the request when it is done with it. Upstream
+deep-copies the request's inputs for the same reason: a timed-out
+request may still be applied, and it must not read the caller's stack.
+
+Three shapes, and which one a call uses depends on who calls it:
+
+| The caller | The answer | The shape |
+|---|---|---|
+| another actor | none needed | `actor_send`, and move on |
+| another actor | needed | the call belongs to the *owning* actor — call its impl directly |
+| not an actor | needed | the round trip: request + condvar |
+
+The middle row is why the channel manager's notice handlers call
+`add_tombstone_impl` and `destroy_channel_impl` directly: a message to
+the actor that is already running would wait for an answer the actor
+cannot give while it is inside that dispatch.
+
+### What landed
+
+- `src/Actor/actor_reply.h` — the reply plumbing, shared: the request
+  block, the round trip, and the completion the dispatch calls. The
+  algorithm is upstream's peer book one, with upstream's three ownership
+  cases.
+- The connection, the session and the manager answer their callers over
+  a round trip now. Their answers travel with the request, not through
+  out-fields on a shared struct — twenty-two out-fields went away.
+- The session's channel fan-out does not wait any more: it hands the
+  deliver request to the session's actor and moves on, the way upstream's
+  fan-out does.
+- `actor_run_inline` is gone from the actor API, and so is the
+  thread-local that tracked the actor an inline caller was running. The
+  actor API is upstream's, plus the new reply plumbing.
+- An actor now needs a pool: the connection, the session and the manager
+  reject a NULL pool, because a caller that waits for an answer needs a
+  worker to produce it.
+
+### Build
+
+Green, 25/25 ctest.
