@@ -1121,3 +1121,40 @@ callbacks add and remove clients. Those locks stay.
 ### Build
 
 Green, 25/25 ctest.
+
+## Phase 2 (2.20) — the Quasar overlay gets an actor, and the wheel's lock survives
+
+The overlay was the last big mutex in the tree: 20 lock sites, and the
+route message carried a mutex of its own. Upstream keeps the gossip
+inside the network actor for the same reason.
+
+- The overlay has an actor, and the pool that runs it comes from the
+  owner — the channel hands down the pool it got for its protocol.
+- The public calls (subscribe, unsubscribe, publish, propagate, tick and
+  the neighbour-filter accessors) are round trips. The inbound events —
+  the gossip, a routed message — are handed over.
+- The route message's own mutex is gone: the message lives on the actor
+  while it is walked.
+
+### Two things the compiler had been pointing at
+
+**The timing wheel handed the inner wheels the *address* of the
+hierarchical wheel's lock and condvar instead of the pointers.** The
+inner wheel then locked the pointer field as if it were a mutex: the
+pthread state was written over the wheel's lock pointer, and the wheel
+was left with a destroyed lock. The compiler had been warning about the
+incompatible pointer type since before this work started.
+
+**A round trip from inside an actor's own dispatch waits for an answer
+the actor cannot give.** The gossip's outbound callback runs inside the
+protocol's dispatch and sends through the protocol's public API. The
+protocol now checks whether it is already on its own actor's thread and
+runs the handler directly when it is.
+
+The same rule covers a *nested* round trip: the channel manager's actor
+calls the overlay's actor, so the pool needs more than one worker. The
+daemon's pool has one per core; the test pools now have two.
+
+### Build
+
+Green, 25/25 ctest, quasar suite 52/52.
