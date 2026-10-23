@@ -4,6 +4,14 @@
 #include <msquic.h>
 #include <stdbool.h>
 
+/* A C++ translation unit that reaches this header sees C++ linkage
+ * otherwise, and asks the linker for mangled symbols the library does
+ * not define. The same guard the actor, message, message-queue and
+ * scheduler headers carry. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Process-wide reference-counted wrapper around the MSQUIC API table and
 // per-app-identity registrations.
 //
@@ -39,4 +47,10 @@ void poseidon_msquic_close_registration(const char* app_name);
  */
 const struct QUIC_API_TABLE* poseidon_msquic_api(void);
 
-#endif // POSEIDON_MSQUIC_H
+
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* POSEIDON_MSQUIC_H */

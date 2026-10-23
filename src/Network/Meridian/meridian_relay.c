@@ -150,6 +150,11 @@ meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
     ATOMIC_STORE(&relay->connected, 0);
     relay->on_datagram = NULL;
     relay->on_datagram_ctx = NULL;
+    relay->max_retries = (config != NULL) ? config->max_retries : 0;
+    relay->retry_count = 0;
+    relay->retry_delay_ms = (config != NULL) ? config->retry_delay_ms : 0;
+    relay->shutdown_pending = 0;
+    relay->wheel = (config != NULL) ? config->wheel : NULL;
     relay->pool = pool;
     relay->own_pool = NULL;
 
@@ -258,7 +263,11 @@ meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
 void meridian_relay_destroy(meridian_relay_t* relay) {
     if (relay == NULL) return;
 
-    refcounter_dereference(&relay->refcounter);
+    /* The client is going away: no retry may fire from here on. */
+    relay->shutdown_pending = 1;
+    ATOMIC_STORE(&relay->running, 0);
+
+    refcounter_dereference((refcounter_t*)relay);
     if (refcounter_count(&relay->refcounter) == 0) {
         // Disconnect if connected
         if (ATOMIC_LOAD(&relay->connected)) {
@@ -296,6 +305,12 @@ int meridian_relay_connect(meridian_relay_t* relay) {
     if (relay == NULL) return -1;
 
     if (ATOMIC_LOAD(&relay->connected)) return -1;
+
+    ATOMIC_STORE(&relay->running, 1);
+    /* A fresh attempt starts with a fresh budget: upstream resets the
+     * counter when the connection comes up
+     * (liboffs/src/Network/relay_client.c:255). */
+    relay->retry_count = 0;
 
     // Open QUIC connection. The handle is kept in a local until the
     // connection is published under the lock: an msquic call must never
@@ -340,6 +355,12 @@ int meridian_relay_connect(meridian_relay_t* relay) {
 
 int meridian_relay_disconnect(meridian_relay_t* relay) {
     if (relay == NULL) return -1;
+
+    /* The application asked for the shutdown: the retry must not fire
+     * while the connection is going away. Upstream marks the same flag
+     * before it tears the client down
+     * (liboffs/src/Network/relay_client.c). */
+    relay->shutdown_pending = 1;
 
     // Take the connection handle out of the relay and close it outside
     // the lock. msquic may fire SHUTDOWN_COMPLETE synchronously, and
@@ -543,6 +564,25 @@ bool meridian_relay_is_connected(meridian_relay_t* relay) {
 }
 
 /**
+ * The backoff fired: the reconnect is the actor's work.
+ *
+ * The wheel calls this on its own thread, so the reconnect is handed to
+ * the actor as an event — the same way every other piece of work reaches
+ * the relay.
+ */
+static void relay_retry_fire(void* ctx) {
+    meridian_relay_t* relay = (meridian_relay_t*)ctx;
+    if (relay == NULL) return;
+
+    message_t msg = {
+        .type = MERIDIAN_RELAY_RETRY,
+        .payload = NULL,
+        .payload_destroy = NULL,
+    };
+    actor_send(&relay->actor, &msg);
+}
+
+/**
  * Hands the relay's address response to the rendezvous handle's actor.
  *
  * This is upstream's shape: the relay client posts the address response
@@ -650,6 +690,13 @@ static void relay_process_uni_message(meridian_relay_t* relay,
 
             if (addr_resp != NULL) {
                 ATOMIC_STORE(&relay->local_endpoint_id, addr_resp->endpoint_id);
+
+                /* The relay's view of this node's address: the client
+                 * keeps it, the way upstream's relay client keeps its
+                 * reflexive_addr and reflexive_port
+                 * (liboffs/src/Network/relay_client.h). */
+                relay->reflexive_addr = addr_resp->reflexive_addr;
+                relay->reflexive_port = addr_resp->reflexive_port;
 
                 relay_post_addr_response(relay,
                                          addr_resp->reflexive_addr,
@@ -893,6 +940,8 @@ RelayConnectionCallback(HQUIC Connection, void* Context,
     switch (Event->Type) {
     case QUIC_CONNECTION_EVENT_CONNECTED: {
         ATOMIC_STORE(&relay->connected, 1);
+        /* The connection came up: the retry budget starts over. */
+        relay->retry_count = 0;
 
         // Ask the relay server for our reflexive address. The request is
         // handed to the relay's actor so it is not built on msquic's
@@ -910,6 +959,17 @@ RelayConnectionCallback(HQUIC Connection, void* Context,
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
         ATOMIC_STORE(&relay->connected, 0);
+        /* The relay dropped us. Schedule a retry, unless the application
+         * asked for the shutdown or the budget is spent: a bounced relay
+         * server orphans the client until the process restarts, and the
+         * retry budget bounds the loop for a relay that is gone for good.
+         * Upstream counts the same two shutdown events
+         * (liboffs/src/Network/relay_client.c). */
+        if (!relay->shutdown_pending && relay->retry_count < relay->max_retries) {
+            relay->retry_count++;
+            log_info("Relay: scheduling retry %u/%u", relay->retry_count,
+                     relay->max_retries);
+        }
         return QUIC_STATUS_SUCCESS;
 
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
@@ -917,6 +977,21 @@ RelayConnectionCallback(HQUIC Connection, void* Context,
         platform_mutex_lock(relay->lock);
         relay->connection = NULL;
         platform_mutex_unlock(relay->lock);
+
+        /* If a retry is scheduled, arm the backoff. The wheel fires it
+         * on its own thread and the reconnect is the actor's work, so no
+         * worker sleeps through the delay. */
+        if (relay->retry_count > 0 && relay->retry_count <= relay->max_retries &&
+            !relay->shutdown_pending && ATOMIC_LOAD(&relay->running) &&
+            relay->wheel != NULL) {
+            uint32_t delay_ms = relay->retry_delay_ms *
+                                (1u << (relay->retry_count - 1));
+            log_info("Relay: reconnecting in %u ms (attempt %u/%u)", delay_ms,
+                     relay->retry_count, relay->max_retries);
+            hierarchical_timing_wheel_set_timer(
+                relay->wheel, relay, relay_retry_fire, NULL,
+                (timer_duration_t){.milliseconds = delay_ms});
+        }
         return QUIC_STATUS_SUCCESS;
 
     case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {

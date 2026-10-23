@@ -14,6 +14,7 @@ extern "C" {
 #include "../../RefCounter/refcounter.h"
 #include "../../Platform/platform_thread.h"
 #include "../../Scheduler/scheduler.h"
+#include "../../Actor/actor.h"
 #include "meridian_stream.h"
 #include "msquic.h"
 
@@ -65,8 +66,17 @@ typedef struct meridian_relay_server_t {
     size_t num_clients;                                   /**< Current number of connected clients */
     uint32_t next_endpoint_id;                            /**< Next endpoint ID to assign */
     meridian_relay_server_stats_t stats;                  /**< Runtime statistics */
-    platform_mutex_t* lock;                               /**< Thread safety lock for client list */
+    platform_mutex_t* clients_lock;                       /**< Protects the client table.
+                                The msquic callbacks run on their own threads and
+                                mutate the table, so the table needs a lock —
+                                upstream's relay server keeps the same one
+                                (liboffs/src/Network/Relay/relay_server.h). */
     scheduler_pool_t* pool;                              /**< Scheduler pool that runs the stream actors */
+    actor_t actor;                                        /**< The server's actor. Upstream's
+                                relay server has one too, and its dispatch is
+                                empty: the client table is guarded by the lock,
+                                not by the actor. */
+    ATOMIC(uint8_t) running;                              /**< True while the server is up */
 } meridian_relay_server_t;
 
 /**

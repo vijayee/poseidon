@@ -10,6 +10,7 @@
 #include "meridian_rendv.h"
 #include "meridian_stream.h"
 #include "../../Actor/actor.h"
+#include "../../Time/wheel.h"
 #include "msquic.h"
 
 #ifdef __cplusplus
@@ -47,6 +48,14 @@ typedef struct meridian_relay_config_t {
     uint32_t keepalive_interval_ms;   /**< Keepalive ping interval in milliseconds */
     const char* tls_key_path;        /**< Path to TLS private key PEM (NULL = insecure) */
     const char* tls_cert_path;       /**< Path to TLS certificate PEM (NULL = insecure) */
+    uint8_t max_retries;               /**< How many times to reconnect after the
+                                relay drops the connection. Upstream's relay
+                                client takes the same budget
+                                (liboffs/src/Network/relay_client.h). */
+    uint32_t retry_delay_ms;          /**< The first backoff; each retry doubles
+                                it. */
+    hierarchical_timing_wheel_t* wheel; /**< The wheel that fires the backoff, so
+                                no pool worker sleeps through it. */
 } meridian_relay_config_t;
 
 // ============================================================================
@@ -78,6 +87,26 @@ typedef struct meridian_relay_t {
     meridian_relay_config_t config;                /**< Client configuration */
     ATOMIC(uint32_t) local_endpoint_id;             /**< Assigned endpoint ID from relay */
     ATOMIC(uint8_t) connected;                      /**< Connection state to relay */
+    ATOMIC(uint8_t) running;                        /**< True while the client is up. The
+                                retry never fires once this is clear — upstream
+                                keeps the same flag
+                                (liboffs/src/Network/relay_client.h). */
+    uint32_t reflexive_addr;                        /**< The address the relay saw
+                                (server-reflexive, 0 if unknown). Upstream's
+                                relay client keeps it here. */
+    uint16_t reflexive_port;                        /**< The port the relay saw. */
+    /* The retry budget: a relay that bounces orphans the client until the
+     * process restarts, so the client reconnects on its own — a bounded
+     * number of times, with an exponential backoff. Upstream's relay
+     * client has the same state and the same reason
+     * (liboffs/src/Network/relay_client.c). */
+    uint8_t max_retries;                            /**< How many times to retry. */
+    uint8_t retry_count;                            /**< How many have been tried. */
+    uint32_t retry_delay_ms;                        /**< The first backoff; each retry doubles it. */
+    uint8_t shutdown_pending;                        /**< 1 when the application asked to
+                                disconnect: a shutdown never retries. */
+    hierarchical_timing_wheel_t* wheel;             /**< The wheel that fires the retry's
+                                backoff, so no worker sleeps through it. */
     meridian_relay_datagram_cb_t on_datagram;       /**< Datagram received callback */
     void* on_datagram_ctx;                          /**< User context for datagram callback */
     meridian_stream_entry_t** active_streams;        /**< Tracking array for open streams */

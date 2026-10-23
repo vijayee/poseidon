@@ -389,6 +389,10 @@ typedef enum {
    * returns its result, the way upstream's relay client connect and
    * disconnect do. */
   MERIDIAN_RELAY_ADDR_REQUEST,
+  /* The relay connection dropped: reconnect, after the backoff. Upstream's
+   * relay client has the same event (liboffs/src/Network/relay_client.c:
+   * RELAY_CLIENT_RETRY). */
+  MERIDIAN_RELAY_RETRY,
 
   /* ========================================================================
    * 2.18 Meridian protocol — actor messages
