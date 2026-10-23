@@ -5,6 +5,10 @@
 #ifndef POSEIDON_SCHEDULER_H
 #define POSEIDON_SCHEDULER_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "deque.h"
 #include "../Actor/actor.h"
 #include "../Platform/platform.h"
@@ -89,5 +93,9 @@ void scheduler_inject(scheduler_pool_t* pool, actor_t* actor);
 void scheduler_pool_defer_cleanup(scheduler_pool_t* pool, void* object, void (*destructor)(void*));
 
 scheduler_t* scheduler_get_current(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // POSEIDON_SCHEDULER_H

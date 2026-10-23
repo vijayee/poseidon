@@ -10,6 +10,10 @@
 #ifndef POSEIDON_MESSAGE_QUEUE_H
 #define POSEIDON_MESSAGE_QUEUE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "message.h"
 #include "../Util/atomic_compat.h"
 #include <stdbool.h>
@@ -82,5 +86,9 @@ void message_queue_destroy(message_queue_t* queue);
  * byte-for-byte the liboffs layout so that poseidon's Workers/, Time/, and
  * downstream subsystems can adopt the same mailbox protocol.
  * ------------------------------------------------------------------------- */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // POSEIDON_MESSAGE_QUEUE_H

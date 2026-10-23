@@ -7,6 +7,10 @@
 #ifndef POSEIDON_MESSAGE_H
 #define POSEIDON_MESSAGE_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 
 /* Forward declarations. Subsystem headers are pulled in by the actor /
@@ -385,6 +389,21 @@ typedef enum {
    * returns its result, the way upstream's relay client connect and
    * disconnect do. */
   MERIDIAN_RELAY_ADDR_REQUEST,
+
+  /* ========================================================================
+   * 2.18 Meridian protocol — actor messages
+   * ========================================================================
+   *
+   * The protocol owns the peer and stream tables, the way upstream's
+   * network actor owns the peer list. msquic delivers the connection and
+   * the stream events on its own worker threads; those events are handed
+   * to the protocol's actor, which mutates the tables on its own thread.
+   *
+   * Payload structs live in
+   * src/Network/Meridian/meridian_protocol_messages.h; this enum only
+   * carries the type tags. */
+  /* A peer connected. The actor adds it to the connected-peer table. */
+  MERIDIAN_PROTOCOL_PEER_ADDED,
 } message_type_e;
 
 /* Base message. The actor's dispatch receives one of these; type selects the
@@ -395,6 +414,10 @@ typedef struct message_t {
   void* payload;
   void (*payload_destroy)(void*);
 } message_t;
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* POSEIDON_MESSAGE_H */
 
@@ -531,6 +554,13 @@ typedef struct message_t {
  * families are unchanged. The QUIC family mirrors the WebTransport one:
  * msquic owns the I/O and delivers the data through the transport's
  * callbacks, so DATA carries the bytes themselves.
+ *
+ * Phase 2 (commit 2.18) adds the MERIDIAN_PROTOCOL_* family (1 entry)
+ * above the local-modifications block. The enum is still the global
+ * message_type_e; the payload structs live in the per-subsystem header
+ * Network/Meridian/meridian_protocol_messages.h, keeping message.h free
+ * of Meridian / msquic / stream dependencies. The change is purely
+ * additive to the enum.
  *
  * Phase 2 (commit 2.16) adds the MERIDIAN_RELAY_* family (1 entry) above
  * the local-modifications block. The enum is still the global

@@ -9,6 +9,10 @@
 #ifndef POSEIDON_ACTOR_H
 #define POSEIDON_ACTOR_H
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "message_queue.h"
 #include "../Util/atomic_compat.h"
 #include <stdbool.h>
@@ -118,5 +122,9 @@ void backpressure_release(actor_t* actor);
  * the liboffs layout so that poseidon's Workers/, Time/, and downstream
  * subsystems can adopt the same mailbox protocol.
  * ------------------------------------------------------------------------- */
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif // POSEIDON_ACTOR_H
