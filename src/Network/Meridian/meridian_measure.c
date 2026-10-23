@@ -32,7 +32,6 @@ meridian_latency_cache_t* meridian_latency_cache_create(size_t capacity) {
 
     cache->capacity = capacity;
     cache->count = 0;
-    cache->lock = platform_mutex_create();;
     refcounter_init(&cache->refcounter);
 
     return cache;
@@ -49,13 +48,10 @@ void meridian_latency_cache_destroy(meridian_latency_cache_t* cache) {
 
     refcounter_dereference(&cache->refcounter);
     if (refcounter_count(&cache->refcounter) == 0) {
-        platform_mutex_lock(cache->lock);
         if (cache->entries) {
             free(cache->entries);
             cache->entries = NULL;
         }
-        platform_mutex_unlock(cache->lock);
-        platform_mutex_destroy(cache->lock);;
         free(cache);
     }
 }
@@ -74,7 +70,6 @@ int meridian_latency_cache_insert(meridian_latency_cache_t* cache,
                                    const meridian_node_t* node, uint32_t latency_us) {
     if (cache == NULL || node == NULL) return -1;
 
-    platform_mutex_lock(cache->lock);
 
     // Check if node already exists - update in place
     for (size_t i = 0; i < cache->count; i++) {
@@ -82,7 +77,6 @@ int meridian_latency_cache_insert(meridian_latency_cache_t* cache,
             cache->entries[i].port == node->port) {
             gettimeofday(&cache->entries[i].timestamp, NULL);
             cache->entries[i].latency_us = latency_us;
-            platform_mutex_unlock(cache->lock);
             return 0;
         }
     }
@@ -114,7 +108,6 @@ int meridian_latency_cache_insert(meridian_latency_cache_t* cache,
         gettimeofday(&cache->entries[oldest_idx].timestamp, NULL);
     }
 
-    platform_mutex_unlock(cache->lock);
     return 0;
 }
 
@@ -130,18 +123,15 @@ int meridian_latency_cache_get(meridian_latency_cache_t* cache,
                                  const meridian_node_t* node, uint32_t* latency_us) {
     if (cache == NULL || node == NULL || latency_us == NULL) return -1;
 
-    platform_mutex_lock(cache->lock);
 
     for (size_t i = 0; i < cache->count; i++) {
         if (cache->entries[i].addr == node->addr &&
             cache->entries[i].port == node->port) {
             *latency_us = cache->entries[i].latency_us;
-            platform_mutex_unlock(cache->lock);
             return 0;
         }
     }
 
-    platform_mutex_unlock(cache->lock);
     return -1;
 }
 
@@ -158,7 +148,6 @@ void meridian_latency_cache_evict_expired(meridian_latency_cache_t* cache) {
     struct timeval now;
     gettimeofday(&now, NULL);
 
-    platform_mutex_lock(cache->lock);
 
     size_t write_idx = 0;
     for (size_t read_idx = 0; read_idx < cache->count; read_idx++) {
@@ -176,7 +165,6 @@ void meridian_latency_cache_evict_expired(meridian_latency_cache_t* cache) {
     }
 
     cache->count = write_idx;
-    platform_mutex_unlock(cache->lock);
 }
 
 // ============================================================================

@@ -63,7 +63,6 @@ typedef struct meridian_latency_cache_t {
     meridian_measure_entry_t* entries;    /**< Array of cache entries */
     size_t capacity;                      /**< Maximum entries */
     size_t count;                         /**< Current number of entries */
-    platform_mutex_t* lock;             /**< Thread-safe access */
 } meridian_latency_cache_t;
 
 // ============================================================================

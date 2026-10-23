@@ -78,6 +78,29 @@ typedef struct meridian_protocol_send_measure_msg_t {
     uint16_t target_port;  /**< The peer's port. */
 } meridian_protocol_send_measure_msg_t;
 
+/* A measurement reply arrived. The actor matches it against the pending
+ * measurements, records the latency and delivers the completion. */
+typedef struct meridian_protocol_measure_response_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
+    uint64_t query_id;     /**< The measurement's id. */
+} meridian_protocol_measure_response_msg_t;
+
+/* Record a measurement result in the latency cache. */
+typedef struct meridian_protocol_measure_result_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
+    void* node;            /**< The measured node (borrowed). */
+    uint32_t latency_us;   /**< The measured latency. */
+    bool success;          /**< Whether the measurement succeeded. */
+} meridian_protocol_measure_result_msg_t;
+
+/* Find the closest node in the ring set. */
+typedef struct meridian_protocol_find_closest_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
+    uint32_t target_addr;  /**< The address to look for. */
+    uint16_t target_port;  /**< The port to look for. */
+    void* out_node;        /**< The actor writes the found node here. */
+} meridian_protocol_find_closest_msg_t;
+
 /* Run the gossip tick. The actor ticks the scheduler and, when it is
  * time, sends a gossip to every peer. */
 typedef struct meridian_protocol_gossip_tick_msg_t {

@@ -230,6 +230,83 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
             }
             break;
         }
+        case MERIDIAN_PROTOCOL_MEASURE_RESPONSE: {
+            meridian_protocol_measure_response_msg_t* p =
+                (meridian_protocol_measure_response_msg_t*)msg->payload;
+            for (size_t i = 0; i < protocol->num_pending_measures; i++) {
+                meridian_measure_request_t* req = protocol->pending_measures[i];
+                if (req != NULL && req->query_id == p->query_id) {
+                    struct timeval now;
+                    gettimeofday(&now, NULL);
+                    struct timeval elapsed;
+                    timersub(&now, &req->start_time, &elapsed);
+                    uint32_t rtt_us = (uint32_t)(elapsed.tv_sec * 1000000 +
+                                                 elapsed.tv_usec);
+
+                    meridian_measure_result_t meas_result;
+                    meas_result.node = req->target;
+                    meas_result.latency_us = rtt_us;
+                    meas_result.success = true;
+
+                    meridian_measure_callback_t cb = req->callback;
+                    void* ctx = req->ctx;
+                    meridian_node_t* node = req->target;
+                    if (node) {
+                        refcounter_reference(&node->refcounter);
+                    }
+
+                    protocol->pending_measures[i] =
+                        protocol->pending_measures[protocol->num_pending_measures - 1];
+                    protocol->pending_measures[protocol->num_pending_measures - 1] = NULL;
+                    protocol->num_pending_measures--;
+
+                    if (node) {
+                        meridian_latency_cache_insert(protocol->latency_cache,
+                                                      node, rtt_us);
+                    }
+                    if (cb) {
+                        cb(ctx, &meas_result);
+                    }
+
+                    meridian_measure_request_destroy(req);
+                    if (node) {
+                        meridian_node_destroy(node);
+                    }
+                    break;
+                }
+            }
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_PROTOCOL_MEASURE_RESULT: {
+            meridian_protocol_measure_result_msg_t* p =
+                (meridian_protocol_measure_result_msg_t*)msg->payload;
+            if (p->success && p->node != NULL) {
+                meridian_latency_cache_insert(protocol->latency_cache,
+                                              (meridian_node_t*)p->node,
+                                              p->latency_us);
+            }
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_PROTOCOL_FIND_CLOSEST: {
+            meridian_protocol_find_closest_msg_t* p =
+                (meridian_protocol_find_closest_msg_t*)msg->payload;
+            p->out_node = meridian_ring_set_find_closest(protocol->ring_set,
+                                                          p->target_addr,
+                                                          p->target_port);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
         case MERIDIAN_PROTOCOL_GOSSIP_TICK: {
             meridian_protocol_gossip_tick_msg_t* p =
                 (meridian_protocol_gossip_tick_msg_t*)msg->payload;
@@ -1133,7 +1210,32 @@ meridian_node_t* meridian_protocol_find_closest(meridian_protocol_t* protocol,
                                                 uint32_t target_addr, uint16_t target_port) {
     if (protocol == NULL) return NULL;
 
-    return meridian_ring_set_find_closest(protocol->ring_set, target_addr, target_port);
+    /* The ring set belongs to the protocol's actor. */
+    meridian_protocol_find_closest_msg_t* request =
+        (meridian_protocol_find_closest_msg_t*)
+        get_clear_memory(sizeof(meridian_protocol_find_closest_msg_t));
+    if (request == NULL) return NULL;
+    request->target_addr = target_addr;
+    request->target_port = target_port;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return NULL;
+    }
+
+    int trip = actor_round_trip(&protocol->actor, MERIDIAN_PROTOCOL_FIND_CLOSEST,
+                                &request->reply, MERIDIAN_PROTOCOL_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return NULL;
+    }
+    if (trip != 0) return NULL;  /* the actor owns the request now */
+
+    meridian_node_t* node = (meridian_node_t*)request->out_node;
+    actor_reply_destroy(&request->reply);
+    free(request);
+    return node;
 }
 
 meridian_node_t** meridian_protocol_get_connected_peers(meridian_protocol_t* protocol,
@@ -1246,50 +1348,31 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
     meridian_packet_t pkt;
     if (meridian_packet_decode(item, &pkt) == 0) {
         if (pkt.type == MERIDIAN_PACKET_TYPE_RET_PING) {
-            // PONG response: find matching pending measure and compute RTT
-            platform_mutex_lock(protocol->lock);
-            for (size_t i = 0; i < protocol->num_pending_measures; i++) {
-                meridian_measure_request_t* req = protocol->pending_measures[i];
-                if (req != NULL && req->query_id == pkt.query_id) {
-                    struct timeval now;
-                    gettimeofday(&now, NULL);
-                    struct timeval elapsed;
-                    timersub(&now, &req->start_time, &elapsed);
-                    uint32_t rtt_us = (uint32_t)(elapsed.tv_sec * 1000000 + elapsed.tv_usec);
-
-                    meridian_measure_result_t meas_result;
-                    meas_result.node = req->target;
-                    meas_result.latency_us = rtt_us;
-                    meas_result.success = true;
-
-                    meridian_measure_callback_t cb = req->callback;
-                    void* ctx = req->ctx;
-                    meridian_node_t* node = req->target;
-                    if (node) {
-                        refcounter_reference(&node->refcounter);
+            // PONG response: the pending measurements belong to the
+            // protocol's actor, so the reply is handed over.
+            meridian_protocol_measure_response_msg_t* request =
+                (meridian_protocol_measure_response_msg_t*)
+                get_clear_memory(sizeof(meridian_protocol_measure_response_msg_t));
+            if (request != NULL) {
+                request->query_id = pkt.query_id;
+                if (actor_reply_init(&request->reply) == 0) {
+                    /* The caller does not wait: the request is the
+                     * actor's to free. */
+                    request->reply.orphaned = 1;
+                    message_t msg = {
+                        .type = MERIDIAN_PROTOCOL_MEASURE_RESPONSE,
+                        .payload = request,
+                        .payload_destroy = NULL,
+                    };
+                    if (!actor_send(&protocol->actor, &msg)) {
+                        actor_reply_destroy(&request->reply);
                     }
-
-                    // Remove from pending list
-                    protocol->pending_measures[i] =
-                        protocol->pending_measures[protocol->num_pending_measures - 1];
-                    protocol->pending_measures[protocol->num_pending_measures - 1] = NULL;
-                    protocol->num_pending_measures--;
-
-                    platform_mutex_unlock(protocol->lock);
-
-                    // Insert into latency cache and invoke callback
-                    meridian_latency_cache_insert(protocol->latency_cache, node, rtt_us);
-                    if (cb) {
-                        cb(ctx, &meas_result);
-                    }
-
-                    meridian_measure_request_destroy(req);
-                    meridian_node_destroy(node);
-                    cbor_decref(&item);
-                    return 0;
+                } else {
+                    free(request);
                 }
             }
-            platform_mutex_unlock(protocol->lock);
+            cbor_decref(&item);
+            return 0;
         }
     }
 
@@ -1390,11 +1473,31 @@ int meridian_protocol_on_measure_result(meridian_protocol_t* protocol,
                                          const meridian_measure_result_t* result) {
     if (protocol == NULL || result == NULL) return -1;
 
-    if (result->success && result->node) {
-        meridian_latency_cache_insert(protocol->latency_cache,
-                                      result->node, result->latency_us);
+    /* The latency cache belongs to the protocol's actor. */
+    meridian_protocol_measure_result_msg_t* request =
+        (meridian_protocol_measure_result_msg_t*)
+        get_clear_memory(sizeof(meridian_protocol_measure_result_msg_t));
+    if (request == NULL) return -1;
+    request->node = (void*)result->node;
+    request->latency_us = result->latency_us;
+    request->success = result->success;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
     }
 
+    int trip = actor_round_trip(&protocol->actor, MERIDIAN_PROTOCOL_MEASURE_RESULT,
+                                &request->reply, MERIDIAN_PROTOCOL_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
     return 0;
 }
 
