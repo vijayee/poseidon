@@ -1030,3 +1030,65 @@ cannot give while it is inside that dispatch.
 ### Build
 
 Green, 25/25 ctest.
+
+## Phase 2 (2.18) — the Meridian protocol gets an actor
+
+The protocol is the biggest Meridian subsystem on the mutex: 35 lock
+sites in one file, and more in the gossip, query, measure and ring
+files it drives. Upstream's counterpart is `network_t` — an actor, a
+scheduler pool, the peer state embedded in the struct, atomic flags,
+and no state mutex at all.
+
+### The shape
+
+- `meridian_protocol_t` embeds an `actor_t` and a `scheduler_pool_t*`.
+  The pool comes from the owner, the way upstream's network takes it:
+  the channel manager has one, `poseidon_channel_create` hands it down,
+  and the protocol rejects a NULL pool — a caller that waits for an
+  answer needs a worker to produce it.
+- `running` is an `ATOMIC(uint8_t)`, as upstream's is. It was a plain
+  bool read from threads that never took the lock.
+- The **peer table belongs to the actor**. The msquic listener callback
+  used to add a peer to it under the mutex; it now hands the event over
+  and moves on. Every other access is a round trip: connect, disconnect,
+  send, broadcast, send-measure and the peer snapshot.
+- The peer snapshot is the **actor's copy** now: the caller owns the
+  array and frees it. The contract is unchanged — an empty table still
+  yields an empty array, not NULL.
+- The send paths **copy their bytes into the request**: the actor may
+  still be holding a request after the caller has walked away, so
+  nothing in a request may point at the caller's stack.
+
+### What still takes the mutex
+
+The stream table, the pending measurements and the start/stop
+transition — the tables a **foreign thread** mutates. That is upstream's
+own split: `quic_listener_t` keeps a `conn_lock` for its connection
+table for exactly the same reason, and upstream's relay server keeps a
+`clients_lock` for its client table.
+
+### The rest of the Meridian tree, against upstream
+
+| Poseidon | Upstream | Upstream's answer |
+|---|---|---|
+| `meridian_protocol` | `network_t` | actor owns the state; a lock for the foreign-thread tables |
+| `meridian_gossip` (8) | the gossip inside `network_t` | inside the actor |
+| `meridian_query` (13) | the rings and the latency cache | inside the actor |
+| `meridian_measure` (10) | the latency cache | inside the actor |
+| `meridian_ring` | `ring_set_t` | inside the actor |
+| `meridian_rendv` (19) | `nat_detect` | it has an actor |
+| `quasar` (26) | the gossip inside `network_t` | inside the actor |
+| `subtopic` (13), `topic_alias` (10), `channel` (2) | — no upstream analogue: the channel layer is poseidon's own | the channel manager's actor |
+
+### A trap worth naming
+
+The actor, message, message-queue and scheduler headers had no
+`extern "C"` guard. A C++ translation unit that reached one of them —
+directly or through another header — saw C++ linkage, so the symbols it
+asked the linker for were the mangled ones, and the link failed on
+symbols the library does define. The guard makes the linkage the same
+however the header is reached.
+
+### Build
+
+Green, 25/25 ctest.
