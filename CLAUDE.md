@@ -1158,3 +1158,56 @@ daemon's pool has one per core; the test pools now have two.
 ### Build
 
 Green, 25/25 ctest, quasar suite 52/52.
+
+## Phase 2 (2.21) — a Meridian stream gets an actor
+
+The last of the three pieces. Upstream's stream is an actor: the public
+entry points post messages to it, and the stream's state is touched by
+exactly one thread. The Meridian stream was a receive buffer that the
+msquic callback filled in place and that the owner read back on the same
+thread.
+
+- The stream entry has an actor and a scheduler pool. The bytes that
+  arrive are posted to it — the request owns the copy, because the
+  caller's buffer is msquic's and is released as soon as the callback
+  returns.
+- The news that the peer finished sending is posted to it too, and the
+  actor hands the accumulated message to the owner's handler. **The
+  decode — the cbor work — now runs on the stream's actor, not on
+  msquic's worker.** That is what the project's cbor policy asks for.
+- The close goes through the same queue and waits for its answer, so
+  the message that says the peer finished sending reaches the owner
+  before the entry — and the buffer it points at — goes away.
+- The protocol, the relay client and the rendezvous handle own their
+  streams through the owner handler. The rendezvous hands the data on to
+  its own actor, because the registered callback is that actor's state.
+- The relay server takes a scheduler pool now, the way upstream's relay
+  server does, and the relay executable runs one.
+
+### The locks that are left are upstream's locks
+
+Upstream's rule, which this tree now follows: **a mutex is right where
+a foreign thread mutates the state, and nowhere else.** Every state an
+actor could own is owned by an actor now. What is left is exactly what
+upstream keeps:
+
+| Poseidon | Upstream's counterpart |
+|---|---|
+| `meridian_relay` — the stream table and the callbacks | the listener's `conn_lock` |
+| `meridian_relay_server` — the client table | `relay_server_t.clients_lock` |
+| `meridian_protocol` — the stream table, the start/stop transition | the listener's `conn_lock` |
+| the transports — `conn_lock`, `destroy_lock` | the same |
+| `subtopic`, `topic_alias` — the per-channel tables | no upstream analogue; the channel layer is poseidon's own |
+| `client_session` — the manager's session list | the listener's `conn_lock` |
+
+### One property to keep in mind
+
+The channel layer is a chain of actors — the manager, the channel's
+quasar, the protocol — so a call that goes through all of them nests
+three waits, and the pool needs a worker per level. The daemon's pool
+has one per core. Upstream does not have this problem: its network
+actor owns the gossip, the connections and the peers in one place.
+
+### Build
+
+Green, 25/25 ctest.
