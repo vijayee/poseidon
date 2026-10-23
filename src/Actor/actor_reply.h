@@ -113,6 +113,44 @@ void actor_reply_detach(actor_reply_t* reply);
 #define ACTOR_REQUEST_DETACHED 2
 
 /**
+ * A request that asks another actor for an answer and wants the answer
+ * delivered as a message to a THIRD actor — the one that is waiting.
+ *
+ * This is upstream's shape: the request carries the actor the answer
+ * belongs to, and the worker "replies to reply_to with a summary"
+ * (liboffs/src/OFFStreams/representation_actor.h, whose answer payload
+ * carries the source it came from, the way this one carries the token).
+ * It is Pony's shape too: the promise is an actor, the fulfilment is a
+ * message, and the waiting actor resumes when the message arrives
+ * (ponyc/packages/promises).
+ *
+ * The waiting actor is unscheduled while it waits — it holds no thread,
+ * and it is not running any actor while the answer is on its way. That
+ * is the whole point: a dispatch may have an answer without a worker
+ * waiting for it.
+ */
+typedef struct actor_answer_t {
+    actor_t* reply_to;    /**< The actor the answer belongs to. */
+    uint32_t reply_type;  /**< The message type the answer arrives as. */
+    void* token;          /**< The requester's own state, carried back. */
+    int result;           /**< The answer, written by the worker. */
+} actor_answer_t;
+
+/**
+ * Delivers the answer to the actor that asked for it.
+ *
+ * The worker fills in the result and sends the answer on. The answer
+ * travels as a message, so the actor that waits for it is not holding a
+ * thread: it is unscheduled until the message arrives, and it picks the
+ * answer up when it is next run.
+ *
+ * @param answer The answer block the request carried.
+ * @param result The worker's answer.
+ * @return true when the answer was sent.
+ */
+bool actor_answer_send(const actor_answer_t* answer, int result);
+
+/**
  * Sends a request to an actor, and waits for the answer — unless the
  * caller is inside a dispatch.
  *

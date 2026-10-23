@@ -265,6 +265,14 @@ void quasar_dispatch(void* state, message_t* msg) {
             free(p->data);
             p->topic = NULL;
             p->data = NULL;
+            if (p->answer.reply_to != NULL) {
+                /* The caller is an actor that cannot wait for the answer,
+                 * so the answer goes back as a message to it. */
+                actor_answer_send(&p->answer, p->reply.result);
+                actor_reply_destroy(&p->reply);
+                free(p);
+                break;
+            }
             if (actor_reply_complete(&p->reply)) {
                 actor_reply_destroy(&p->reply);
                 free(p);
@@ -550,6 +558,52 @@ int quasar_reconfigure(quasar_t* quasar, uint32_t max_hops, uint32_t alpha,
     int rc = request->reply.result;
     free(request);
     return rc;
+}
+
+int quasar_publish_reply_to(quasar_t* quasar, const uint8_t* topic,
+                            size_t topic_len, const uint8_t* data,
+                            size_t data_len, actor_t* reply_to,
+                            uint32_t reply_type, void* token) {
+    if (quasar == NULL || topic == NULL || data == NULL || reply_to == NULL) {
+        return -1;
+    }
+
+    meridian_quasar_publish_msg_t* request =
+        (meridian_quasar_publish_msg_t*)
+        get_clear_memory(sizeof(meridian_quasar_publish_msg_t));
+    if (request == NULL) return -1;
+    request->topic = (uint8_t*)get_memory(topic_len > 0 ? topic_len : 1);
+    request->data = (uint8_t*)get_memory(data_len > 0 ? data_len : 1);
+    if (request->topic == NULL || request->data == NULL) {
+        free(request->topic);
+        free(request->data);
+        free(request);
+        return -1;
+    }
+    memcpy(request->topic, topic, topic_len);
+    memcpy(request->data, data, data_len);
+    request->topic_len = topic_len;
+    request->data_len = data_len;
+    request->answer.reply_to = reply_to;
+    request->answer.reply_type = reply_type;
+    request->answer.token = token;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->topic);
+        free(request->data);
+        free(request);
+        return -1;
+    }
+
+    /* The request goes out and the answer comes back as a message: the
+     * caller does not wait, so it may be a dispatch. */
+    message_t message;
+    memset(&message, 0, sizeof(message));
+    message.type = MERIDIAN_QUASAR_PUBLISH;
+    message.payload = &request->reply;
+    message.payload_destroy = NULL;
+    actor_send(quasar->actor, &message);
+    return 0;
 }
 
 int quasar_propagate(quasar_t* quasar) {

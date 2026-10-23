@@ -39,6 +39,11 @@
 #define POSEIDON_CLIENT_SESSION_MSG_DELIVER           0x06
 #define POSEIDON_CLIENT_SESSION_MSG_CLEANUP_SUBS      0x07
 #define POSEIDON_CLIENT_SESSION_MSG_DISPATCH_EVENT    0x08
+/* The overlay's answer to a publish. It comes back as a message to the
+ * session's actor, the way upstream's reply_to delivers an answer: the
+ * request that is waiting for it stays alive, and the actor that waits
+ * for it holds no thread. */
+#define POSEIDON_CLIENT_SESSION_MSG_PUBLISH_ANSWER    0x09
 
 // Every request the public API sends is a heap-allocated shell whose FIRST
 // member is the reply block: the wrapper waits on the block's condition
@@ -60,6 +65,10 @@ typedef struct client_session_msg_handle_request_t {
                                 The actor frees it. */
     cbor_item_t* response; /**< The actor's answer. The caller takes it. */
     int rc;                /**< The actor writes the request outcome here. */
+    int pending;           /**< The answer is still to come: the request
+                                stays alive until it does. */
+    struct poseidon_channel_t* channel; /**< The channel the publish went
+                                to; the answer clears its publisher. */
 } client_session_msg_handle_request_t;
 
 typedef struct client_session_msg_dispatch_event_t {
@@ -237,6 +246,11 @@ static void handle_has_loopback(client_session_t* s, client_session_msg_topic_t*
     }
 }
 
+/* Builds the response and records the outcome. Defined below the
+ * handlers that use it. */
+void finish_handle_request(client_session_msg_handle_request_t* p,
+                            int rc, cbor_item_t* response);
+
 static void handle_handle_request(client_session_t* s,
                                   client_session_msg_handle_request_t* p) {
     p->response = NULL;
@@ -294,14 +308,28 @@ static void handle_handle_request(client_session_t* s,
         if (s->manager == NULL) { rc = -1; break; }
         poseidon_channel_t* ch = find_channel_by_topic(s->manager, p->frame->topic_path);
         if (ch == NULL) { rc = -1; break; }
-        // Set publisher session for self-delivery filtering.
+        // Set publisher session for self-delivery filtering. It stays set
+        // until the overlay has applied the publish: the overlay delivers
+        // the message to the local subscribers while it applies it, and
+        // the answer is what says it is done.
         ch->publisher_session = (void*)s;
-        rc = poseidon_channel_publish(ch,
-                                      (const uint8_t*)p->frame->topic_path,
-                                      strlen(p->frame->topic_path),
-                                      p->frame->payload, p->frame->payload_len);
-        ch->publisher_session = NULL;
-        break;
+        if (ch->quasar == NULL ||
+            quasar_publish_reply_to(ch->quasar,
+                                   (const uint8_t*)p->frame->topic_path,
+                                   strlen(p->frame->topic_path),
+                                   p->frame->payload, p->frame->payload_len,
+                                   &s->actor,
+                                   POSEIDON_CLIENT_SESSION_MSG_PUBLISH_ANSWER,
+                                   p) != 0) {
+            ch->publisher_session = NULL;
+            rc = -1;
+            break;
+        }
+        /* The answer is still to come: the request stays alive, and the
+         * response is built when the answer arrives. */
+        p->pending = 1;
+        p->channel = ch;
+        return;
     }
     case CLIENT_METHOD_ALIAS_REGISTER: {
         if (s->manager == NULL) { rc = -1; break; }
@@ -431,6 +459,14 @@ static void handle_handle_request(client_session_t* s,
         break;
     }
 
+    finish_handle_request(p, rc, response);
+}
+
+/* Builds the response and records the outcome. The request's frame is
+ * still alive here: the answer path needs the request id to build the
+ * response the caller is waiting for. */
+void finish_handle_request(client_session_msg_handle_request_t* p,
+                            int rc, cbor_item_t* response) {
     if (response == NULL) {
         response = client_protocol_encode_response(p->frame->request_id,
                                                    (rc == 0) ? CLIENT_ERROR_OK : CLIENT_ERROR_INVALID_PARAMS,
@@ -551,6 +587,39 @@ static void client_session_dispatch(void* state, message_t* msg) {
         client_session_msg_handle_request_t* p =
             (client_session_msg_handle_request_t*)msg->payload;
         handle_handle_request(s, p);
+        if (p->pending) {
+            /* The overlay's answer is still to come. The request stays
+             * alive: the answer arrives as a message and finishes it. */
+            break;
+        }
+        free(p->frame);
+        p->frame = NULL;
+        if (actor_reply_complete(&p->reply)) {
+            /* The caller never got the answer: the actor disposes of it. */
+            if (p->response != NULL) cbor_decref(&p->response);
+            p->response = NULL;
+            actor_reply_destroy(&p->reply);
+            free(p);
+        }
+        break;
+    }
+    case POSEIDON_CLIENT_SESSION_MSG_PUBLISH_ANSWER: {
+        /* The overlay's answer to a publish. It came back as a message,
+         * so the caller that is waiting for it was not holding a thread. */
+        actor_answer_t* answer = (actor_answer_t*)msg->payload;
+        if (answer == NULL) break;
+        client_session_msg_handle_request_t* p =
+            (client_session_msg_handle_request_t*)answer->token;
+        if (p == NULL) break;
+
+        /* The overlay has applied the publish, so the publisher filter
+         * can come down. */
+        if (p->channel != NULL) {
+            p->channel->publisher_session = NULL;
+            p->channel = NULL;
+        }
+        finish_handle_request(p, answer->result, NULL);
+
         free(p->frame);
         p->frame = NULL;
         if (actor_reply_complete(&p->reply)) {

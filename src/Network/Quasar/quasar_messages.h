@@ -74,6 +74,8 @@ typedef struct meridian_quasar_unsubscribe_msg_t {
 /* Publish a message into the overlay. */
 typedef struct meridian_quasar_publish_msg_t {
     actor_reply_t reply;   /**< Must stay first. */
+    actor_answer_t answer; /**< Where the answer goes, when the caller is
+                                an actor that cannot wait for it. */
     uint8_t* topic;         /**< Owned: the request's copy of the topic. */
     size_t topic_len;      /**< The topic's length. */
     uint8_t* data;          /**< Owned: the request's copy of the payload. */

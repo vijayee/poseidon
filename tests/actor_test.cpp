@@ -230,3 +230,160 @@ TEST_F(ActorTest, ADispatchDoesNotWaitForAnotherActor) {
     scheduler_pool_stop(pool);
     scheduler_pool_destroy(pool);
 }
+
+
+// ============================================================================
+// AN ACTOR CAN HAVE AN ANSWER WITHOUT A WORKER WAITING
+// ============================================================================
+//
+// Upstream's reply_to shape: the request carries the actor the answer
+// belongs to, and the worker "replies to reply_to with a summary"
+// (liboffs/src/OFFStreams/representation_actor.h). The answer arrives as
+// a message, so the actor that is waiting for it is unscheduled while it
+// waits — it holds no thread.
+//
+// The pool has ONE worker. If the waiting blocked, the worker would be
+// waiting for itself.
+
+namespace {
+
+constexpr uint32_t TEST_MSG_ASK = 10;
+constexpr uint32_t TEST_MSG_WORK = 11;
+constexpr uint32_t TEST_MSG_ANSWER = 12;
+
+/* The request that goes to the worker: the answer comes back to the
+ * actor that asked for it. */
+struct ask_t {
+    actor_reply_t reply;   /**< Must stay first. */
+    actor_answer_t answer; /**< Where the answer goes. */
+    int request_id;
+};
+
+/* The request the test's thread sends to the waiting actor. */
+struct outer_t {
+    actor_reply_t reply;   /**< Must stay first. */
+    int request_id;
+};
+
+struct answer_worker_state_t {
+    int works;
+};
+
+void answering_worker_dispatch(void* state, message_t* msg) {
+    answer_worker_state_t* s = static_cast<answer_worker_state_t*>(state);
+    if (msg->type != TEST_MSG_WORK) return;
+    s->works++;
+    ask_t* p = static_cast<ask_t*>(msg->payload);
+    if (p == nullptr) return;
+    /* The worker answers the actor that asked: the answer goes back as a
+     * message, so the asking actor is not holding a thread. */
+    actor_answer_send(&p->answer, 42 + p->request_id);
+    /* The request was the worker's. */
+    actor_reply_destroy(&p->reply);
+    free(p);
+}
+
+struct waiting_state_t {
+    actor_t* self;         /**< This actor: the answer comes back to it. */
+    actor_t* worker;
+    int asks;
+    int answers;
+};
+
+void waiting_dispatch(void* state, message_t* msg) {
+    waiting_state_t* s = static_cast<waiting_state_t*>(state);
+
+    if (msg->type == TEST_MSG_ASK) {
+        outer_t* p = static_cast<outer_t*>(msg->payload);
+        if (p == nullptr) return;
+        s->asks++;
+
+        /* Ask the worker for an answer. The answer is addressed to this
+         * actor, so the request does not wait for it: the worker is free
+         * to pick the request up while this dispatch returns. */
+        ask_t* ask = static_cast<ask_t*>(calloc(1, sizeof(ask_t)));
+        if (ask == nullptr) return;
+        ask->request_id = p->request_id;
+        ask->answer.reply_to = s->self;
+        ask->answer.reply_type = TEST_MSG_ANSWER;
+        ask->answer.token = p;   /* the requester's own state, carried back */
+        if (actor_reply_init(&ask->reply) != 0) {
+            free(ask);
+            return;
+        }
+
+        message_t out;
+        out.type = TEST_MSG_WORK;
+        out.payload = ask;
+        out.payload_destroy = nullptr;
+        actor_send(s->worker, &out);
+        return;
+    }
+
+    if (msg->type == TEST_MSG_ANSWER) {
+        actor_answer_t* answer = static_cast<actor_answer_t*>(msg->payload);
+        if (answer == nullptr) return;
+        s->answers++;
+        /* The answer carries the requester's own state back to it. */
+        outer_t* p = static_cast<outer_t*>(answer->token);
+        if (p != nullptr) {
+            p->reply.result = answer->result;
+            if (actor_reply_complete(&p->reply)) {
+                /* The caller never got the answer: the actor disposes of
+                 * it. */
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+        }
+    }
+}
+
+} // namespace
+
+TEST_F(ActorTest, AnActorCanHaveAnAnswerWithoutAWorkerWaiting) {
+    scheduler_pool_t* pool = scheduler_pool_create(1);
+    ASSERT_NE(nullptr, pool);
+    scheduler_pool_start(pool);
+
+    answer_worker_state_t worker_state{0};
+    actor_t worker;
+    actor_init(&worker, &worker_state, answering_worker_dispatch, pool);
+
+    waiting_state_t waiting_state{nullptr, &worker, 0, 0};
+    actor_t waiting;
+    actor_init(&waiting, &waiting_state, waiting_dispatch, pool);
+    waiting_state.self = &waiting;
+
+    /* The test's thread asks the waiting actor. The test's thread is not
+     * running an actor, so this request waits for the answer — that is
+     * the round trip, and it is legal here. */
+    outer_t* request = static_cast<outer_t*>(calloc(1, sizeof(outer_t)));
+    ASSERT_NE(nullptr, request);
+    request->request_id = 7;
+    ASSERT_EQ(0, actor_reply_init(&request->reply));
+
+    message_t msg;
+    msg.type = TEST_MSG_ASK;
+    msg.payload = &request->reply;
+    msg.payload_destroy = nullptr;
+    actor_send(&waiting, &msg);
+
+    /* The waiting actor's dispatch asked the worker and returned; the
+     * answer comes back as a message. With one worker, a dispatch that
+     * waited would deadlock the pool, and the answer below would never
+     * come. */
+    int waited = actor_reply_wait(&request->reply, 5000);
+    EXPECT_EQ(0, waited) << "the answer never came";
+    EXPECT_EQ(42 + 7, request->reply.result);
+
+    EXPECT_EQ(1, waiting_state.asks);
+    EXPECT_EQ(1, waiting_state.answers);
+    EXPECT_EQ(1, worker_state.works);
+
+    actor_reply_destroy(&request->reply);
+    free(request);
+    actor_destroy(&waiting);
+    actor_destroy(&worker);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
+}

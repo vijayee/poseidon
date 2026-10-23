@@ -408,6 +408,30 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
 int quasar_reconfigure(quasar_t* quasar, uint32_t max_hops, uint32_t alpha,
                       size_t seen_size, uint32_t seen_hashes);
 
+/**
+ * Publishes a message and has the answer delivered to an actor.
+ *
+ * The caller does not wait: the answer comes back as a message to the
+ * actor named by reply_to, with the message type reply_type. This is
+ * upstream's reply_to shape — the request carries the actor the answer
+ * belongs to — and it is what lets a dispatch have an answer without a
+ * worker waiting for it.
+ *
+ * @param quasar     The overlay.
+ * @param topic      The topic.
+ * @param topic_len  The topic's length.
+ * @param data       The payload.
+ * @param data_len   The payload's length.
+ * @param reply_to   The actor the answer belongs to.
+ * @param reply_type The message type the answer arrives as.
+ * @param token      The caller's own state, carried back with the answer.
+ * @return           0 when the request was queued, -1 on failure.
+ */
+int quasar_publish_reply_to(quasar_t* quasar, const uint8_t* topic,
+                            size_t topic_len, const uint8_t* data,
+                            size_t data_len, actor_t* reply_to,
+                            uint32_t reply_type, void* token);
+
 int quasar_propagate(quasar_t* quasar);
 
 // ============================================================================

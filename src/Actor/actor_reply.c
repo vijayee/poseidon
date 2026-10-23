@@ -117,6 +117,28 @@ int actor_request(actor_t* actor, uint32_t type, actor_reply_t* reply,
     return actor_round_trip(actor, type, reply, timeout_ms);
 }
 
+bool actor_answer_send(const actor_answer_t* answer, int result) {
+    if (answer == NULL || answer->reply_to == NULL) return false;
+
+    /* The answer is its own message: the worker fills in the result and
+     * hands the copy to the actor that asked for it. */
+    actor_answer_t* copy = (actor_answer_t*)get_memory(sizeof(actor_answer_t));
+    if (copy == NULL) return false;
+    copy->reply_to = answer->reply_to;
+    copy->reply_type = answer->reply_type;
+    copy->token = answer->token;
+    copy->result = result;
+
+    message_t message;
+    memset(&message, 0, sizeof(message));
+    message.type = answer->reply_type;
+    message.payload = copy;
+    /* The queue frees the answer when the dispatch is done with it. */
+    message.payload_destroy = (void (*)(void*))free;
+    actor_send(answer->reply_to, &message);
+    return true;
+}
+
 int actor_reply_wait(actor_reply_t* reply, uint32_t timeout_ms) {
     if (reply == NULL) return -1;
 
