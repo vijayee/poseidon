@@ -1211,3 +1211,105 @@ actor owns the gossip, the connections and the peers in one place.
 ### Build
 
 Green, 25/25 ctest.
+
+## Phase 2 (2.22) — a dispatch never waits for another actor
+
+A dispatch runs on a pool worker. A worker that waits for another actor
+is a worker that is running no actor at all, so the wait has to go — or
+the wait has to not happen.
+
+### What the two references do
+
+**Upstream** draws the line explicitly. `liboffs/src/Network/peer_book.h`
+says the peer book's stop path "must only be called from a thread that
+may block and is never a pool worker", and the round trip itself is the
+same condvar wait poseidon has. Inside a dispatch, upstream never waits:
+the network actor hands the peer book its work with `actor_send`
+(`liboffs/src/Network/network.c`, the PEER_STATE_SAVE arm), and where an
+answer is genuinely needed the request carries the actor the answer
+belongs to — `actor_t* reply_to` in
+`liboffs/src/OFFStreams/representation_actor.h` — and the answer comes
+back as a message. Upstream's own words about the same thing, from
+`liboffs/src/ClientAPI/representation_api.c`: *"the completion dispatch
+runs on a pool worker, so it can NEVER call representation_actor_destroy
+inline: that destroy parks the pool via scheduler_pool_wait_for_idle,
+and a worker waiting for its own pool's idleness (itself included)
+would never return."*
+
+**Pony** has no such wait to begin with. A behaviour cannot return a
+value (`src/libponyc/pass/syntax.c`: "actor behaviour cannot specify
+return type"), so a behaviour call is a one-way send
+(`src/libponyc/codegen/gencall.c`: the call's value is `None`) and the
+thread that sent goes straight back to running actors. The runtime's
+"waiting" is an actor with an empty queue: it is *logically blocked*
+(`src/libponyrt/actor/actor.c`: "note that we're logically blocked") and
+is not rescheduled, so the thread pops the next actor. An actor that
+wants an answer asks for it with a callback — `packages/promises`: the
+promise is an actor, the fulfilment is a message, and the waiting actor
+resumes when the message arrives.
+
+Both models say the same thing: **the caller of an actor never blocks
+while an actor is running.**
+
+### What poseidon did
+
+Three chains of blocking waits, each one a pool worker waiting on
+another pool worker:
+
+| The dispatch | waited for | reached |
+|---|---|---|
+| the channel manager's | the overlay's actor | then the protocol's actor |
+| the client session's | the overlay's actor, the manager's actor | then the protocol's actor |
+| the overlay's | the protocol's actor | — |
+
+So a publish from the channel manager took three workers at once: the
+manager's, the overlay's and the protocol's. On a two-core box that
+starves, and the round trips time out.
+
+### What changed
+
+**The actor layer** grew the piece the two models share. `actor_request`
+is a round trip that notices whether the caller is inside a dispatch
+(`actor_is_inside_dispatch`) and, if it is, sends the request
+*detached*: the actor does the work, the answer is dropped, and the
+worker goes back to running actors. A caller that is not running an
+actor still waits — that is upstream's peer book, unchanged.
+
+**The overlay lost its actor.** Its state — the routing filter, the
+subscriptions, the neighbour filters, the seen filter, the callback —
+belongs to the protocol's actor now: the network actor, the way upstream
+keeps the gossip inside the network actor. The overlay reads the peer
+table directly (`meridian_protocol_peers_on_actor`) and sends through
+the protocol's own thread (`meridian_protocol_send_on_actor`), so the
+layer has one actor and nobody waits for a second one. The overlay
+without a network — its unit test — keeps an actor of its own.
+
+**The channel manager's and the overlay's wrappers** ask through
+`actor_request`, so a call from a dispatch is queued and the answer is
+dropped. The calls that want a number report "queued" (0); the ones
+that want a pointer into an actor's state report nothing, because such a
+pointer cannot be handed over.
+
+**The overlay's destroy** hands the shell to the actor: the actor
+releases the state and frees the shell, and the request goes out
+detached, because a destroy that waits is a destroy that can deadlock
+the layer it is tearing down. The channel's teardown destroys the
+network first, so the overlay's state has no owner left when it is
+released.
+
+**The rejoin** used to destroy the overlay and build a new one. It now
+sends a reconfigure: the overlay keeps its identity, so the messages
+already queued for it stay with it.
+
+### The rule
+
+- A dispatch never waits. A call that crosses an actor boundary from
+  inside a dispatch is queued, and the answer is dropped.
+- A thread that is not running an actor may wait — that is the round
+  trip, and it is the only way a caller gets an answer.
+- A state that an actor owns is read by that actor, not asked for.
+
+### Build
+
+Green, 25/25 ctest. Every dispatch in the tree is free of a call that
+can wait.
