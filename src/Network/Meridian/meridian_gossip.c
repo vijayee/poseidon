@@ -286,7 +286,7 @@ meridian_gossip_handle_t* meridian_gossip_handle_create(const meridian_gossip_co
     );
 
     handle->query_table = meridian_query_table_create(64);
-    handle->running = false;
+    ATOMIC_STORE(&handle->running, 0);
     handle->lock = platform_mutex_create();;
 
     return handle;
@@ -320,9 +320,9 @@ void meridian_gossip_handle_destroy(meridian_gossip_handle_t* handle) {
  */
 int meridian_gossip_handle_start(meridian_gossip_handle_t* handle) {
     if (handle == NULL) return -1;
-    platform_mutex_lock(handle->lock);
-    handle->running = true;
-    platform_mutex_unlock(handle->lock);
+    /* The running flag is read across threads: it is atomic, the way
+     * upstream's network, relay client and listener flags are. */
+    ATOMIC_STORE(&handle->running, 1);
     return 0;
 }
 
@@ -334,9 +334,7 @@ int meridian_gossip_handle_start(meridian_gossip_handle_t* handle) {
  */
 int meridian_gossip_handle_stop(meridian_gossip_handle_t* handle) {
     if (handle == NULL) return -1;
-    platform_mutex_lock(handle->lock);
-    handle->running = false;
-    platform_mutex_unlock(handle->lock);
+    ATOMIC_STORE(&handle->running, 0);
     return 0;
 }
 

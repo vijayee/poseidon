@@ -14,6 +14,7 @@ extern "C" {
 #include <stddef.h>
 #include <sys/time.h>
 #include "../../Platform/platform_thread.h"
+#include "../../Util/atomic_compat.h"
 #include "meridian.h"
 #include "meridian_query.h"
 #include "meridian_packet.h"
@@ -220,7 +221,7 @@ typedef struct meridian_gossip_handle_t {
     meridian_query_table_t* query_table;   /**< Tracks in-flight gossip queries */
     platform_mutex_t* lock;           /**< Thread-safe access */
     vec_t(meridian_gossip_t*) active_gossips; /**< Currently active gossip exchanges */
-    bool running;                      /**< Whether handle is active */
+    ATOMIC(uint8_t) running;            /**< Whether handle is active */
 } meridian_gossip_handle_t;
 
 // ============================================================================
