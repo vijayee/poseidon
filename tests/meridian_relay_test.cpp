@@ -33,7 +33,7 @@ TEST_F(RelayTest, ServerCreateDestroyWithoutMsquic) {
         .keepalive_interval_ms = 5000,
         .max_datagram_size = 1400
     };
-    meridian_relay_server_t* server = meridian_relay_server_create(NULL, &config);
+    meridian_relay_server_t* server = meridian_relay_server_create(NULL, &config, nullptr);
     EXPECT_EQ(nullptr, server);
 }
 

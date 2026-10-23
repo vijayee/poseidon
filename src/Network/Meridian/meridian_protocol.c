@@ -180,7 +180,8 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
 
                     if (buf != NULL) {
                         meridian_stream_entry_t* entry =
-                            meridian_stream_entry_create(NULL, true, protocol);
+                            meridian_stream_entry_create(NULL, true, protocol,
+                                                        protocol->sched);
                         if (entry != NULL) {
                             HQUIC stream = NULL;
                             QUIC_STATUS status = protocol->msquic->StreamOpen(
@@ -419,6 +420,37 @@ static void protocol_remove_stream(meridian_protocol_t* protocol,
 // ============================================================================
 // STREAM CALLBACKS
 // ============================================================================
+
+/* The owner handler for a Meridian stream. */
+static void protocol_stream_message(void* ctx, meridian_stream_entry_t* entry,
+                                    const uint8_t* data, size_t len);
+
+/**
+ * The owner handler for a Meridian stream.
+ *
+ * It runs on the stream entry's actor, not on msquic's worker: the
+ * receive buffer is the actor's, and the packet callback belongs with it.
+ */
+static void protocol_stream_message(void* ctx, meridian_stream_entry_t* entry,
+                                    const uint8_t* data, size_t len) {
+    meridian_protocol_t* protocol = (meridian_protocol_t*)ctx;
+    if (protocol == NULL) return;
+
+    if (protocol->callbacks.on_packet) {
+        protocol->callbacks.on_packet(protocol->callbacks.user_ctx, protocol,
+                                      data, len);
+    }
+
+    /* The bidi stream stays open for our answer; the send side is shut
+     * down once the peer's message has been delivered. */
+    if (entry != NULL && entry->is_bidi && entry->stream != NULL &&
+        protocol->msquic != NULL) {
+        protocol->msquic->StreamShutdown(entry->stream,
+                                         QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
+    }
+}
+
+
 
 static QUIC_STATUS QUIC_API
 protocol_uni_stream_callback(HQUIC Stream, void* Context,
@@ -1663,8 +1695,10 @@ ConnectionCallback(HQUIC Connection, void* Context,
         HQUIC Stream = Event->PEER_STREAM_STARTED.Stream;
         bool is_bidi = !(Event->PEER_STREAM_STARTED.Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL);
 
-        meridian_stream_entry_t* entry = meridian_stream_entry_create(Stream, is_bidi, protocol);
+        meridian_stream_entry_t* entry = meridian_stream_entry_create(
+            Stream, is_bidi, protocol, protocol->sched);
         if (entry == NULL) return QUIC_STATUS_OUT_OF_MEMORY;
+        meridian_stream_entry_on_message(entry, protocol_stream_message);
 
         QUIC_STREAM_CALLBACK_HANDLER handler = is_bidi
             ? protocol_bidi_stream_callback

@@ -487,6 +487,28 @@ typedef enum {
   MERIDIAN_QUASAR_ON_GOSSIP,
   /* A routed message arrived from a peer. */
   MERIDIAN_QUASAR_ON_ROUTE_MESSAGE,
+
+  /* ========================================================================
+   * 2.21 Meridian stream — per-stream actor messages
+   * ========================================================================
+   *
+   * A Meridian stream has an actor, the way upstream's stream does. The
+   * receive buffer belongs to that actor, and the public entry points
+   * post messages to it instead of touching the stream's state in place:
+   * the bytes that arrive are handed over, and so is the news that the
+   * peer finished sending. The owner's handler then runs on the stream's
+   * actor, not on msquic's worker.
+   *
+   * Payload structs live in
+   * src/Network/Meridian/meridian_stream.h; this enum only carries the
+   * type tags. */
+  /* Bytes arrived. The request owns the copy. */
+  MERIDIAN_STREAM_RECEIVE,
+  /* The peer finished sending: the actor hands the message to the owner. */
+  MERIDIAN_STREAM_COMPLETE,
+  /* The stream is going away: the actor answers once it has worked
+   * through everything that was queued before it. */
+  MERIDIAN_STREAM_CLOSE,
 } message_type_e;
 
 /* Base message. The actor's dispatch receives one of these; type selects the

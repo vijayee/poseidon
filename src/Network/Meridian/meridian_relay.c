@@ -27,6 +27,13 @@ static QUIC_STATUS QUIC_API
 relay_bidi_stream_callback(HQUIC Stream, void* Context,
                            QUIC_STREAM_EVENT* Event);
 
+static void relay_process_uni_message(meridian_relay_t* relay,
+                                       const uint8_t* data, size_t len);
+static void relay_process_bidi_message(meridian_relay_t* relay,
+                                        const uint8_t* data, size_t len);
+static void relay_stream_message(void* ctx, meridian_stream_entry_t* entry,
+                                 const uint8_t* data, size_t len);
+
 static void meridian_relay_dispatch(void* state, message_t* msg);
 
 // ============================================================================
@@ -419,7 +426,11 @@ int meridian_relay_send_addr_request(meridian_relay_t* relay) {
     free(cbor_buf);
 
     // Create stream entry to track the response
-    meridian_stream_entry_t* entry = meridian_stream_entry_create(NULL, true, relay);
+    meridian_stream_entry_t* entry = meridian_stream_entry_create(NULL, true, relay,
+                                                                   relay->pool);
+    if (entry != NULL) {
+        meridian_stream_entry_on_message(entry, relay_stream_message);
+    }
     if (entry == NULL) {
         free(msg_buf);
         return -1;
@@ -508,6 +519,23 @@ bool meridian_relay_is_connected(meridian_relay_t* relay) {
 // ============================================================================
 // STREAM CALLBACKS
 // ============================================================================
+
+/**
+ * The owner handler for a tunnel stream.
+ *
+ * It runs on the stream entry's actor: the receive buffer is the actor's,
+ * and the message is decoded there rather than on msquic's worker.
+ */
+static void relay_stream_message(void* ctx, meridian_stream_entry_t* entry,
+                                 const uint8_t* data, size_t len) {
+    meridian_relay_t* relay = (meridian_relay_t*)ctx;
+    if (relay == NULL) return;
+    if (entry != NULL && entry->is_bidi) {
+        relay_process_bidi_message(relay, data, len);
+    } else {
+        relay_process_uni_message(relay, data, len);
+    }
+}
 
 /**
  * Processes a complete message received on a unidirectional stream.
@@ -694,12 +722,13 @@ relay_uni_stream_callback(HQUIC Stream, void* Context,
     }
 
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
-        // Peer finished sending — process the complete message
-        if (entry != NULL && entry->user_context != NULL) {
-            meridian_relay_t* relay = (meridian_relay_t*)entry->user_context;
-            relay_process_uni_message(relay, entry->recv_buf, entry->recv_len);
+        // The entry's actor hands the message to the owner.
+        meridian_stream_entry_complete(entry);
+        if (Stream != NULL && entry != NULL && entry->user_context != NULL) {
+            meridian_relay_t* relay_ctx = (meridian_relay_t*)entry->user_context;
+            relay_ctx->msquic->StreamShutdown(
+                Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
         }
-        break;
     }
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
@@ -765,19 +794,13 @@ relay_bidi_stream_callback(HQUIC Stream, void* Context,
     }
 
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
-        // Peer finished sending — process the complete message
-        if (entry != NULL && entry->user_context != NULL) {
-            meridian_relay_t* relay = (meridian_relay_t*)entry->user_context;
-            relay_process_bidi_message(relay, entry->recv_buf, entry->recv_len);
-        }
-
-        // Shut down our side of the bidi stream since we got our response
+        // The entry's actor hands the message to the owner.
+        meridian_stream_entry_complete(entry);
         if (Stream != NULL && entry != NULL && entry->user_context != NULL) {
             meridian_relay_t* relay_ctx = (meridian_relay_t*)entry->user_context;
             relay_ctx->msquic->StreamShutdown(
                 Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
         }
-        break;
     }
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
@@ -857,7 +880,10 @@ RelayConnectionCallback(HQUIC Connection, void* Context,
         HQUIC stream = Event->PEER_STREAM_STARTED.Stream;
 
         meridian_stream_entry_t* entry = meridian_stream_entry_create(
-            stream, is_bidi, relay);
+            stream, is_bidi, relay, relay->pool);
+        if (entry != NULL) {
+            meridian_stream_entry_on_message(entry, relay_stream_message);
+        }
         if (entry == NULL) {
             // Reject the stream if we can't allocate tracking state
             return QUIC_STATUS_OUT_OF_MEMORY;

@@ -13,6 +13,7 @@ extern "C" {
 
 #include "../../RefCounter/refcounter.h"
 #include "../../Platform/platform_thread.h"
+#include "../../Scheduler/scheduler.h"
 #include "meridian_stream.h"
 #include "msquic.h"
 
@@ -65,6 +66,7 @@ typedef struct meridian_relay_server_t {
     uint32_t next_endpoint_id;                            /**< Next endpoint ID to assign */
     meridian_relay_server_stats_t stats;                  /**< Runtime statistics */
     platform_mutex_t* lock;                               /**< Thread safety lock for client list */
+    scheduler_pool_t* pool;                              /**< Scheduler pool that runs the stream actors */
 } meridian_relay_server_t;
 
 /**
@@ -90,7 +92,8 @@ typedef struct meridian_relay_server_config_t {
 meridian_relay_server_t*
 meridian_relay_server_create(
     const struct QUIC_API_TABLE* msquic,
-    const meridian_relay_server_config_t* config
+    const meridian_relay_server_config_t* config,
+    scheduler_pool_t* pool
 );
 
 /**

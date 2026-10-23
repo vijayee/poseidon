@@ -31,6 +31,7 @@
 // ============================================================================
 
 static meridian_relay_server_t* g_server = NULL;
+static scheduler_pool_t* g_sched = NULL;
 static volatile bool g_running = true;
 
 // ============================================================================
@@ -160,7 +161,15 @@ static int start_relay_server(const relay_options_t* opts) {
     };
 
     // Create server
-    g_server = meridian_relay_server_create(msquic, &config);
+    /* The stream actors need a scheduler pool. */
+    g_sched = scheduler_pool_create(2);
+    if (g_sched == NULL) {
+        log_error("relay: failed to create the scheduler pool");
+        return 1;
+    }
+    scheduler_pool_start(g_sched);
+
+    g_server = meridian_relay_server_create(msquic, &config, g_sched);
     if (g_server == NULL) {
         log_error("Failed to create relay server");
         poseidon_msquic_close();
@@ -253,6 +262,11 @@ int main(int argc, char* argv[]) {
     if (g_server != NULL) {
         meridian_relay_server_destroy(g_server);
         g_server = NULL;
+    }
+    if (g_sched != NULL) {
+        scheduler_pool_stop(g_sched);
+        scheduler_pool_destroy(g_sched);
+        g_sched = NULL;
     }
 
     poseidon_msquic_close();

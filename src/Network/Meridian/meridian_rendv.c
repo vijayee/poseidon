@@ -591,6 +591,52 @@ static void meridian_rendv_dispatch(void* state, message_t* msg) {
 // ============================================================================
 
 /**
+ * The owner handler for a tunnel stream.
+ *
+ * It runs on the stream entry's actor and hands the data to the
+ * application callback the handle was given.
+ */
+static void rendv_stream_message(void* ctx, meridian_stream_entry_t* entry,
+                                 const uint8_t* data, size_t len) {
+    meridian_rendv_handle_t* handle = (meridian_rendv_handle_t*)ctx;
+    if (handle == NULL) return;
+
+    /* The registered callback is the handle actor's state, so the data
+     * is handed over to that actor rather than called from here. */
+    meridian_rendv_stream_data_msg_t* request =
+        (meridian_rendv_stream_data_msg_t*)
+        get_clear_memory(sizeof(meridian_rendv_stream_data_msg_t));
+    if (request == NULL) return;
+
+    request->len = len;
+    request->is_bidi = (entry != NULL && entry->is_bidi);
+    request->data = (uint8_t*)get_memory(len > 0 ? len : 1);
+    if (request->data == NULL) {
+        free(request);
+        return;
+    }
+    if (len > 0) {
+        memcpy(request->data, data, len);
+    }
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->data);
+        free(request);
+        return;
+    }
+    /* The caller does not wait: the request is the actor's to free. */
+    request->reply.orphaned = 1;
+    message_t msg = {
+        .type = MERIDIAN_RENDV_STREAM_DATA,
+        .payload = request,
+        .payload_destroy = NULL,
+    };
+    if (!actor_send(&handle->actor, &msg)) {
+        actor_reply_destroy(&request->reply);
+    }
+}
+
+/**
  * Unidirectional stream callback for rendezvous tunnel connections.
  * Accumulates data until PEER_SEND_SHUTDOWN, then dispatches to
  * the registered on_stream_data callback.
@@ -620,46 +666,8 @@ rendv_uni_stream_callback(HQUIC Stream, void* Context,
     }
 
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
-        if (entry != NULL && entry->user_context != NULL) {
-            meridian_rendv_handle_t* handle = (meridian_rendv_handle_t*)entry->user_context;
-            /* The handle's actor delivers the data to the application
-             * callback. The request carries its own copy of the bytes:
-             * the stream buffer dies with the entry. */
-            meridian_rendv_stream_data_msg_t* request =
-                (meridian_rendv_stream_data_msg_t*)
-                get_clear_memory(sizeof(meridian_rendv_stream_data_msg_t));
-            if (request != NULL) {
-                request->len = entry->recv_len;
-                request->is_bidi = false;
-                request->data = (uint8_t*)get_memory(entry->recv_len > 0 ? entry->recv_len : 1);
-                if (request->data != NULL) {
-                    if (entry->recv_len > 0) {
-                        memcpy(request->data, entry->recv_buf, entry->recv_len);
-                    }
-                    if (actor_reply_init(&request->reply) == 0) {
-                        /* The caller does not wait: the request is the
-                         * actor's to free. */
-                        request->reply.orphaned = 1;
-                        message_t msg = {
-                            .type = MERIDIAN_RENDV_STREAM_DATA,
-                            .payload = request,
-                            .payload_destroy = NULL,
-                        };
-                        if (!actor_send(&handle->actor, &msg)) {
-                            /* The actor is gone: actor_send released the
-                             * request and its reply plumbing. */
-                            actor_reply_destroy(&request->reply);
-                        }
-                    } else {
-                        free(request->data);
-                        free(request);
-                    }
-                } else {
-                    free(request);
-                }
-            }
-        }
-        break;
+        // The entry's actor hands the message to the owner.
+        meridian_stream_entry_complete(entry);
     }
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
@@ -719,49 +727,13 @@ rendv_bidi_stream_callback(HQUIC Stream, void* Context,
     }
 
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
-        if (entry != NULL && entry->user_context != NULL) {
+        // The entry's actor hands the message to the owner.
+        meridian_stream_entry_complete(entry);
+        if (Stream != NULL && entry != NULL && entry->user_context != NULL) {
             meridian_rendv_handle_t* handle = (meridian_rendv_handle_t*)entry->user_context;
-            /* The handle's actor delivers the data to the application
-             * callback. The request carries its own copy of the bytes:
-             * the stream buffer dies with the entry. */
-            meridian_rendv_stream_data_msg_t* request =
-                (meridian_rendv_stream_data_msg_t*)
-                get_clear_memory(sizeof(meridian_rendv_stream_data_msg_t));
-            if (request != NULL) {
-                request->len = entry->recv_len;
-                request->is_bidi = true;
-                request->data = (uint8_t*)get_memory(entry->recv_len > 0 ? entry->recv_len : 1);
-                if (request->data != NULL) {
-                    if (entry->recv_len > 0) {
-                        memcpy(request->data, entry->recv_buf, entry->recv_len);
-                    }
-                    if (actor_reply_init(&request->reply) == 0) {
-                        /* The caller does not wait: the request is the
-                         * actor's to free. */
-                        request->reply.orphaned = 1;
-                        message_t msg = {
-                            .type = MERIDIAN_RENDV_STREAM_DATA,
-                            .payload = request,
-                            .payload_destroy = NULL,
-                        };
-                        if (!actor_send(&handle->actor, &msg)) {
-                            actor_reply_destroy(&request->reply);
-                        }
-                    } else {
-                        free(request->data);
-                        free(request);
-                    }
-                } else {
-                    free(request);
-                }
-            }
-
-            // Shut down our send side
-            if (Stream != NULL && handle->msquic != NULL) {
-                handle->msquic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
-            }
+            handle->msquic->StreamShutdown(
+                Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
         }
-        break;
     }
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
@@ -812,7 +784,11 @@ static QUIC_STATUS QUIC_API rendv_tunnel_connection_callback(
         HQUIC Stream = Event->PEER_STREAM_STARTED.Stream;
         bool is_bidi = !(Event->PEER_STREAM_STARTED.Flags & QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL);
 
-        meridian_stream_entry_t* entry = meridian_stream_entry_create(Stream, is_bidi, handle);
+        meridian_stream_entry_t* entry = meridian_stream_entry_create(
+            Stream, is_bidi, handle, handle->pool);
+        if (entry != NULL) {
+            meridian_stream_entry_on_message(entry, rendv_stream_message);
+        }
         if (entry == NULL) return QUIC_STATUS_SUCCESS;
 
         QUIC_STREAM_CALLBACK_HANDLER callback = is_bidi

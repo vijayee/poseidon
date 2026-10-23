@@ -10,28 +10,77 @@
 
 #include "msquic.h"
 #include "meridian.h"
+#include "../../Actor/actor.h"
+#include "../../Scheduler/scheduler.h"
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
+
+/**
+ * How long the entry's close waits for the actor to work through the
+ * queue: the message that says the peer finished sending must reach the
+ * owner before the entry — and the buffer it points at — goes away.
+ */
+#define MERIDIAN_STREAM_TIMEOUT_MS 5000
 
 #define MERIDIAN_STREAM_INITIAL_CAP MERIDIAN_MAX_PAYLOAD_SIZE
 #define MERIDIAN_STREAM_MAX_CAP 65536
 #define MERIDIAN_MAX_CONCURRENT_STREAMS 100
 
+struct meridian_stream_entry_t;
+
+/**
+ * The handler that receives a completed message.
+ *
+ * It runs on the stream entry's actor, never on the msquic thread: the
+ * receive buffer is the actor's, and the message is handed over rather
+ * than decoded in place. The entry is passed along so the owner can
+ * reach the stream handle.
+ */
+typedef void (*meridian_stream_message_cb_t)(void* user_context,
+                                              struct meridian_stream_entry_t* entry,
+                                              const uint8_t* data, size_t len);
+
+/**
+ * One Meridian stream: the msquic handle, the receive buffer and the
+ * actor that owns them.
+ *
+ * The shape follows upstream's stream: the stream has an actor, and the
+ * public entry points post messages to it rather than touching the
+ * stream's state in place. The receive buffer is therefore touched by
+ * exactly one thread — the entry's actor — and the decode runs there
+ * too, not on msquic's worker.
+ */
 typedef struct meridian_stream_entry_t {
     HQUIC stream;
-    uint8_t* recv_buf;
-    size_t recv_len;
-    size_t recv_cap;
+    actor_t actor;              /**< Owns the receive buffer */
+    scheduler_pool_t* pool;     /**< Scheduler pool that runs the actor */
+    uint8_t* recv_buf;          /**< Owned by the actor */
+    size_t recv_len;            /**< Owned by the actor */
+    size_t recv_cap;            /**< Owned by the actor */
     bool is_bidi;
-    void* user_context;
+    void* user_context;         /**< The component that owns this stream */
+    meridian_stream_message_cb_t on_message;  /**< The owner's handler */
 } meridian_stream_entry_t;
 
 /**
  * Creates a stream entry with initial buffer capacity.
+ *
+ * The entry's actor needs a scheduler pool: the receive bytes and the
+ * completed message are handed to it, and only a pool worker runs it.
  * Returns NULL on allocation failure.
  */
-meridian_stream_entry_t* meridian_stream_entry_create(HQUIC stream, bool is_bidi, void* user_context);
+meridian_stream_entry_t* meridian_stream_entry_create(HQUIC stream, bool is_bidi,
+                                                       void* user_context,
+                                                       scheduler_pool_t* pool);
+
+/**
+ * Registers the handler that receives the completed message.
+ *
+ * The handler runs on the entry's actor.
+ */
+void meridian_stream_entry_on_message(meridian_stream_entry_t* entry,
+                                      meridian_stream_message_cb_t callback);
 
 /**
  * Destroys a stream entry, freeing its receive buffer.
@@ -40,11 +89,21 @@ meridian_stream_entry_t* meridian_stream_entry_create(HQUIC stream, bool is_bidi
 void meridian_stream_entry_destroy(meridian_stream_entry_t* entry);
 
 /**
- * Appends received data to the stream entry's buffer.
- * Grows the buffer if needed (up to MERIDIAN_STREAM_MAX_CAP).
- * Returns 0 on success, -1 on overflow or allocation failure.
+ * Hands received data to the stream entry's actor.
+ *
+ * The bytes are copied into the request: the caller's buffer is
+ * msquic's, and it is released as soon as the callback returns. The
+ * entry's actor appends them to the receive buffer.
+ * Returns 0 on success, -1 if the request could not be made.
  */
 int meridian_stream_entry_append(meridian_stream_entry_t* entry, const uint8_t* data, size_t len);
+
+/**
+ * Tells the stream entry's actor that the peer finished sending.
+ *
+ * The actor then hands the accumulated message to the owner's handler.
+ */
+void meridian_stream_entry_complete(meridian_stream_entry_t* entry);
 
 /**
  * Resets the receive buffer after processing, keeping allocated capacity.

@@ -74,7 +74,8 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
 
 meridian_relay_server_t* meridian_relay_server_create(
     const struct QUIC_API_TABLE* msquic,
-    const meridian_relay_server_config_t* config) {
+    const meridian_relay_server_config_t* config,
+    scheduler_pool_t* pool) {
 
     if (msquic == NULL || config == NULL) return NULL;
 
@@ -96,6 +97,7 @@ meridian_relay_server_t* meridian_relay_server_create(
         server->clients[i].last_activity_ms = 0;
     }
 
+    server->pool = pool;
     server->lock = platform_mutex_create();;
     refcounter_init(&server->refcounter);
 
@@ -885,7 +887,7 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
 
         // Create stream entry to accumulate received data
         meridian_stream_entry_t* entry = meridian_stream_entry_create(
-            Stream, is_bidi, NULL);
+            Stream, is_bidi, NULL, server->pool);
         if (entry == NULL) {
             platform_mutex_unlock(server->lock);
             log_warn("Relay: failed to create stream entry, rejecting stream");

@@ -86,6 +86,24 @@ int actor_round_trip(actor_t* actor, uint32_t type, actor_reply_t* reply,
     return 0;
 }
 
+int actor_reply_wait(actor_reply_t* reply, uint32_t timeout_ms) {
+    if (reply == NULL) return -1;
+
+    platform_mutex_lock(reply->mutex);
+    for (;;) {
+        if (reply->done) break;
+        if (platform_condvar_timed_wait(reply->cv, reply->mutex, timeout_ms) != 0) {
+            if (!reply->done) {
+                platform_mutex_unlock(reply->mutex);
+                return -1;
+            }
+            break;
+        }
+    }
+    platform_mutex_unlock(reply->mutex);
+    return 0;
+}
+
 bool actor_reply_complete(actor_reply_t* reply) {
     if (reply == NULL) return false;
 

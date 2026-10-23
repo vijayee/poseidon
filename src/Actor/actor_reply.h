@@ -89,6 +89,17 @@ int actor_round_trip(actor_t* actor, uint32_t type, actor_reply_t* reply,
                      uint32_t timeout_ms);
 
 /**
+ * Waits for the answer to be delivered.
+ *
+ * Used when the request was already sent and only the answer is awaited —
+ * the stream entry's close does that, so the message that says the peer
+ * finished sending is delivered before the entry goes away.
+ *
+ * @return 0 when the answer arrived, -1 on a timeout.
+ */
+int actor_reply_wait(actor_reply_t* reply, uint32_t timeout_ms);
+
+/**
  * Delivers the answer the dispatch has produced.
  *
  * @return true when the caller had already timed out and handed the
