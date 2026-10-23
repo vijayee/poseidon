@@ -811,25 +811,71 @@ Each backend commit has a CLAUDE.md record next to it.
 - Watchers released through the transport's `destroy_stack_t`, so they
   are unregistered on the loop thread.
 
-### Open items, in the order they should be picked up
+### Open items
 
-1. **The channel manager's synchronous session wrappers corrupt the
-   heap when called concurrently.** The wrapper does `actor_send` +
-   an inline `actor_run`; the `actor_send` injects the actor into the
-   scheduler pool and the pool worker then runs the **same** actor
-   while the wrapper is still running it inline. `message_queue_pop` is
-   not safe against two concurrent pops: both threads read the same
-   tail, both advance the queue and both free the same node, the
-   sentinel included. Reproduces with four threads and no transport at
-   all. The upstream `liboffs` has no inline `actor_run` callers at
-   all — the pattern is poseidon's. The fix belongs in the actor
-   machinery: an actor must only ever be run by one thread at a time.
-2. **`poseidon_channel_manager_destroy` frees the manager while its
-   actor is still registered in the scheduler pool**, so the pool's
-   teardown writes into the freed block. Five invalid reads under
-   valgrind, and the daemon's own teardown order triggers it.
-3. **The QUIC and WebTransport data paths are not exercised.** The
+1. **The QUIC and WebTransport data paths are not exercised.** The
    in-tree QUIC client fails to establish its stream against the server,
    and the pre-split backend fails identically, so this predates the
    actor conversion. WebTransport needs an HTTP/3 client, which neither
-   the in-tree client library nor a test harness speaks.
+   the in-tree client library nor a test harness speaks. Both need a
+   client that speaks the protocol, not a backend change.
+
+## Phase 7 — the actor runs on one thread at a time (commits `be36bff`, `d2703e3`)
+
+Two defects that the backend work surfaced, both fixed.
+
+### An actor may only be run by one thread at a time (`be36bff`)
+
+The synchronous wrappers — build a payload, `actor_send`, run the
+actor, read the out-field — ran the actor inline on the calling
+thread. The `actor_send` injects the actor into the scheduler pool when
+the mailbox was empty, so a pool worker could pick the very same actor
+up and run it while the wrapper was still running it.
+
+`message_queue_pop` is not safe against two concurrent pops: both
+threads read the same tail, both advance the queue and both free the
+same node, the sentinel included. glibc reports that as "double free or
+corruption (fasttop)".
+
+It reproduces with **no transport at all**: four threads hammering the
+channel manager's register/unregister wrappers crashed five runs out of
+five before the fix and pass five out of five after it. The upstream
+`liboffs` has no inline `actor_run` callers at all — the pattern is
+poseidon's.
+
+`actor_run_inline` claims the actor for the caller: a pool worker that
+finds the claim taken re-queues the actor instead of running it, and an
+inline caller waits for a worker that is already running the actor. The
+wrapper's contract is unchanged — when it returns, the message it sent
+has been dispatched and the out-field is visible.
+
+The claim closes a use-after-free too: `actor_destroy` waits for
+`ACTOR_FLAG_RUNNING`, so it now waits for an inline run as well. A
+thread that destroys an actor from inside the actor's own inline
+dispatch is recognised and does not wait for itself.
+
+Two consequences the fix had to absorb:
+
+- **`poseidon_channel_manager_destroy` now calls `actor_destroy`** instead
+  of setting the DESTROY flag by hand. It frees the manager, so the
+  actor has to be detached from the pool's registry first: the pool's
+  teardown walked the freed manager and wrote into it (five invalid
+  reads under valgrind, and the daemon's own teardown order triggers
+  it).
+- **The transports' teardown releases the sessions outside the
+  connection lock.** The wrappers wait for a pool worker now, and that
+  worker may be reaching back into the transport's send path, which
+  takes the same lock. Only the connection structs are freed under it.
+
+### A closing Unix connection drains its pending write (`d2703e3`)
+
+The Unix connection's dispatch dropped every message once the
+connection was closing. A graceful close sets the closing flag and
+waits for the pending write to drain — but the drain is driven by the
+writable message, which the very same early return dropped. The frame
+was never flushed and the socket was never closed; only the transport's
+teardown released it.
+
+The dispatch now drops the messages of a **closed** connection and lets
+a **closing** one finish its work, which is the shape the TCP and
+WebSocket backends already have.
