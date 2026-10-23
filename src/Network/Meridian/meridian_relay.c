@@ -47,9 +47,55 @@ static void meridian_relay_set_addr_cb_impl(meridian_relay_t* relay,
                                             meridian_relay_addr_cb_t callback,
                                             void* ctx);
 
+/**
+ * Makes sure the message the caller just sent to the relay's actor has
+ * been dispatched.
+ *
+ * The msquic callbacks run on msquic's worker threads and hand their
+ * events to the actor. The work is done before the callback returns, so
+ * the callback's own thread drains the actor.
+ *
+ * The exception is a callback that arrives while the relay's actor is
+ * already running on this thread: a handler that calls into msquic can
+ * get its answer on the same thread, and that answer is a callback of
+ * ours. The actor is claimed by this thread then, and a second claim
+ * would spin forever. The message is left in the mailbox instead: the
+ * run that is already in progress keeps draining until the mailbox is
+ * empty, so the event is dispatched right after the current one.
+ */
+static void relay_drain(meridian_relay_t* relay) {
+    if (actor_is_running_on_this_thread(&relay->actor)) return;
+    actor_run_inline(&relay->actor, 32);
+}
+
+static void relay_forward_datagram(meridian_relay_t* relay,
+                                    const uint8_t* data, size_t len,
+                                    uint32_t src_endpoint_id);
+
+static void relay_stream_closed(meridian_relay_t* relay,
+                                 meridian_stream_entry_t* entry);
+
+static int relay_track_stream(meridian_relay_t* relay,
+                              meridian_stream_entry_t* entry);
+
+static void relay_remove_stream(meridian_relay_t* relay,
+                                 meridian_stream_entry_t* entry);
+
 // ============================================================================
 // ACTOR DISPATCH
 // ============================================================================
+
+/**
+ * Releases a forwarded datagram payload: the copied bytes and the
+ * payload itself. Registered as the message's payload_destroy, so a
+ * message dropped without being dispatched still releases the copy.
+ */
+void meridian_relay_datagram_msg_destroy(void* payload) {
+    meridian_relay_datagram_msg_t* event = (meridian_relay_datagram_msg_t*)payload;
+    if (event == NULL) return;
+    free(event->data);
+    free(event);
+}
 
 /**
  * The relay's actor dispatch.
@@ -105,8 +151,81 @@ static void meridian_relay_dispatch(void* state, message_t* msg) {
         meridian_relay_set_addr_cb_impl(relay, payload->callback, payload->ctx);
         break;
     }
+
+    /* ---- the msquic events ---- */
+
+    case MERIDIAN_RELAY_CONNECTED: {
+        platform_mutex_lock(relay->lock);
+        relay->connected = true;
+        platform_mutex_unlock(relay->lock);
+
+        /* The relay server is up: ask it for our reflexive address. The
+         * request goes out from this thread, which is the actor's. */
+        meridian_relay_send_addr_request_impl(relay);
+        break;
+    }
+    case MERIDIAN_RELAY_SHUTDOWN: {
+        platform_mutex_lock(relay->lock);
+        relay->connected = false;
+        platform_mutex_unlock(relay->lock);
+        break;
+    }
+    case MERIDIAN_RELAY_SHUTDOWN_COMPLETE: {
+        platform_mutex_lock(relay->lock);
+        relay->connected = false;
+        relay->connection = NULL;
+        platform_mutex_unlock(relay->lock);
+        break;
+    }
+    case MERIDIAN_RELAY_PEER_STREAM_STARTED: {
+        meridian_relay_peer_stream_msg_t* payload =
+            (meridian_relay_peer_stream_msg_t*)msg->payload;
+        platform_mutex_lock(relay->lock);
+        relay_track_stream(relay, payload->entry);
+        platform_mutex_unlock(relay->lock);
+        break;
+    }
+    case MERIDIAN_RELAY_STREAM_CLOSED: {
+        meridian_relay_peer_stream_msg_t* payload =
+            (meridian_relay_peer_stream_msg_t*)msg->payload;
+        platform_mutex_lock(relay->lock);
+        relay_remove_stream(relay, payload->entry);
+        platform_mutex_unlock(relay->lock);
+        break;
+    }
+    case MERIDIAN_RELAY_ADDR_RESPONSE: {
+        meridian_relay_addr_response_msg_t* payload =
+            (meridian_relay_addr_response_msg_t*)msg->payload;
+        platform_mutex_lock(relay->lock);
+        relay->local_endpoint_id = payload->endpoint_id;
+        meridian_relay_addr_cb_t callback = relay->on_addr_response;
+        void* callback_ctx = relay->on_addr_response_ctx;
+        platform_mutex_unlock(relay->lock);
+
+        /* The application callback runs on the actor's thread. It may
+         * call back into the relay; the public wrappers notice that they
+         * are on the actor's thread and run their handler inline. */
+        if (callback != NULL) {
+            callback(callback_ctx, payload->reflexive_addr,
+                     payload->reflexive_port, payload->endpoint_id);
+        }
+        break;
+    }
+    case MERIDIAN_RELAY_DATAGRAM: {
+        meridian_relay_datagram_msg_t* payload =
+            (meridian_relay_datagram_msg_t*)msg->payload;
+        platform_mutex_lock(relay->lock);
+        meridian_relay_datagram_cb_t callback = relay->on_datagram;
+        void* callback_ctx = relay->on_datagram_ctx;
+        platform_mutex_unlock(relay->lock);
+
+        if (callback != NULL) {
+            callback(callback_ctx, payload->data, payload->len,
+                     payload->src_endpoint_id);
+        }
+        break;
+    }
     default:
-        /* The msquic event arms land with the event routing step. */
         break;
     }
 }
@@ -361,6 +480,14 @@ static int meridian_relay_connect_impl(meridian_relay_t* relay) {
 int meridian_relay_connect(meridian_relay_t* relay) {
     if (relay == NULL) return -1;
 
+    /* A call that arrives from inside the relay's own dispatch — the
+     * application callback the actor invoked calling back in — cannot be
+     * queued and waited for: the actor is claimed by this thread. Run
+     * the handler directly; this thread is the actor's thread. */
+    if (actor_is_running_on_this_thread(&relay->actor)) {
+        return meridian_relay_connect_impl(relay);
+    }
+
     int result = -1;
     meridian_relay_connect_msg_t payload = { .result = &result };
     message_t msg = {
@@ -408,6 +535,10 @@ static int meridian_relay_disconnect_impl(meridian_relay_t* relay) {
 
 int meridian_relay_disconnect(meridian_relay_t* relay) {
     if (relay == NULL) return -1;
+
+    if (actor_is_running_on_this_thread(&relay->actor)) {
+        return meridian_relay_disconnect_impl(relay);
+    }
 
     int result = -1;
     meridian_relay_disconnect_msg_t payload = { .result = &result };
@@ -478,6 +609,10 @@ static int meridian_relay_send_datagram_impl(meridian_relay_t* relay,
 int meridian_relay_send_datagram(meridian_relay_t* relay, const uint8_t* data,
                                   size_t len, uint32_t dest_endpoint_id) {
     if (relay == NULL || data == NULL) return -1;
+
+    if (actor_is_running_on_this_thread(&relay->actor)) {
+        return meridian_relay_send_datagram_impl(relay, data, len, dest_endpoint_id);
+    }
 
     int result = -1;
     meridian_relay_send_datagram_msg_t payload = {
@@ -611,6 +746,10 @@ static int meridian_relay_send_addr_request_impl(meridian_relay_t* relay) {
 int meridian_relay_send_addr_request(meridian_relay_t* relay) {
     if (relay == NULL) return -1;
 
+    if (actor_is_running_on_this_thread(&relay->actor)) {
+        return meridian_relay_send_addr_request_impl(relay);
+    }
+
     int result = -1;
     meridian_relay_addr_request_msg_t payload = { .result = &result };
     message_t msg = {
@@ -648,6 +787,11 @@ void meridian_relay_on_datagram(meridian_relay_t* relay,
                                  meridian_relay_datagram_cb_t callback, void* ctx) {
     if (relay == NULL) return;
 
+    if (actor_is_running_on_this_thread(&relay->actor)) {
+        meridian_relay_set_datagram_cb_impl(relay, callback, ctx);
+        return;
+    }
+
     meridian_relay_set_datagram_cb_msg_t payload = {
         .callback = callback,
         .ctx = ctx,
@@ -682,6 +826,11 @@ static void meridian_relay_set_addr_cb_impl(meridian_relay_t* relay,
 void meridian_relay_on_addr_response(meridian_relay_t* relay,
                                       meridian_relay_addr_cb_t callback, void* ctx) {
     if (relay == NULL) return;
+
+    if (actor_is_running_on_this_thread(&relay->actor)) {
+        meridian_relay_set_addr_cb_impl(relay, callback, ctx);
+        return;
+    }
 
     meridian_relay_set_addr_cb_msg_t payload = {
         .callback = callback,
@@ -766,16 +915,27 @@ static void relay_process_uni_message(meridian_relay_t* relay,
             cbor_decref(&item);
 
             if (addr_resp != NULL) {
-                platform_mutex_lock(relay->lock);
-                relay->local_endpoint_id = addr_resp->endpoint_id;
-                platform_mutex_unlock(relay->lock);
+                /* The relay answered the address request. Hand it to the
+                 * actor: the endpoint id belongs to the relay's state,
+                 * and the application callback belongs to the actor's
+                 * thread. */
+                meridian_relay_addr_response_msg_t* event =
+                    get_clear_memory(sizeof(meridian_relay_addr_response_msg_t));
+                if (event != NULL) {
+                    event->endpoint_id = addr_resp->endpoint_id;
+                    event->reflexive_addr = addr_resp->reflexive_addr;
+                    event->reflexive_port = addr_resp->reflexive_port;
 
-                if (relay->on_addr_response != NULL) {
-                    relay->on_addr_response(
-                        relay->on_addr_response_ctx,
-                        addr_resp->reflexive_addr,
-                        addr_resp->reflexive_port,
-                        addr_resp->endpoint_id);
+                    message_t msg = {
+                        .type = MERIDIAN_RELAY_ADDR_RESPONSE,
+                        .payload = event,
+                        .payload_destroy = free,
+                    };
+                    if (actor_send(&relay->actor, &msg)) {
+                        relay_drain(relay);
+                    }
+                    /* On a rejected send the payload is already released
+                     * by actor_send. */
                 }
 
                 meridian_addr_response_destroy(addr_resp);
@@ -783,27 +943,51 @@ static void relay_process_uni_message(meridian_relay_t* relay,
         } else if (packet_type == MERIDIAN_PACKET_TYPE_PUNCH_REQUEST ||
                    packet_type == MERIDIAN_PACKET_TYPE_PUNCH_SYNC) {
             // Forward punch messages to datagram callback
-            if (relay->on_datagram != NULL) {
-                relay->on_datagram(
-                    relay->on_datagram_ctx,
-                    payload,
-                    payload_len,
-                    src_endpoint_id);
-            }
+            relay_forward_datagram(relay, payload, payload_len, src_endpoint_id);
             cbor_decref(&item);
         } else {
             cbor_decref(&item);
         }
     } else {
         // Forwarded datagram from a peer
-        if (relay->on_datagram != NULL) {
-            relay->on_datagram(
-                relay->on_datagram_ctx,
-                payload,
-                payload_len,
-                src_endpoint_id);
-        }
+        relay_forward_datagram(relay, payload, payload_len, src_endpoint_id);
     }
+}
+
+/**
+ * Hands a peer datagram to the relay's actor.
+ *
+ * The bytes are copied: they arrive in the stream buffer, which is
+ * released as soon as this callback returns, while the actor is the one
+ * that delivers them to the application callback.
+ */
+static void relay_forward_datagram(meridian_relay_t* relay,
+                                    const uint8_t* data, size_t len,
+                                    uint32_t src_endpoint_id) {
+    meridian_relay_datagram_msg_t* event =
+        get_clear_memory(sizeof(meridian_relay_datagram_msg_t));
+    if (event == NULL) return;
+
+    event->src_endpoint_id = src_endpoint_id;
+    event->len = len;
+    /* One byte for an empty datagram: the allocator must not be asked
+     * for a zero-sized block. */
+    event->data = (uint8_t*)get_memory(len > 0 ? len : 1);
+    if (event->data == NULL) {
+        free(event);
+        return;
+    }
+    memcpy(event->data, data, len);
+
+    message_t msg = {
+        .type = MERIDIAN_RELAY_DATAGRAM,
+        .payload = event,
+        .payload_destroy = meridian_relay_datagram_msg_destroy,
+    };
+    if (actor_send(&relay->actor, &msg)) {
+        relay_drain(relay);
+    }
+    /* On a rejected send the payload is already released by actor_send. */
 }
 
 /**
@@ -845,16 +1029,23 @@ static void relay_process_bidi_message(meridian_relay_t* relay,
         cbor_decref(&item);
 
         if (addr_resp != NULL) {
-            platform_mutex_lock(relay->lock);
-            relay->local_endpoint_id = addr_resp->endpoint_id;
-            platform_mutex_unlock(relay->lock);
+            /* The relay answered the address request on a bidi stream:
+             * same hand-over as the unidirectional path. */
+            meridian_relay_addr_response_msg_t* event =
+                get_clear_memory(sizeof(meridian_relay_addr_response_msg_t));
+            if (event != NULL) {
+                event->endpoint_id = addr_resp->endpoint_id;
+                event->reflexive_addr = addr_resp->reflexive_addr;
+                event->reflexive_port = addr_resp->reflexive_port;
 
-            if (relay->on_addr_response != NULL) {
-                relay->on_addr_response(
-                    relay->on_addr_response_ctx,
-                    addr_resp->reflexive_addr,
-                    addr_resp->reflexive_port,
-                    addr_resp->endpoint_id);
+                message_t msg = {
+                    .type = MERIDIAN_RELAY_ADDR_RESPONSE,
+                    .payload = event,
+                    .payload_destroy = free,
+                };
+                if (actor_send(&relay->actor, &msg)) {
+                    relay_drain(relay);
+                }
             }
 
             meridian_addr_response_destroy(addr_resp);
@@ -913,9 +1104,7 @@ relay_uni_stream_callback(HQUIC Stream, void* Context,
             ? (meridian_relay_t*)entry->user_context : NULL;
         if (entry != NULL) {
             if (relay_ctx != NULL) {
-                platform_mutex_lock(relay_ctx->lock);
-                relay_remove_stream(relay_ctx, entry);
-                platform_mutex_unlock(relay_ctx->lock);
+                relay_stream_closed(relay_ctx, entry);
             }
             meridian_stream_entry_destroy(entry);
         }
@@ -930,6 +1119,41 @@ relay_uni_stream_callback(HQUIC Stream, void* Context,
     }
 
     return QUIC_STATUS_SUCCESS;
+}
+
+/**
+ * Hands the close of a tracked stream to the relay's actor.
+ *
+ * The stream array belongs to the actor, so the entry is dropped there.
+ * When this callback already runs on the actor's thread — a handler that
+ * calls into msquic can get its answer on the same thread — the actor
+ * cannot be drained here: it is claimed by this thread, and the entry
+ * dies with this callback. The entry is then dropped directly, which is
+ * the same work the actor would have done.
+ */
+static void relay_stream_closed(meridian_relay_t* relay,
+                                 meridian_stream_entry_t* entry) {
+    if (actor_is_running_on_this_thread(&relay->actor)) {
+        platform_mutex_lock(relay->lock);
+        relay_remove_stream(relay, entry);
+        platform_mutex_unlock(relay->lock);
+        return;
+    }
+
+    meridian_relay_peer_stream_msg_t* event =
+        get_clear_memory(sizeof(meridian_relay_peer_stream_msg_t));
+    if (event == NULL) return;
+    event->entry = entry;
+
+    message_t msg = {
+        .type = MERIDIAN_RELAY_STREAM_CLOSED,
+        .payload = event,
+        .payload_destroy = free,
+    };
+    if (actor_send(&relay->actor, &msg)) {
+        relay_drain(relay);
+    }
+    /* On a rejected send the payload is already released by actor_send. */
 }
 
 /**
@@ -991,9 +1215,7 @@ relay_bidi_stream_callback(HQUIC Stream, void* Context,
             ? (meridian_relay_t*)entry->user_context : NULL;
         if (entry != NULL) {
             if (relay_ctx != NULL) {
-                platform_mutex_lock(relay_ctx->lock);
-                relay_remove_stream(relay_ctx, entry);
-                platform_mutex_unlock(relay_ctx->lock);
+                relay_stream_closed(relay_ctx, entry);
             }
             meridian_stream_entry_destroy(entry);
         }
@@ -1021,28 +1243,45 @@ RelayConnectionCallback(HQUIC Connection, void* Context,
     meridian_relay_t* relay = (meridian_relay_t*)Context;
 
     switch (Event->Type) {
-    case QUIC_CONNECTION_EVENT_CONNECTED:
-        platform_mutex_lock(relay->lock);
-        relay->connected = true;
-        platform_mutex_unlock(relay->lock);
-
-        // Send initial address request on a bidi stream
-        meridian_relay_send_addr_request(relay);
+    case QUIC_CONNECTION_EVENT_CONNECTED: {
+        /* The connection is up. The relay's state and the address
+         * request that follows belong to the actor, so the event is
+         * handed over rather than acted on here. */
+        message_t msg = {
+            .type = MERIDIAN_RELAY_CONNECTED,
+            .payload = NULL,
+            .payload_destroy = NULL,
+        };
+        if (actor_send(&relay->actor, &msg)) {
+            relay_drain(relay);
+        }
         return QUIC_STATUS_SUCCESS;
+    }
 
     case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_TRANSPORT:
-    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER:
-        platform_mutex_lock(relay->lock);
-        relay->connected = false;
-        platform_mutex_unlock(relay->lock);
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_INITIATED_BY_PEER: {
+        message_t msg = {
+            .type = MERIDIAN_RELAY_SHUTDOWN,
+            .payload = NULL,
+            .payload_destroy = NULL,
+        };
+        if (actor_send(&relay->actor, &msg)) {
+            relay_drain(relay);
+        }
         return QUIC_STATUS_SUCCESS;
+    }
 
-    case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
-        platform_mutex_lock(relay->lock);
-        relay->connected = false;
-        relay->connection = NULL;
-        platform_mutex_unlock(relay->lock);
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
+        message_t msg = {
+            .type = MERIDIAN_RELAY_SHUTDOWN_COMPLETE,
+            .payload = NULL,
+            .payload_destroy = NULL,
+        };
+        if (actor_send(&relay->actor, &msg)) {
+            relay_drain(relay);
+        }
         return QUIC_STATUS_SUCCESS;
+    }
 
     case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
         // Peer initiated a stream — track it with the appropriate callback
@@ -1062,9 +1301,28 @@ RelayConnectionCallback(HQUIC Connection, void* Context,
 
         relay->msquic->SetCallbackHandler(stream, callback, entry);
 
-        platform_mutex_lock(relay->lock);
-        relay_track_stream(relay, entry);
-        platform_mutex_unlock(relay->lock);
+        /* The stream array belongs to the actor: the entry is tracked
+         * there. */
+        meridian_relay_peer_stream_msg_t* event =
+            get_clear_memory(sizeof(meridian_relay_peer_stream_msg_t));
+        if (event != NULL) {
+            event->entry = entry;
+
+            message_t msg = {
+                .type = MERIDIAN_RELAY_PEER_STREAM_STARTED,
+                .payload = event,
+                .payload_destroy = free,
+            };
+            if (actor_send(&relay->actor, &msg)) {
+                relay_drain(relay);
+            } else {
+                /* The relay is going away and actor_send released the
+                 * payload; the entry is ours to drop. */
+                meridian_stream_entry_destroy(entry);
+            }
+        } else {
+            meridian_stream_entry_destroy(entry);
+        }
 
         return QUIC_STATUS_SUCCESS;
     }
