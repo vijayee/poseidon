@@ -58,6 +58,7 @@ typedef struct poseidon_channel_t {
     char name[POSEIDON_CHANNEL_MAX_NAME];    /**< Human-readable name */
     poseidon_channel_config_t config;        /**< Mutable configuration */
     meridian_protocol_t* protocol;           /**< Meridian P2P network */
+    scheduler_pool_t* sched;                 /**< Scheduler pool that runs the protocol and overlay actors */
     quasar_t* quasar;                        /**< Quasar pub/sub overlay */
     uint16_t listen_port;
     bool is_dial;

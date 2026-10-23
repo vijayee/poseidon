@@ -6,6 +6,10 @@
 #include "Crypto/key_pair.h"
 #include "Crypto/node_id.h"
 #include "Channel/channel.h"
+
+extern "C" {
+#include "Scheduler/scheduler.h"
+}
 #include "Channel/channel_manager.h"
 #include "Channel/subtopic.h"
 #include "Network/Meridian/meridian.h"
@@ -318,8 +322,22 @@ TEST(NodeIdHashTest, HashAndCompare) {
 
 class ChannelGossipTest : public ::testing::Test {
 protected:
-    void SetUp() override {}
-    void TearDown() override {}
+    // The overlay's actor runs on a scheduler pool: its public calls send
+    // a request and wait for the answer.
+    void SetUp() override {
+        sched = scheduler_pool_create(2);
+        ASSERT_NE(nullptr, sched);
+        scheduler_pool_start(sched);
+    }
+    void TearDown() override {
+        if (sched != nullptr) {
+            scheduler_pool_stop(sched);
+            scheduler_pool_destroy(sched);
+            sched = nullptr;
+        }
+    }
+
+    scheduler_pool_t* sched = nullptr;
 };
 
 TEST_F(ChannelGossipTest, GossipCallsPropagate) {
@@ -327,7 +345,7 @@ TEST_F(ChannelGossipTest, GossipCallsPropagate) {
     // Without a running protocol, we cannot create a full channel, so test at
     // the quasar level instead: verify that quasar_propagate encodes the filter
     // and returns -1 (protocol is NULL, so broadcast fails) without crashing.
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     ASSERT_NE(nullptr, q);
 
     const uint8_t* topic = (const uint8_t*)"gossip_topic";
@@ -407,7 +425,7 @@ TEST(SubtopicTableTest, TickExpiresSubscriptions) {
 TEST_F(ChannelGossipTest, TickExpiresSubscriptions) {
     // Create a quasar directly (channel creation requires msquic work pool),
     // subscribe with TTL=1, tick once, verify the subscription expires.
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     ASSERT_NE(nullptr, q);
 
     const uint8_t* topic = (const uint8_t*)"ephemeral";
@@ -471,7 +489,12 @@ TEST(ChannelMessageTest, NullInputsRejected) {
 }
 
 TEST(ChannelPublishTest, PublishWrapsInSubtopicEnvelope) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    // The overlay's actor runs on a scheduler pool.
+    scheduler_pool_t* sched = scheduler_pool_create(2);
+    ASSERT_NE(nullptr, sched);
+    scheduler_pool_start(sched);
+
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     ASSERT_NE(nullptr, q);
 
     const uint8_t* topic = (const uint8_t*)"chan_topic";
@@ -508,6 +531,8 @@ TEST(ChannelPublishTest, PublishWrapsInSubtopicEnvelope) {
     cbor_decref(&loaded);
     free(buf);
     quasar_destroy(q);
+    scheduler_pool_stop(sched);
+    scheduler_pool_destroy(sched);
 }
 
 // ============================================================================

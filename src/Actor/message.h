@@ -453,6 +453,40 @@ typedef enum {
   MERIDIAN_RENDV_STREAM_DATA,
   /* Detect the NAT type. The actor sends the address requests. */
   MERIDIAN_RENDV_DETECT_NAT,
+
+  /* ========================================================================
+   * 2.20 Quasar overlay — actor messages
+   * ========================================================================
+   *
+   * The overlay's state belongs to its actor: the routing filter, the
+   * local subscriptions, the per-neighbour filters, the seen filter and
+   * the application callback. Upstream keeps the gossip inside the
+   * network actor for the same reason.
+   *
+   * Payload structs live in src/Network/Quasar/quasar_messages.h; this
+   * enum only carries the type tags. */
+  /* Register the application callback for delivered messages. */
+  MERIDIAN_QUASAR_SET_MESSAGE_CB,
+  /* Subscribe to a topic. */
+  MERIDIAN_QUASAR_SUBSCRIBE,
+  /* Unsubscribe from a topic. */
+  MERIDIAN_QUASAR_UNSUBSCRIBE,
+  /* Publish a message into the overlay. */
+  MERIDIAN_QUASAR_PUBLISH,
+  /* Run the propagation walk. */
+  MERIDIAN_QUASAR_PROPAGATE,
+  /* Run the periodic tick. */
+  MERIDIAN_QUASAR_TICK,
+  /* Look up a neighbour's filter. */
+  MERIDIAN_QUASAR_GET_NEIGHBOR_FILTER,
+  /* Create a neighbour's filter if it is missing. */
+  MERIDIAN_QUASAR_GET_OR_CREATE_NEIGHBOR_FILTER,
+  /* Remove a neighbour's filter. */
+  MERIDIAN_QUASAR_REMOVE_NEIGHBOR_FILTER,
+  /* A gossip arrived from a peer. */
+  MERIDIAN_QUASAR_ON_GOSSIP,
+  /* A routed message arrived from a peer. */
+  MERIDIAN_QUASAR_ON_ROUTE_MESSAGE,
 } message_type_e;
 
 /* Base message. The actor's dispatch receives one of these; type selects the

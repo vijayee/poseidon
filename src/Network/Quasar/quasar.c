@@ -3,6 +3,31 @@
 //
 
 #include "quasar.h"
+#include "quasar_messages.h"
+
+/* The dispatch runs the overlay's work on the actor's thread. */
+static void meridian_quasar_dispatch(void* state, message_t* msg);
+
+static void quasar_set_message_callback_impl(quasar_t* quasar, quasar_message_cb_t cb, void* ctx);
+static int quasar_subscribe_impl(quasar_t* quasar, const uint8_t* topic, size_t topic_len, uint32_t ttl);
+static int quasar_unsubscribe_impl(quasar_t* quasar, const uint8_t* topic, size_t topic_len);
+static int quasar_publish_impl(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
+                               const uint8_t* data, size_t data_len);
+static int quasar_on_route_message_impl(quasar_t* quasar, quasar_route_message_t* msg,
+                                        const struct meridian_node_t* from);
+static int quasar_on_gossip_impl(quasar_t* quasar, const uint8_t* data, size_t len,
+                                 const struct meridian_node_t* from);
+static int quasar_propagate_impl(quasar_t* quasar);
+static int quasar_tick_impl(quasar_t* quasar);
+
+/* The actor's own helpers: they touch the neighbour filters, which the
+ * actor owns. */
+static attenuated_bloom_filter_t* quasar_get_neighbor_filter_impl(
+    quasar_t* quasar, const meridian_node_t* node);
+static attenuated_bloom_filter_t* quasar_get_or_create_neighbor_filter_impl(
+    quasar_t* quasar, const meridian_node_t* node);
+static int quasar_remove_neighbor_filter_impl(
+    quasar_t* quasar, const meridian_node_t* node);
 #include "quasar_route.h"
 #include "../Meridian/meridian_protocol.h"
 #include "../../Bloom/elastic_bloom_filter.h"
@@ -62,7 +87,6 @@ quasar_route_message_t* quasar_route_message_create(const uint8_t* topic, size_t
     msg->pub_ports = NULL;
     msg->pub_count = 0;
     msg->pub_capacity = 0;
-    msg->lock = platform_mutex_create();;
     refcounter_init((refcounter_t*)msg);
     return msg;
 }
@@ -76,7 +100,6 @@ void quasar_route_message_destroy(quasar_route_message_t* msg) {
         bloom_filter_destroy(msg->visited);
         free(msg->pub_addrs);
         free(msg->pub_ports);
-        platform_mutex_destroy(msg->lock);;
         free(msg);
     }
 }
@@ -88,9 +111,7 @@ int quasar_route_message_add_visited(quasar_route_message_t* msg, const meridian
     uint8_t node_key[6];
     memcpy(node_key, &node->addr, sizeof(node->addr));
     memcpy(node_key + sizeof(node->addr), &node->port, sizeof(node->port));
-    platform_mutex_lock(msg->lock);
     int result = bloom_filter_add(msg->visited, node_key, sizeof(node_key));
-    platform_mutex_unlock(msg->lock);
     return result;
 }
 
@@ -99,15 +120,12 @@ bool quasar_route_message_has_visited(quasar_route_message_t* msg, const meridia
     uint8_t node_key[6];
     memcpy(node_key, &node->addr, sizeof(node->addr));
     memcpy(node_key + sizeof(node->addr), &node->port, sizeof(node->port));
-    platform_mutex_lock(msg->lock);
     bool result = bloom_filter_contains(msg->visited, node_key, sizeof(node_key));
-    platform_mutex_unlock(msg->lock);
     return result;
 }
 
 int quasar_route_message_add_publisher(quasar_route_message_t* msg, const meridian_node_t* node) {
     if (msg == NULL || node == NULL) return -1;
-    platform_mutex_lock(msg->lock);
     if (msg->pub_count >= msg->pub_capacity) {
         uint32_t new_cap = msg->pub_capacity == 0 ? 4 : msg->pub_capacity * 2;
         uint32_t* new_addrs = realloc(msg->pub_addrs, sizeof(uint32_t) * new_cap);
@@ -115,7 +133,6 @@ int quasar_route_message_add_publisher(quasar_route_message_t* msg, const meridi
         if (new_addrs == NULL || new_ports == NULL) {
             free(new_addrs);
             free(new_ports);
-            platform_mutex_unlock(msg->lock);
             return -1;
         }
         msg->pub_addrs = new_addrs;
@@ -125,21 +142,469 @@ int quasar_route_message_add_publisher(quasar_route_message_t* msg, const meridi
     msg->pub_addrs[msg->pub_count] = node->addr;
     msg->pub_ports[msg->pub_count] = node->port;
     msg->pub_count++;
-    platform_mutex_unlock(msg->lock);
     return 0;
 }
 
 bool quasar_route_message_has_publisher(quasar_route_message_t* msg, const meridian_node_t* node) {
     if (msg == NULL || node == NULL) return false;
-    platform_mutex_lock(msg->lock);
     for (uint32_t i = 0; i < msg->pub_count; i++) {
         if (msg->pub_addrs[i] == node->addr && msg->pub_ports[i] == node->port) {
-            platform_mutex_unlock(msg->lock);
             return true;
         }
     }
-    platform_mutex_unlock(msg->lock);
     return false;
+}
+
+// ============================================================================
+// ACTOR DISPATCH
+// ============================================================================
+
+/**
+ * The overlay's actor owns the overlay's state: the routing filter, the
+ * local subscriptions, the per-neighbour filters, the seen filter and the
+ * application callback.
+ *
+ * Upstream keeps the gossip inside the network actor for the same reason.
+ * A request that arrives from the application waits for its answer; a
+ * request that arrives from a peer's thread — a gossip, a routed message
+ * — is handed over and the run in progress picks it up.
+ */
+static void meridian_quasar_dispatch(void* state, message_t* msg) {
+    quasar_t* quasar = (quasar_t*)state;
+    if (msg == NULL) return;
+
+    switch (msg->type) {
+        case MERIDIAN_QUASAR_SET_MESSAGE_CB: {
+            meridian_quasar_set_message_cb_msg_t* p =
+                (meridian_quasar_set_message_cb_msg_t*)msg->payload;
+            quasar_set_message_callback_impl(quasar,
+                (quasar_message_cb_t)p->callback, p->ctx);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_QUASAR_SUBSCRIBE: {
+            meridian_quasar_subscribe_msg_t* p =
+                (meridian_quasar_subscribe_msg_t*)msg->payload;
+            p->reply.result = quasar_subscribe_impl(quasar, p->topic,
+                                                    p->topic_len, p->ttl);
+            free(p->topic);
+            p->topic = NULL;
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_QUASAR_UNSUBSCRIBE: {
+            meridian_quasar_unsubscribe_msg_t* p =
+                (meridian_quasar_unsubscribe_msg_t*)msg->payload;
+            p->reply.result = quasar_unsubscribe_impl(quasar, p->topic,
+                                                      p->topic_len);
+            free(p->topic);
+            p->topic = NULL;
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_QUASAR_PUBLISH: {
+            meridian_quasar_publish_msg_t* p =
+                (meridian_quasar_publish_msg_t*)msg->payload;
+            p->reply.result = quasar_publish_impl(quasar, p->topic,
+                                                  p->topic_len, p->data,
+                                                  p->data_len);
+            free(p->topic);
+            free(p->data);
+            p->topic = NULL;
+            p->data = NULL;
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_QUASAR_PROPAGATE: {
+            meridian_quasar_propagate_msg_t* p =
+                (meridian_quasar_propagate_msg_t*)msg->payload;
+            p->reply.result = quasar_propagate_impl(quasar);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_QUASAR_TICK: {
+            meridian_quasar_tick_msg_t* p = (meridian_quasar_tick_msg_t*)msg->payload;
+            p->reply.result = quasar_tick_impl(quasar);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_QUASAR_GET_NEIGHBOR_FILTER: {
+            meridian_quasar_neighbor_filter_msg_t* p =
+                (meridian_quasar_neighbor_filter_msg_t*)msg->payload;
+            p->out_filter = quasar_get_neighbor_filter_impl(
+                quasar, (const meridian_node_t*)p->node);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_QUASAR_GET_OR_CREATE_NEIGHBOR_FILTER: {
+            meridian_quasar_neighbor_filter_msg_t* p =
+                (meridian_quasar_neighbor_filter_msg_t*)msg->payload;
+            p->out_filter = quasar_get_or_create_neighbor_filter_impl(
+                quasar, (const meridian_node_t*)p->node);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_QUASAR_REMOVE_NEIGHBOR_FILTER: {
+            meridian_quasar_remove_neighbor_filter_msg_t* p =
+                (meridian_quasar_remove_neighbor_filter_msg_t*)msg->payload;
+            p->result = quasar_remove_neighbor_filter_impl(
+                quasar, (const meridian_node_t*)p->node);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_QUASAR_ON_GOSSIP: {
+            meridian_quasar_on_gossip_msg_t* p =
+                (meridian_quasar_on_gossip_msg_t*)msg->payload;
+            p->reply.result = quasar_on_gossip_impl(quasar, p->data, p->len,
+                                                    (const struct meridian_node_t*)p->from);
+            free(p->data);
+            p->data = NULL;
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_QUASAR_ON_ROUTE_MESSAGE: {
+            meridian_quasar_on_route_message_msg_t* p =
+                (meridian_quasar_on_route_message_msg_t*)msg->payload;
+            quasar_route_message_t* message = (quasar_route_message_t*)p->message;
+            p->reply.result = quasar_on_route_message_impl(quasar, message,
+                                                          (const struct meridian_node_t*)p->from);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+// ============================================================================
+// PUBLIC API — round trips to the overlay's actor
+// ============================================================================
+
+/* Sends a request to the overlay's actor and waits for the answer.
+ *
+ * Returns 0 when the request was answered, 1 when it was never queued
+ * (the caller still owns it) and -1 when the caller gave up (the actor
+ * owns it now, and the caller must not free it). */
+static int quasar_round_trip(quasar_t* quasar, uint32_t type, actor_reply_t* reply) {
+    if (quasar == NULL || reply == NULL) return -1;
+
+    int trip = actor_round_trip(&quasar->actor, type, reply,
+                                MERIDIAN_QUASAR_TIMEOUT_MS);
+    if (trip == 1) {
+        /* The actor is gone: nobody will ever look at the request. */
+        actor_reply_destroy(reply);
+        return 1;
+    }
+    if (trip != 0) {
+        /* The caller gave up: the actor owns the request now. */
+        return -1;
+    }
+    actor_reply_destroy(reply);
+    return 0;
+}
+
+void quasar_set_message_callback(quasar_t* quasar, quasar_message_cb_t cb, void* ctx) {
+    if (quasar == NULL) return;
+
+    meridian_quasar_set_message_cb_msg_t* request =
+        (meridian_quasar_set_message_cb_msg_t*)
+        get_clear_memory(sizeof(meridian_quasar_set_message_cb_msg_t));
+    if (request == NULL) return;
+    request->callback = (void*)cb;
+    request->ctx = ctx;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return;
+    }
+    quasar_round_trip(quasar, MERIDIAN_QUASAR_SET_MESSAGE_CB, &request->reply);
+    free(request);
+}
+
+int quasar_subscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len, uint32_t ttl) {
+    if (quasar == NULL || topic == NULL) return -1;
+
+    meridian_quasar_subscribe_msg_t* request =
+        (meridian_quasar_subscribe_msg_t*)
+        get_clear_memory(sizeof(meridian_quasar_subscribe_msg_t));
+    if (request == NULL) return -1;
+    request->topic = (uint8_t*)get_memory(topic_len > 0 ? topic_len : 1);
+    if (request->topic == NULL) {
+        free(request);
+        return -1;
+    }
+    memcpy(request->topic, topic, topic_len);
+    request->topic_len = topic_len;
+    request->ttl = ttl;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->topic);
+        free(request);
+        return -1;
+    }
+    int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_SUBSCRIBE, &request->reply);
+    if (trip < 0) return -1;  /* the actor owns the request now */
+    int rc = request->reply.result;
+    if (trip == 1) free(request->topic);  /* never queued: the actor freed nothing */
+    free(request);
+    return rc;
+}
+
+int quasar_unsubscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len) {
+    if (quasar == NULL || topic == NULL) return -1;
+
+    meridian_quasar_unsubscribe_msg_t* request =
+        (meridian_quasar_unsubscribe_msg_t*)
+        get_clear_memory(sizeof(meridian_quasar_unsubscribe_msg_t));
+    if (request == NULL) return -1;
+    request->topic = (uint8_t*)get_memory(topic_len > 0 ? topic_len : 1);
+    if (request->topic == NULL) {
+        free(request);
+        return -1;
+    }
+    memcpy(request->topic, topic, topic_len);
+    request->topic_len = topic_len;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->topic);
+        free(request);
+        return -1;
+    }
+    int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_UNSUBSCRIBE, &request->reply);
+    if (trip < 0) return -1;  /* the actor owns the request now */
+    int rc = request->reply.result;
+    if (trip == 1) free(request->topic);  /* never queued: the actor freed nothing */
+    free(request);
+    return rc;
+}
+
+int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
+                    const uint8_t* data, size_t data_len) {
+    if (quasar == NULL || topic == NULL) return -1;
+
+    meridian_quasar_publish_msg_t* request =
+        (meridian_quasar_publish_msg_t*)
+        get_clear_memory(sizeof(meridian_quasar_publish_msg_t));
+    if (request == NULL) return -1;
+    request->topic = (uint8_t*)get_memory(topic_len > 0 ? topic_len : 1);
+    request->data = (uint8_t*)get_memory(data_len > 0 ? data_len : 1);
+    if (request->topic == NULL || request->data == NULL) {
+        free(request->topic);
+        free(request->data);
+        free(request);
+        return -1;
+    }
+    memcpy(request->topic, topic, topic_len);
+    memcpy(request->data, data, data_len);
+    request->topic_len = topic_len;
+    request->data_len = data_len;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->topic);
+        free(request->data);
+        free(request);
+        return -1;
+    }
+    int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_PUBLISH, &request->reply);
+    if (trip < 0) return -1;  /* the actor owns the request now */
+    int rc = request->reply.result;
+    if (trip == 1) {
+        /* Never queued: the actor freed nothing. */
+        free(request->topic);
+        free(request->data);
+    }
+    free(request);
+    return rc;
+}
+
+int quasar_propagate(quasar_t* quasar) {
+    if (quasar == NULL) return -1;
+
+    meridian_quasar_propagate_msg_t* request =
+        (meridian_quasar_propagate_msg_t*)
+        get_clear_memory(sizeof(meridian_quasar_propagate_msg_t));
+    if (request == NULL) return -1;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
+    }
+    int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_PROPAGATE, &request->reply);
+    if (trip < 0) return -1;  /* the actor owns the request now */
+    int rc = request->reply.result;
+    free(request);
+    return rc;
+}
+
+int quasar_tick(quasar_t* quasar) {
+    if (quasar == NULL) return -1;
+
+    meridian_quasar_tick_msg_t* request =
+        (meridian_quasar_tick_msg_t*)
+        get_clear_memory(sizeof(meridian_quasar_tick_msg_t));
+    if (request == NULL) return -1;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
+    }
+    int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_TICK, &request->reply);
+    if (trip < 0) return -1;  /* the actor owns the request now */
+    int rc = request->reply.result;
+    free(request);
+    return rc;
+}
+
+attenuated_bloom_filter_t* quasar_get_neighbor_filter(quasar_t* quasar,
+                                                     const meridian_node_t* node) {
+    if (quasar == NULL || node == NULL) return NULL;
+
+    meridian_quasar_neighbor_filter_msg_t* request =
+        (meridian_quasar_neighbor_filter_msg_t*)
+        get_clear_memory(sizeof(meridian_quasar_neighbor_filter_msg_t));
+    if (request == NULL) return NULL;
+    request->node = (void*)node;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return NULL;
+    }
+    int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_GET_NEIGHBOR_FILTER,
+                                &request->reply);
+    if (trip < 0) return NULL;  /* the actor owns the request now */
+    attenuated_bloom_filter_t* filter =
+        (attenuated_bloom_filter_t*)request->out_filter;
+    free(request);
+    return trip == 0 ? filter : NULL;
+}
+
+attenuated_bloom_filter_t* quasar_get_or_create_neighbor_filter(
+    quasar_t* quasar, const meridian_node_t* node) {
+    if (quasar == NULL || node == NULL) return NULL;
+
+    meridian_quasar_neighbor_filter_msg_t* request =
+        (meridian_quasar_neighbor_filter_msg_t*)
+        get_clear_memory(sizeof(meridian_quasar_neighbor_filter_msg_t));
+    if (request == NULL) return NULL;
+    request->node = (void*)node;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return NULL;
+    }
+    int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_GET_OR_CREATE_NEIGHBOR_FILTER,
+                                &request->reply);
+    if (trip < 0) return NULL;  /* the actor owns the request now */
+    attenuated_bloom_filter_t* filter =
+        (attenuated_bloom_filter_t*)request->out_filter;
+    free(request);
+    return trip == 0 ? filter : NULL;
+}
+
+int quasar_remove_neighbor_filter(quasar_t* quasar, const meridian_node_t* node) {
+    if (quasar == NULL || node == NULL) return -1;
+
+    meridian_quasar_remove_neighbor_filter_msg_t* request =
+        (meridian_quasar_remove_neighbor_filter_msg_t*)
+        get_clear_memory(sizeof(meridian_quasar_remove_neighbor_filter_msg_t));
+    if (request == NULL) return -1;
+    request->node = (void*)node;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
+    }
+    int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_REMOVE_NEIGHBOR_FILTER,
+                                &request->reply);
+    if (trip < 0) return -1;  /* the actor owns the request now */
+    int result = request->result;
+    free(request);
+    return trip == 0 ? result : -1;
+}
+
+int quasar_on_gossip(quasar_t* quasar, const uint8_t* data, size_t len,
+                     const struct meridian_node_t* from) {
+    if (quasar == NULL || data == NULL) return -1;
+
+    meridian_quasar_on_gossip_msg_t* request =
+        (meridian_quasar_on_gossip_msg_t*)
+        get_clear_memory(sizeof(meridian_quasar_on_gossip_msg_t));
+    if (request == NULL) return -1;
+    request->data = (uint8_t*)get_memory(len > 0 ? len : 1);
+    if (request->data == NULL) {
+        free(request);
+        return -1;
+    }
+    memcpy(request->data, data, len);
+    request->len = len;
+    request->from = (void*)from;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->data);
+        free(request);
+        return -1;
+    }
+    int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_ON_GOSSIP, &request->reply);
+    if (trip < 0) return -1;  /* the actor owns the request now */
+    int rc = request->reply.result;
+    if (trip == 1) free(request->data);  /* never queued: the actor freed nothing */
+    free(request);
+    return rc;
+}
+
+int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg,
+                            const struct meridian_node_t* from) {
+    if (quasar == NULL || msg == NULL) return -1;
+
+    meridian_quasar_on_route_message_msg_t* request =
+        (meridian_quasar_on_route_message_msg_t*)
+        get_clear_memory(sizeof(meridian_quasar_on_route_message_msg_t));
+    if (request == NULL) return -1;
+    request->message = msg;
+    request->from = (void*)from;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
+    }
+    int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_ON_ROUTE_MESSAGE, &request->reply);
+    if (trip < 0) return -1;  /* the actor owns the request now */
+    int rc = request->reply.result;
+    free(request);
+    return rc;
 }
 
 // ============================================================================
@@ -147,7 +612,8 @@ bool quasar_route_message_has_publisher(quasar_route_message_t* msg, const merid
 // ============================================================================
 
 quasar_t* quasar_create(struct meridian_protocol_t* protocol, uint32_t max_hops, uint32_t alpha,
-                          uint32_t seen_size, uint32_t seen_hashes) {
+                          uint32_t seen_size, uint32_t seen_hashes,
+                          scheduler_pool_t* pool) {
     quasar_t* quasar = get_clear_memory(sizeof(quasar_t));
     quasar->protocol = protocol;
 
@@ -169,7 +635,8 @@ quasar_t* quasar_create(struct meridian_protocol_t* protocol, uint32_t max_hops,
     quasar->seen_hashes = seen_hashes;
     quasar->on_message = NULL;
     quasar->message_ctx = NULL;
-    quasar->lock = platform_mutex_create();;
+    quasar->pool = pool;
+    actor_init(&quasar->actor, quasar, meridian_quasar_dispatch, pool);
     refcounter_init((refcounter_t*)quasar);
     return quasar;
 }
@@ -192,20 +659,18 @@ void quasar_destroy(quasar_t* quasar) {
             attenuated_bloom_filter_destroy(quasar->neighbor_filters.data[i].filter);
         }
         vec_deinit(&quasar->neighbor_filters);
-        platform_mutex_destroy(quasar->lock);;
+        actor_destroy(&quasar->actor);
         free(quasar);
     }
 }
 
-void quasar_set_message_callback(quasar_t* quasar, quasar_message_cb_t cb, void* ctx) {
+static void quasar_set_message_callback_impl(quasar_t* quasar, quasar_message_cb_t cb, void* ctx) {
     if (quasar == NULL) return;
-    platform_mutex_lock(quasar->lock);
     quasar->on_message = cb;
     quasar->message_ctx = ctx;
-    platform_mutex_unlock(quasar->lock);
 }
 
-attenuated_bloom_filter_t* quasar_get_neighbor_filter(quasar_t* quasar, const meridian_node_t* node) {
+static attenuated_bloom_filter_t* quasar_get_neighbor_filter_impl(quasar_t* quasar, const meridian_node_t* node) {
     if (quasar == NULL || node == NULL) return NULL;
     for (int i = 0; i < quasar->neighbor_filters.length; i++) {
         if (quasar->neighbor_filters.data[i].addr == node->addr &&
@@ -216,12 +681,10 @@ attenuated_bloom_filter_t* quasar_get_neighbor_filter(quasar_t* quasar, const me
     return NULL;
 }
 
-attenuated_bloom_filter_t* quasar_get_or_create_neighbor_filter(quasar_t* quasar, const meridian_node_t* node) {
+static attenuated_bloom_filter_t* quasar_get_or_create_neighbor_filter_impl(quasar_t* quasar, const meridian_node_t* node) {
     if (quasar == NULL || node == NULL) return NULL;
-    platform_mutex_lock(quasar->lock);
-    attenuated_bloom_filter_t* existing = quasar_get_neighbor_filter(quasar, node);
+    attenuated_bloom_filter_t* existing = quasar_get_neighbor_filter_impl(quasar, node);
     if (existing != NULL) {
-        platform_mutex_unlock(quasar->lock);
         return existing;
     }
     quasar_neighbor_filter_t nf;
@@ -235,27 +698,22 @@ attenuated_bloom_filter_t* quasar_get_or_create_neighbor_filter(quasar_t* quasar
         QUASAR_DEFAULT_FP_BITS
     );
     if (nf.filter == NULL) {
-        platform_mutex_unlock(quasar->lock);
         return NULL;
     }
     vec_push(&quasar->neighbor_filters, nf);
-    platform_mutex_unlock(quasar->lock);
     return nf.filter;
 }
 
-int quasar_remove_neighbor_filter(quasar_t* quasar, const meridian_node_t* node) {
+static int quasar_remove_neighbor_filter_impl(quasar_t* quasar, const meridian_node_t* node) {
     if (quasar == NULL || node == NULL) return -1;
-    platform_mutex_lock(quasar->lock);
     for (int i = 0; i < quasar->neighbor_filters.length; i++) {
         if (quasar->neighbor_filters.data[i].addr == node->addr &&
             quasar->neighbor_filters.data[i].port == node->port) {
             attenuated_bloom_filter_destroy(quasar->neighbor_filters.data[i].filter);
             vec_splice(&quasar->neighbor_filters, i, 1);
-            platform_mutex_unlock(quasar->lock);
             return 0;
         }
     }
-    platform_mutex_unlock(quasar->lock);
     return -1;
 }
 
@@ -263,9 +721,8 @@ int quasar_remove_neighbor_filter(quasar_t* quasar, const meridian_node_t* node)
 // SUBSCRIPTION MANAGEMENT
 // ============================================================================
 
-int quasar_subscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len, uint32_t ttl) {
+static int quasar_subscribe_impl(quasar_t* quasar, const uint8_t* topic, size_t topic_len, uint32_t ttl) {
     if (quasar == NULL || topic == NULL) return -1;
-    platform_mutex_lock(quasar->lock);
 
     // Add topic to level 0 of the routing filter (local subscription)
     int result = attenuated_bloom_filter_subscribe(quasar->routing, topic, topic_len);
@@ -293,13 +750,11 @@ int quasar_subscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len, u
         }
     }
 
-    platform_mutex_unlock(quasar->lock);
     return result;
 }
 
-int quasar_unsubscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len) {
+static int quasar_unsubscribe_impl(quasar_t* quasar, const uint8_t* topic, size_t topic_len) {
     if (quasar == NULL || topic == NULL) return -1;
-    platform_mutex_lock(quasar->lock);
 
     // Remove topic from level 0 of the routing filter
     int result = attenuated_bloom_filter_unsubscribe(quasar->routing, topic, topic_len);
@@ -316,7 +771,6 @@ int quasar_unsubscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len)
         }
     }
 
-    platform_mutex_unlock(quasar->lock);
     return result;
 }
 
@@ -324,13 +778,12 @@ int quasar_unsubscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len)
 // PUBLISHING
 // ============================================================================
 
-int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
+static int quasar_publish_impl(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
                    const uint8_t* data, size_t data_len) {
     if (quasar == NULL || topic == NULL) return -1;
 
     // Check if locally subscribed
     bool locally_subscribed = false;
-    platform_mutex_lock(quasar->lock);
     for (int i = 0; i < quasar->local_subs.length; i++) {
         if (quasar->local_subs.data[i].topic != NULL &&
             quasar->local_subs.data[i].topic->size == topic_len &&
@@ -346,9 +799,7 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
         if (quasar->on_message != NULL) {
             quasar_message_cb_t cb = quasar->on_message;
             void* ctx = quasar->message_ctx;
-            platform_mutex_unlock(quasar->lock);
             cb(ctx, topic, topic_len, data, data_len);
-            platform_mutex_lock(quasar->lock);
         }
 
         // Re-publish to all overlay neighbors
@@ -383,14 +834,11 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
             }
             if (peers != NULL) free(peers);
         }
-        platform_mutex_unlock(quasar->lock);
         return 0;
     }
-    platform_mutex_unlock(quasar->lock);
 
     // Algorithm 2, lines 10-19: Directed walk
     if (quasar->protocol != NULL) {
-        platform_mutex_lock(quasar->lock);
 
         uint32_t local_addr = 0;
         uint16_t local_port = 0;
@@ -441,12 +889,10 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
                         quasar_route_message_destroy(fwd);
                     }
                     meridian_node_destroy(target);
-                    platform_mutex_unlock(quasar->lock);
                     return 0;
                 }
             }
         }
-        platform_mutex_unlock(quasar->lock);
     }
 
     // Algorithm 2, lines 20-21: Random walk
@@ -458,9 +904,7 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
     );
     if (msg == NULL) return -1;
 
-    platform_mutex_lock(quasar->lock);
     bloom_filter_add(quasar->seen, (const uint8_t*)&msg->id, sizeof(msg->id));
-    platform_mutex_unlock(quasar->lock);
 
     // Add local node as publisher and to visited filter
     if (quasar->protocol != NULL) {
@@ -504,13 +948,11 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
 // ROUTED MESSAGE HANDLING
 // ============================================================================
 
-int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const struct meridian_node_t* from) {
+static int quasar_on_route_message_impl(quasar_t* quasar, quasar_route_message_t* msg, const struct meridian_node_t* from) {
     if (quasar == NULL || msg == NULL) return -1;
 
     // Algorithm 2, line 1: Dedup check
-    platform_mutex_lock(quasar->lock);
     if (bloom_filter_contains(quasar->seen, (const uint8_t*)&msg->id, sizeof(msg->id))) {
-        platform_mutex_unlock(quasar->lock);
         return 0;
     }
     bloom_filter_add(quasar->seen, (const uint8_t*)&msg->id, sizeof(msg->id));
@@ -546,9 +988,7 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
         if (quasar->on_message != NULL) {
             quasar_message_cb_t cb = quasar->on_message;
             void* ctx = quasar->message_ctx;
-            platform_mutex_unlock(quasar->lock);
             cb(ctx, msg->topic->data, msg->topic->size, msg->data->data, msg->data->size);
-            platform_mutex_lock(quasar->lock);
         }
 
         // Re-publish to all overlay neighbors
@@ -567,25 +1007,19 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
         }
 
         if (local_node != NULL) meridian_node_destroy(local_node);
-        platform_mutex_unlock(quasar->lock);
         return 0;
     }
 
-    platform_mutex_unlock(quasar->lock);
 
     // Algorithm 2, line 9: Check TTL
-    platform_mutex_lock(msg->lock);
     if (msg->hops_remaining == 0) {
-        platform_mutex_unlock(msg->lock);
         if (local_node != NULL) meridian_node_destroy(local_node);
         return 0;
     }
     msg->hops_remaining--;
-    platform_mutex_unlock(msg->lock);
 
     // Algorithm 2, lines 10-19: Directed walk
     if (quasar != NULL) {
-        platform_mutex_lock(quasar->lock);
         uint32_t level_count = attenuated_bloom_filter_level_count(quasar->routing);
 
         for (uint32_t level = 0; level < level_count; level++) {
@@ -620,12 +1054,10 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
                     }
                     meridian_node_destroy(target);
                     if (local_node != NULL) meridian_node_destroy(local_node);
-                    platform_mutex_unlock(quasar->lock);
                     return 0;
                 }
             }
         }
-        platform_mutex_unlock(quasar->lock);
     }
 
     // Algorithm 2, lines 20-21: Random walk
@@ -659,7 +1091,7 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
 // GOSSIP AND PROPAGATION
 // ============================================================================
 
-int quasar_on_gossip(quasar_t* quasar, const uint8_t* data, size_t len, const struct meridian_node_t* from) {
+static int quasar_on_gossip_impl(quasar_t* quasar, const uint8_t* data, size_t len, const struct meridian_node_t* from) {
     if (quasar == NULL || data == NULL || len < 7 * sizeof(uint32_t)) return -1;
 
     struct cbor_load_result result;
@@ -706,7 +1138,6 @@ int quasar_on_gossip(quasar_t* quasar, const uint8_t* data, size_t len, const st
 
     // Store the incoming filter in the per-neighbor slot for directed routing (Algorithm 2)
     if (from != NULL) {
-        platform_mutex_lock(quasar->lock);
         // Remove old filter for this neighbor if it exists
         for (int i = 0; i < quasar->neighbor_filters.length; i++) {
             if (quasar->neighbor_filters.data[i].addr == from->addr &&
@@ -724,7 +1155,6 @@ int quasar_on_gossip(quasar_t* quasar, const uint8_t* data, size_t len, const st
         vec_push(&quasar->neighbor_filters, nf);
         // Also merge into the aggregated routing filter for local checks
         attenuated_bloom_filter_merge(quasar->routing, decoded);
-        platform_mutex_unlock(quasar->lock);
     } else {
         // No sender info — just merge into routing and destroy
         int result = attenuated_bloom_filter_merge(quasar->routing, decoded);
@@ -737,23 +1167,20 @@ int quasar_on_gossip(quasar_t* quasar, const uint8_t* data, size_t len, const st
     return 0;
 }
 
-int quasar_propagate(quasar_t* quasar) {
+static int quasar_propagate_impl(quasar_t* quasar) {
     if (quasar == NULL) return -1;
     if (quasar->protocol == NULL) return -1;
 
-    platform_mutex_lock(quasar->lock);
 
     // Encode the attenuated bloom filter to CBOR
     cbor_item_t* encoded_filter = attenuated_bloom_filter_encode(quasar->routing);
     if (encoded_filter == NULL) {
-        platform_mutex_unlock(quasar->lock);
         return -1;
     }
 
     // Read level_count under lock since it reads quasar->routing
     uint32_t level_count = attenuated_bloom_filter_level_count(quasar->routing);
 
-    platform_mutex_unlock(quasar->lock);
 
     // Build the QUASAR_GOSSIP packet: [type, level_count, encoded_filter]
     cbor_item_t* packet = cbor_new_definite_array(3);
@@ -809,9 +1236,8 @@ int quasar_propagate(quasar_t* quasar) {
 // PERIODIC MAINTENANCE
 // ============================================================================
 
-int quasar_tick(quasar_t* quasar) {
+static int quasar_tick_impl(quasar_t* quasar) {
     if (quasar == NULL) return -1;
-    platform_mutex_lock(quasar->lock);
 
     // Walk through all local subscriptions and decrement their TTL.
     // Expired subscriptions are removed from both the local list and the
@@ -839,6 +1265,5 @@ int quasar_tick(quasar_t* quasar) {
         i++;
     }
 
-    platform_mutex_unlock(quasar->lock);
     return 0;
 }

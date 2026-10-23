@@ -13,29 +13,46 @@
 #include "Bloom/attenuated_bloom_filter.h"
 #include "Network/Meridian/meridian_packet.h"
 
+extern "C" {
+#include "Scheduler/scheduler.h"
+}
+
 class QuasarTest : public ::testing::Test {
 protected:
+    // The overlay's actor runs on a scheduler pool: its public calls send
+    // a request and wait for the answer.
     void SetUp() override {
         quasar_message_id_init();
+        sched = scheduler_pool_create(2);
+        ASSERT_NE(nullptr, sched);
+        scheduler_pool_start(sched);
     }
-    void TearDown() override {}
+    void TearDown() override {
+        if (sched != nullptr) {
+            scheduler_pool_stop(sched);
+            scheduler_pool_destroy(sched);
+            sched = nullptr;
+        }
+    }
+
+    scheduler_pool_t* sched = nullptr;
 };
 
 TEST_F(QuasarTest, CreateDestroy) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     ASSERT_NE(nullptr, q);
     quasar_destroy(q);
 }
 
 TEST_F(QuasarTest, Subscribe) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     const uint8_t* topic = (const uint8_t*)"sports";
     EXPECT_EQ(0, quasar_subscribe(q, topic, 6, 100));
     quasar_destroy(q);
 }
 
 TEST_F(QuasarTest, Unsubscribe) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     const uint8_t* topic = (const uint8_t*)"sports";
     quasar_subscribe(q, topic, 6, 100);
     EXPECT_EQ(0, quasar_unsubscribe(q, topic, 6));
@@ -43,7 +60,7 @@ TEST_F(QuasarTest, Unsubscribe) {
 }
 
 TEST_F(QuasarTest, Publish) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* msg = (const uint8_t*)"goal!";
     quasar_subscribe(q, topic, 6, 100);
@@ -52,7 +69,7 @@ TEST_F(QuasarTest, Publish) {
 }
 
 TEST_F(QuasarTest, TickExpiresSubscriptions) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     const uint8_t* topic = (const uint8_t*)"sports";
     quasar_subscribe(q, topic, 6, 2);
     quasar_tick(q);
@@ -63,7 +80,7 @@ TEST_F(QuasarTest, TickExpiresSubscriptions) {
 }
 
 TEST_F(QuasarTest, MultipleSubscriptions) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     const uint8_t* t1 = (const uint8_t*)"sports";
     const uint8_t* t2 = (const uint8_t*)"news";
     const uint8_t* t3 = (const uint8_t*)"tech";
@@ -78,13 +95,13 @@ TEST_F(QuasarTest, MultipleSubscriptions) {
 }
 
 TEST_F(QuasarTest, SetMessageCallback) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     quasar_set_message_callback(q, NULL, NULL);
     quasar_destroy(q);
 }
 
 TEST_F(QuasarTest, NeighborFilterCreateAndLookup) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     ASSERT_NE(nullptr, q);
 
     meridian_node_t* neighbor = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
@@ -271,6 +288,22 @@ TEST_F(RouteMessageTest, PublishersList) {
 
 class MessageCallbackTest : public ::testing::Test {
 protected:
+    // The overlay's actor runs on a scheduler pool.
+    void SetUp() override {
+        sched = scheduler_pool_create(2);
+        ASSERT_NE(nullptr, sched);
+        scheduler_pool_start(sched);
+    }
+    void TearDown() override {
+        if (sched != nullptr) {
+            scheduler_pool_stop(sched);
+            scheduler_pool_destroy(sched);
+            sched = nullptr;
+        }
+    }
+
+    scheduler_pool_t* sched = nullptr;
+
     static void message_handler(void* ctx, const uint8_t* topic, size_t topic_len,
                                   const uint8_t* data, size_t data_len) {
         int* call_count = (int*)ctx;
@@ -281,7 +314,7 @@ protected:
 };
 
 TEST_F(MessageCallbackTest, LocalMessageCallback) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* msg = (const uint8_t*)"goal!";
 
@@ -295,7 +328,7 @@ TEST_F(MessageCallbackTest, LocalMessageCallback) {
 }
 
 TEST_F(MessageCallbackTest, NoCallbackWhenNotSubscribed) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* msg = (const uint8_t*)"goal!";
 
@@ -309,7 +342,7 @@ TEST_F(MessageCallbackTest, NoCallbackWhenNotSubscribed) {
 }
 
 TEST_F(MessageCallbackTest, NullCallbackDoesNotCrash) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* msg = (const uint8_t*)"goal!";
 
@@ -327,12 +360,25 @@ TEST_F(MessageCallbackTest, NullCallbackDoesNotCrash) {
 
 class GossipTest : public ::testing::Test {
 protected:
-    void SetUp() override {}
-    void TearDown() override {}
+    // The overlay's actor runs on a scheduler pool.
+    void SetUp() override {
+        sched = scheduler_pool_create(2);
+        ASSERT_NE(nullptr, sched);
+        scheduler_pool_start(sched);
+    }
+    void TearDown() override {
+        if (sched != nullptr) {
+            scheduler_pool_stop(sched);
+            scheduler_pool_destroy(sched);
+            sched = nullptr;
+        }
+    }
+
+    scheduler_pool_t* sched = nullptr;
 };
 
 TEST_F(GossipTest, InvalidMagicRejected) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     uint8_t bad_data[28] = {0};
     // Magic should be 0x51534152, but set it to 0
     EXPECT_EQ(-1, quasar_on_gossip(q, bad_data, sizeof(bad_data), NULL));
@@ -340,20 +386,20 @@ TEST_F(GossipTest, InvalidMagicRejected) {
 }
 
 TEST_F(GossipTest, NullDataRejected) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     EXPECT_EQ(-1, quasar_on_gossip(q, NULL, 100, NULL));
     quasar_destroy(q);
 }
 
 TEST_F(GossipTest, TooShortDataRejected) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     uint8_t short_data[10] = {0};
     EXPECT_EQ(-1, quasar_on_gossip(q, short_data, sizeof(short_data), NULL));
     quasar_destroy(q);
 }
 
 TEST_F(GossipTest, GossipStoresInNeighborFilter) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     ASSERT_NE(nullptr, q);
 
     meridian_node_t* neighbor = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
@@ -411,12 +457,25 @@ TEST_F(GossipTest, GossipStoresInNeighborFilter) {
 
 class OnRouteMessageTest : public ::testing::Test {
 protected:
-    void SetUp() override {}
-    void TearDown() override {}
+    // The overlay's actor runs on a scheduler pool.
+    void SetUp() override {
+        sched = scheduler_pool_create(2);
+        ASSERT_NE(nullptr, sched);
+        scheduler_pool_start(sched);
+    }
+    void TearDown() override {
+        if (sched != nullptr) {
+            scheduler_pool_stop(sched);
+            scheduler_pool_destroy(sched);
+            sched = nullptr;
+        }
+    }
+
+    scheduler_pool_t* sched = nullptr;
 };
 
 TEST_F(OnRouteMessageTest, NullMessageRejected) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     meridian_node_t* from = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
     EXPECT_EQ(-1, quasar_on_route_message(q, NULL, from));
     quasar_destroy(q);
@@ -436,7 +495,7 @@ TEST_F(OnRouteMessageTest, NullQuasarRejected) {
 }
 
 TEST_F(OnRouteMessageTest, LocalMessageViaRouteMessage) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* data = (const uint8_t*)"goal!";
 
@@ -463,7 +522,7 @@ TEST_F(OnRouteMessageTest, LocalMessageViaRouteMessage) {
 }
 
 TEST_F(OnRouteMessageTest, ZeroHopsRemainingStopsForwarding) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* data = (const uint8_t*)"goal!";
 
@@ -545,12 +604,24 @@ class DedupFilterTest : public ::testing::Test {
 protected:
     void SetUp() override {
         quasar_message_id_init();
+        // The overlay's actor runs on a scheduler pool.
+        sched = scheduler_pool_create(2);
+        ASSERT_NE(nullptr, sched);
+        scheduler_pool_start(sched);
     }
-    void TearDown() override {}
+    void TearDown() override {
+        if (sched != nullptr) {
+            scheduler_pool_stop(sched);
+            scheduler_pool_destroy(sched);
+            sched = nullptr;
+        }
+    }
+
+    scheduler_pool_t* sched = nullptr;
 };
 
 TEST_F(DedupFilterTest, DuplicateRouteMessageDiscarded) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* data = (const uint8_t*)"goal!";
 
@@ -579,7 +650,7 @@ TEST_F(DedupFilterTest, DuplicateRouteMessageDiscarded) {
 }
 
 TEST_F(DedupFilterTest, DifferentMessagesNotDiscarded) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     const uint8_t* topic = (const uint8_t*)"sports";
     const uint8_t* data = (const uint8_t*)"goal!";
 
@@ -624,7 +695,7 @@ TEST_F(DedupFilterTest, RouteMessageCarriesID) {
 
 TEST_F(QuasarTest, Algorithm2DirectedWalk) {
     // Node A subscribes to "sports"
-    quasar_t* node_a = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* node_a = quasar_create(NULL, 5, 3, 4096, 3, sched);
     const uint8_t* topic = (const uint8_t*)"sports";
     int delivered = 0;
     quasar_set_message_callback(node_a, [](void* ctx, const uint8_t*, size_t,
@@ -635,7 +706,7 @@ TEST_F(QuasarTest, Algorithm2DirectedWalk) {
     quasar_subscribe(node_a, topic, 6, 100);
 
     // Node B publishes to "sports" — has node A as a neighbor with "sports" in its filter
-    quasar_t* node_b = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* node_b = quasar_create(NULL, 5, 3, 4096, 3, sched);
     meridian_node_t* node_a_endpoint = meridian_node_create_unidentified(htobe32(0x0A000001), htobe16(8080));
 
     // Set up node B's neighbor filter for node A
@@ -664,7 +735,7 @@ TEST_F(QuasarTest, Algorithm2DirectedWalk) {
 TEST_F(QuasarTest, NegativeInformationPreventsSelfLoop) {
     // Node subscribes to "sports" and has itself as a neighbor
     // Publishing should deliver locally but NOT forward to self
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     const uint8_t* topic = (const uint8_t*)"sports";
 
     int delivered = 0;
@@ -1044,8 +1115,21 @@ TEST_F(ABFSerializationTest, MergeShiftsLevels) {
 
 class QuasarGossipTest : public ::testing::Test {
 protected:
-    void SetUp() override {}
-    void TearDown() override {}
+    // The overlay's actor runs on a scheduler pool.
+    void SetUp() override {
+        sched = scheduler_pool_create(2);
+        ASSERT_NE(nullptr, sched);
+        scheduler_pool_start(sched);
+    }
+    void TearDown() override {
+        if (sched != nullptr) {
+            scheduler_pool_stop(sched);
+            scheduler_pool_destroy(sched);
+            sched = nullptr;
+        }
+    }
+
+    scheduler_pool_t* sched = nullptr;
 };
 
 TEST_F(QuasarGossipTest, PropagateEncodesFilter) {
@@ -1053,7 +1137,7 @@ TEST_F(QuasarGossipTest, PropagateEncodesFilter) {
     // because meridian_protocol_broadcast(NULL, ...) will fail, but we can
     // verify the encode path works by checking that propagate returns -1
     // (from the broadcast failure) rather than crashing.
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     ASSERT_NE(nullptr, q);
 
     const uint8_t* topic = (const uint8_t*)"test";
@@ -1069,7 +1153,7 @@ TEST_F(QuasarGossipTest, PropagateEncodesFilter) {
 }
 
 TEST_F(QuasarGossipTest, OnGossipDecodesAndMerges) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     ASSERT_NE(nullptr, q);
 
     // Subscribe "topic1" locally so we can verify local sub is still at level 0 after merge
@@ -1120,7 +1204,7 @@ TEST_F(QuasarGossipTest, OnGossipDecodesAndMerges) {
 }
 
 TEST_F(QuasarGossipTest, MergePreservesLocalSubscriptions) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     ASSERT_NE(nullptr, q);
 
     const uint8_t* local_topic = (const uint8_t*)"local_topic";
@@ -1161,7 +1245,7 @@ TEST_F(QuasarGossipTest, MergePreservesLocalSubscriptions) {
 }
 
 TEST_F(QuasarGossipTest, OnGossipInvalidCBOR) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     ASSERT_NE(nullptr, q);
 
     const uint8_t garbage[] = {0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01, 0x02, 0x03};
@@ -1175,7 +1259,7 @@ TEST_F(QuasarGossipTest, OnGossipInvalidCBOR) {
 }
 
 TEST_F(QuasarGossipTest, OnGossipWrongType) {
-    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3);
+    quasar_t* q = quasar_create(NULL, 5, 3, 4096, 3, sched);
     ASSERT_NE(nullptr, q);
 
     // Build a CBOR array with a wrong type byte (not QUASAR_GOSSIP=50)

@@ -435,11 +435,16 @@ hierarchical_timing_wheel_t* hierarchical_timing_wheel_create(size_t slot_count,
   wheel->next_id = 1;
   hashmap_init(&wheel->timers, (void*)hash_uint64, (void*)compare_uint64);
   hashmap_set_key_alloc_funcs(&wheel->timers, duplicate_uint64, (void*)free);
-  wheel->milliseconds = timing_wheel_create(1, slot_count, pool, &wheel->timers, &wheel->lock, &wheel->idle);
-  wheel->seconds = timing_wheel_create(Time_Seconds, slot_count, pool, &wheel->timers, &wheel->lock, &wheel->idle);
-  wheel->minutes = timing_wheel_create(Time_Minutes, slot_count, pool, &wheel->timers, &wheel->lock, &wheel->idle);
-  wheel->hours = timing_wheel_create(Time_Hours, slot_count, pool, &wheel->timers, &wheel->lock, &wheel->idle);
-  wheel->days = timing_wheel_create(Time_Days, slot_count, pool, &wheel->timers, &wheel->lock, &wheel->idle);
+  /* The inner wheels share the hierarchical wheel's lock and condvar, so
+   * they are handed the pointers themselves. Handing them the ADDRESS of
+   * the fields made the inner wheel lock the pointer field as if it were
+   * a mutex: the pthread state was written over the lock pointer and the
+   * wheel was left with a destroyed lock. */
+  wheel->milliseconds = timing_wheel_create(1, slot_count, pool, &wheel->timers, wheel->lock, wheel->idle);
+  wheel->seconds = timing_wheel_create(Time_Seconds, slot_count, pool, &wheel->timers, wheel->lock, wheel->idle);
+  wheel->minutes = timing_wheel_create(Time_Minutes, slot_count, pool, &wheel->timers, wheel->lock, wheel->idle);
+  wheel->hours = timing_wheel_create(Time_Hours, slot_count, pool, &wheel->timers, wheel->lock, wheel->idle);
+  wheel->days = timing_wheel_create(Time_Days, slot_count, pool, &wheel->timers, wheel->lock, wheel->idle);
 
   wheel->seconds->wheel = wheel->milliseconds;
   wheel->minutes->wheel = wheel->seconds;

@@ -14,7 +14,7 @@ protected:
     // The session's actor runs on a pool worker: the public calls send a
     // request to the actor and wait for its answer.
     void SetUp() override {
-        pool_ = scheduler_pool_create(1);
+        pool_ = scheduler_pool_create(2);
         ASSERT_NE(nullptr, pool_);
         scheduler_pool_start(pool_);
     }

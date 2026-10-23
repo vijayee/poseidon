@@ -51,6 +51,8 @@ typedef struct actor_reply_t {
     platform_condvar_t* cv;     /**< Signalled when the answer is in. */
     int done;                   /**< Set by the actor when it has answered. */
     int orphaned;               /**< Set by the caller when it gave up. */
+    int result;                 /**< The handler's answer, for the calls
+                                     that have one. */
 } actor_reply_t;
 
 /**

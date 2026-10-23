@@ -110,6 +110,7 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
         .sched = sched
     };
 
+    channel->sched = sched;
     channel->protocol = meridian_protocol_create(&proto_config);
     if (channel->protocol == NULL) {
         if (created_key_pair) poseidon_key_pair_destroy(key_pair);
@@ -123,7 +124,7 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
     channel->quasar = quasar_create(channel->protocol,
                                      config->quasar_max_hops,
                                      config->quasar_alpha,
-                                     4096, 3);
+                                     4096, 3, sched);
     if (channel->quasar == NULL) {
         if (created_key_pair) poseidon_key_pair_destroy(key_pair);
         meridian_protocol_destroy(channel->protocol);
@@ -477,7 +478,8 @@ int poseidon_channel_rejoin_with_config(poseidon_channel_t* channel,
                                       new_config->quasar_max_hops,
                                       new_config->quasar_alpha,
                                       new_config->quasar_seen_size,
-                                      new_config->quasar_seen_hashes);
+                                      new_config->quasar_seen_hashes,
+                                      channel->sched);
     if (channel->quasar == NULL) return -1;
 
     // Re-subscribe to this channel's topic

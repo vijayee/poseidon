@@ -109,7 +109,7 @@ TEST(TopicAliasResolveExTest, NotFound) {
 }
 
 TEST(PathResolveTest, RawTopicId) {
-    scheduler_pool_t* sched = scheduler_pool_create(1);
+    scheduler_pool_t* sched = scheduler_pool_create(2);
     scheduler_pool_start(sched);
     work_pool_t* pool = work_pool_create(1);
     work_pool_launch(pool);
@@ -139,7 +139,7 @@ TEST(PathResolveTest, RawTopicId) {
 }
 
 TEST(PathResolveTest, AliasWithSubtopic) {
-    scheduler_pool_t* sched = scheduler_pool_create(1);
+    scheduler_pool_t* sched = scheduler_pool_create(2);
     scheduler_pool_start(sched);
     work_pool_t* pool = work_pool_create(1);
     work_pool_launch(pool);
@@ -171,7 +171,7 @@ TEST(PathResolveTest, AliasWithSubtopic) {
 }
 
 TEST(PathResolveTest, AmbiguousAlias) {
-    scheduler_pool_t* sched = scheduler_pool_create(1);
+    scheduler_pool_t* sched = scheduler_pool_create(2);
     scheduler_pool_start(sched);
     work_pool_t* pool = work_pool_create(1);
     work_pool_launch(pool);

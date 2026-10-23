@@ -12,7 +12,7 @@ protected:
     // a request to the actor and wait for its answer. One worker is
     // enough — the requests are answered one at a time.
     void SetUp() override {
-        pool_ = scheduler_pool_create(1);
+        pool_ = scheduler_pool_create(2);
         ASSERT_NE(nullptr, pool_);
         scheduler_pool_start(pool_);
     }

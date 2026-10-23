@@ -13,6 +13,8 @@
 #include "../../Util/vec.h"
 #include "../../RefCounter/refcounter.h"
 #include "../../Platform/platform_thread.h"
+#include "../../Actor/actor.h"
+#include "../../Scheduler/scheduler.h"
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
@@ -76,7 +78,6 @@ typedef struct quasar_route_message_t {
     uint16_t* pub_ports;               /**< Publisher node ports (network byte order) */
     uint32_t pub_count;                /**< Number of publishers in the list */
     uint32_t pub_capacity;             /**< Allocated capacity for publisher list */
-    platform_mutex_t* lock;            /**< Thread-safe access */
 } quasar_route_message_t;
 
 /**
@@ -185,6 +186,15 @@ typedef void (*quasar_message_cb_t)(void* ctx, const uint8_t* topic, size_t topi
  * 4. Periodically call quasar_propagate() and quasar_tick()
  * 5. Destroy via quasar_destroy()
  */
+/**
+ * How long a public call waits for the overlay's actor to answer.
+ *
+ * The call sends a request to the actor and waits on the request's
+ * condition variable — the round trip upstream's peer book uses. The
+ * actor runs on a pool worker, never on the calling thread.
+ */
+#define MERIDIAN_QUASAR_TIMEOUT_MS 5000
+
 typedef struct quasar_t {
     refcounter_t refcounter;                      /**< Reference counting for lifetime */
     struct meridian_protocol_t* protocol;          /**< Underlying Meridian P2P network */
@@ -198,8 +208,19 @@ typedef struct quasar_t {
     uint32_t seen_hashes;                    /**< Dedup filter hash count */
     quasar_message_cb_t on_message;              /**< Called when a message is delivered to a local subscriber */
     void* message_ctx;                            /**< User context for message callback */
-    platform_mutex_t* lock;                        /**< Thread-safe access to subscriptions and filter */
+    scheduler_pool_t* pool;                        /**< Scheduler pool that runs the overlay's actor */
+    actor_t actor;                                 /**< Owns the overlay's state */
 } quasar_t;
+
+/**
+ * The per-neighbour routing filter of a node. It belongs to the
+ * overlay's actor: the accessors below are round trips to it.
+ */
+attenuated_bloom_filter_t* quasar_get_neighbor_filter(quasar_t* quasar,
+                                                     const meridian_node_t* node);
+attenuated_bloom_filter_t* quasar_get_or_create_neighbor_filter(
+    quasar_t* quasar, const meridian_node_t* node);
+int quasar_remove_neighbor_filter(quasar_t* quasar, const meridian_node_t* node);
 
 // ============================================================================
 // LIFECYCLE
@@ -217,7 +238,8 @@ typedef struct quasar_t {
  * @return           New Quasar instance with refcount=1, or NULL on failure
  */
 quasar_t* quasar_create(struct meridian_protocol_t* protocol, uint32_t max_hops, uint32_t alpha,
-                          uint32_t seen_size, uint32_t seen_hashes);
+                          uint32_t seen_size, uint32_t seen_hashes,
+                          scheduler_pool_t* pool);
 
 /**
  * Destroys a Quasar instance and frees all subscriptions and the routing filter.
@@ -243,7 +265,6 @@ void quasar_set_message_callback(quasar_t* quasar, quasar_message_cb_t cb, void*
  * @param node    Neighbor to look up
  * @return        Pointer to the neighbor's filter, or NULL
  */
-attenuated_bloom_filter_t* quasar_get_neighbor_filter(quasar_t* quasar, const meridian_node_t* node);
 
 /**
  * Gets or creates the attenuated filter for a specific neighbor.
@@ -254,7 +275,6 @@ attenuated_bloom_filter_t* quasar_get_neighbor_filter(quasar_t* quasar, const me
  * @param node    Neighbor to get/create filter for
  * @return        Pointer to the neighbor's filter, or NULL on failure
  */
-attenuated_bloom_filter_t* quasar_get_or_create_neighbor_filter(quasar_t* quasar, const meridian_node_t* node);
 
 /**
  * Removes the filter for a specific neighbor.
@@ -264,7 +284,6 @@ attenuated_bloom_filter_t* quasar_get_or_create_neighbor_filter(quasar_t* quasar
  * @param node    Neighbor to remove
  * @return        0 on success, -1 if not found
  */
-int quasar_remove_neighbor_filter(quasar_t* quasar, const meridian_node_t* node);
 
 // ============================================================================
 // SUBSCRIPTION MANAGEMENT

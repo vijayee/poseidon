@@ -128,7 +128,7 @@ class ChannelNoticeTest : public ::testing::Test {
 protected:
     void SetUp() override {
         // The channel's protocol runs its actor on a scheduler pool.
-        sched = scheduler_pool_create(1);
+        sched = scheduler_pool_create(2);
         ASSERT_NE(sched, nullptr);
         scheduler_pool_start(sched);
 
@@ -286,12 +286,12 @@ protected:
     void SetUp() override {
         // The manager's actor runs on a scheduler pool: its public calls
         // send a request and wait for the answer.
-        sched = scheduler_pool_create(1);
+        sched = scheduler_pool_create(2);
         ASSERT_NE(sched, nullptr);
         scheduler_pool_start(sched);
 
         // The channel's protocol runs its actor on a scheduler pool.
-        sched = scheduler_pool_create(1);
+        sched = scheduler_pool_create(2);
         ASSERT_NE(sched, nullptr);
         scheduler_pool_start(sched);
 
