@@ -10,6 +10,10 @@
 #include "Channel/topic_alias.h"
 #include "Crypto/key_pair.h"
 #include "Workers/pool.h"
+
+extern "C" {
+#include "Scheduler/scheduler.h"
+}
 #include "Time/wheel.h"
 
 TEST(TopicIdTest, FromNodeId) {
@@ -105,13 +109,15 @@ TEST(TopicAliasResolveExTest, NotFound) {
 }
 
 TEST(PathResolveTest, RawTopicId) {
+    scheduler_pool_t* sched = scheduler_pool_create(1);
+    scheduler_pool_start(sched);
     work_pool_t* pool = work_pool_create(1);
     work_pool_launch(pool);
     hierarchical_timing_wheel_t* wheel = hierarchical_timing_wheel_create(8, pool);
     hierarchical_timing_wheel_run(wheel);
     poseidon_key_pair_t* kp = poseidon_key_pair_create("ED25519");
     poseidon_channel_config_t config = poseidon_channel_config_defaults();
-    poseidon_channel_t* channel = poseidon_channel_create(kp, "test", 14000, &config, pool, wheel);
+    poseidon_channel_t* channel = poseidon_channel_create(kp, "test", 14000, &config, pool, wheel, sched);
 
     poseidon_path_resolve_result_t result;
     int rc = poseidon_resolve_path(channel, "X4jKL2mNpQrStUvWxYz12", &result);
@@ -127,17 +133,21 @@ TEST(PathResolveTest, RawTopicId) {
     work_pool_shutdown(pool);
     work_pool_join_all(pool);
     work_pool_destroy(pool);
+    scheduler_pool_stop(sched);
+    scheduler_pool_destroy(sched);
     hierarchical_timing_wheel_destroy(wheel);
 }
 
 TEST(PathResolveTest, AliasWithSubtopic) {
+    scheduler_pool_t* sched = scheduler_pool_create(1);
+    scheduler_pool_start(sched);
     work_pool_t* pool = work_pool_create(1);
     work_pool_launch(pool);
     hierarchical_timing_wheel_t* wheel = hierarchical_timing_wheel_create(8, pool);
     hierarchical_timing_wheel_run(wheel);
     poseidon_key_pair_t* kp = poseidon_key_pair_create("ED25519");
     poseidon_channel_config_t config = poseidon_channel_config_defaults();
-    poseidon_channel_t* channel = poseidon_channel_create(kp, "test", 14001, &config, pool, wheel);
+    poseidon_channel_t* channel = poseidon_channel_create(kp, "test", 14001, &config, pool, wheel, sched);
     poseidon_channel_register_alias(channel, "Alice", "TopicAlice1234567890123456789012345678");
 
     poseidon_path_resolve_result_t result;
@@ -155,17 +165,21 @@ TEST(PathResolveTest, AliasWithSubtopic) {
     work_pool_shutdown(pool);
     work_pool_join_all(pool);
     work_pool_destroy(pool);
+    scheduler_pool_stop(sched);
+    scheduler_pool_destroy(sched);
     hierarchical_timing_wheel_destroy(wheel);
 }
 
 TEST(PathResolveTest, AmbiguousAlias) {
+    scheduler_pool_t* sched = scheduler_pool_create(1);
+    scheduler_pool_start(sched);
     work_pool_t* pool = work_pool_create(1);
     work_pool_launch(pool);
     hierarchical_timing_wheel_t* wheel = hierarchical_timing_wheel_create(8, pool);
     hierarchical_timing_wheel_run(wheel);
     poseidon_key_pair_t* kp = poseidon_key_pair_create("ED25519");
     poseidon_channel_config_t config = poseidon_channel_config_defaults();
-    poseidon_channel_t* channel = poseidon_channel_create(kp, "test", 14002, &config, pool, wheel);
+    poseidon_channel_t* channel = poseidon_channel_create(kp, "test", 14002, &config, pool, wheel, sched);
     poseidon_channel_register_alias(channel, "Alice", "TopicA1234567890123456789012345678");
     poseidon_channel_register_alias(channel, "Alice", "TopicB1234567890123456789012345678");
 
@@ -182,6 +196,8 @@ TEST(PathResolveTest, AmbiguousAlias) {
     work_pool_shutdown(pool);
     work_pool_join_all(pool);
     work_pool_destroy(pool);
+    scheduler_pool_stop(sched);
+    scheduler_pool_destroy(sched);
     hierarchical_timing_wheel_destroy(wheel);
 }
 

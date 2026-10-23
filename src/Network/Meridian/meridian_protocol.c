@@ -4,6 +4,7 @@
 
 #include "../../Platform/platform_thread.h"
 #include "meridian_protocol.h"
+#include "meridian_protocol_messages.h"
 #include "Platform/poseidon_msquic.h"
 #include "../Quasar/quasar_route.h"
 #include "../../Channel/channel_manager.h"
@@ -37,8 +38,63 @@ protocol_bidi_stream_callback(HQUIC Stream, void* Context,
                                QUIC_STREAM_EVENT* Event);
 
 // ============================================================================
+// ACTOR DISPATCH
+// ============================================================================
+
+/**
+ * The protocol's actor owns the peer and stream tables.
+ *
+ * msquic delivers the connection and the stream events on its own worker
+ * threads. Those events are handed to the actor, which mutates the tables
+ * on its own thread — the way upstream's network actor owns the peer
+ * list. The callbacks themselves do no state work: they build the event
+ * and move on.
+ */
+static void meridian_protocol_dispatch(void* state, message_t* msg) {
+    meridian_protocol_t* protocol = (meridian_protocol_t*)state;
+    if (msg == NULL) return;
+
+    switch (msg->type) {
+        case MERIDIAN_PROTOCOL_PEER_ADDED: {
+            const meridian_protocol_peer_added_msg_t* p =
+                (const meridian_protocol_peer_added_msg_t*)msg->payload;
+            platform_mutex_lock(protocol->lock);
+            if (protocol->num_connected_peers < 64) {
+                protocol->connected_peers[protocol->num_connected_peers] =
+                    (HQUIC)p->connection;
+                protocol->peer_nodes[protocol->num_connected_peers] = NULL;
+                protocol->num_connected_peers++;
+            }
+            platform_mutex_unlock(protocol->lock);
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+/* Hands an event to the protocol's actor. The payload is heap-allocated:
+   the actor may dispatch it after this call returns. */
+static bool protocol_post_event(meridian_protocol_t* protocol, uint32_t type,
+                                void* payload, void (*payload_destroy)(void*)) {
+    message_t msg = {
+        .type = type,
+        .payload = payload,
+        .payload_destroy = payload_destroy,
+    };
+    if (!actor_send(&protocol->actor, &msg)) {
+        /* The actor is gone: actor_send has already released the payload. */
+        return false;
+    }
+    return true;
+}
+
+// ============================================================================
 // STREAM TRACKING HELPERS
 // ============================================================================
+
+static int protocol_add_stream(meridian_protocol_t* protocol,
+                                meridian_stream_entry_t* entry);
 
 static int protocol_add_stream(meridian_protocol_t* protocol,
                                 meridian_stream_entry_t* entry) {
@@ -231,6 +287,9 @@ static void gossip_completed_cb(void* ctx, uint64_t query_id,
 
 meridian_protocol_t* meridian_protocol_create(const meridian_protocol_config_t* config) {
     if (config == NULL) return NULL;
+    /* The protocol's actor needs a scheduler pool: the msquic callbacks
+     * hand their events over to it, and only a pool worker runs it. */
+    if (config->sched == NULL) return NULL;
 
     meridian_protocol_t* protocol = (meridian_protocol_t*)
         get_clear_memory(sizeof(meridian_protocol_t));
@@ -251,13 +310,15 @@ meridian_protocol_t* meridian_protocol_create(const meridian_protocol_config_t* 
     memcpy(&protocol->config.local_node_id, &config->local_node_id, sizeof(poseidon_node_id_t));
     protocol->config.pool = config->pool;
     protocol->config.wheel = config->wheel;
+    protocol->config.sched = config->sched;
 
     protocol->state = MERIDIAN_PROTOCOL_STATE_INIT;
+    protocol->sched = config->sched;
     protocol->msquic = NULL;
     protocol->registration = NULL;
     protocol->listener = NULL;
     protocol->configuration = NULL;
-    protocol->running = false;
+    ATOMIC_STORE(&protocol->running, 0);
 
     protocol->ring_set = meridian_ring_set_create(
         config->primary_ring_size,
@@ -289,6 +350,12 @@ meridian_protocol_t* meridian_protocol_create(const meridian_protocol_config_t* 
     protocol->lock = platform_mutex_create();;
     refcounter_init(&protocol->refcounter);
 
+    /* The actor owns the peer table. The msquic callbacks hand their
+     * events over to it, the way upstream's network actor owns the peer
+     * list. */
+    actor_init(&protocol->actor, protocol, meridian_protocol_dispatch,
+               protocol->sched);
+
     return protocol;
 }
 
@@ -297,7 +364,11 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol) {
 
     refcounter_dereference(&protocol->refcounter);
     if (refcounter_count(&protocol->refcounter) == 0) {
-        if (protocol->running) {
+        /* The actor must be gone before the tables are read: its destroy
+         * waits for a dispatch in flight. */
+        actor_destroy(&protocol->actor);
+
+        if (ATOMIC_LOAD(&protocol->running)) {
             meridian_protocol_stop(protocol);
         }
 
@@ -382,7 +453,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
 
     platform_mutex_lock(protocol->lock);
 
-    if (protocol->running) {
+    if (ATOMIC_LOAD(&protocol->running)) {
         platform_mutex_unlock(protocol->lock);
         return 0;
     }
@@ -533,7 +604,7 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
     }
 
     protocol->state = MERIDIAN_PROTOCOL_STATE_BOOTSTRAPPING;
-    protocol->running = true;
+    ATOMIC_STORE(&protocol->running, 1);
 
     platform_mutex_unlock(protocol->lock);
     return 0;
@@ -544,12 +615,12 @@ int meridian_protocol_stop(meridian_protocol_t* protocol) {
 
     platform_mutex_lock(protocol->lock);
 
-    if (!protocol->running) {
+    if (!ATOMIC_LOAD(&protocol->running)) {
         platform_mutex_unlock(protocol->lock);
         return 0;
     }
 
-    protocol->running = false;
+    ATOMIC_STORE(&protocol->running, 0);
     protocol->state = MERIDIAN_PROTOCOL_STATE_SHUTTING_DOWN;
 
     if (protocol->gossip_handle) {
@@ -618,7 +689,7 @@ int meridian_protocol_add_seed_node(meridian_protocol_t* protocol,
 int meridian_protocol_connect(meridian_protocol_t* protocol,
                                uint32_t addr, uint16_t port) {
     if (protocol == NULL) return -1;
-    if (!protocol->running) return -1;
+    if (!ATOMIC_LOAD(&protocol->running)) return -1;
     if (protocol->num_connected_peers >= 64) return -1;
 
     // Check if already connected
@@ -689,7 +760,7 @@ int meridian_protocol_connect(meridian_protocol_t* protocol,
 int meridian_protocol_disconnect(meridian_protocol_t* protocol,
                                   uint32_t addr, uint16_t port) {
     if (protocol == NULL) return -1;
-    if (!protocol->running) return -1;
+    if (!ATOMIC_LOAD(&protocol->running)) return -1;
 
     platform_mutex_lock(protocol->lock);
     for (size_t i = 0; i < protocol->num_connected_peers; i++) {
@@ -734,7 +805,7 @@ int meridian_protocol_send_packet(meridian_protocol_t* protocol,
                                    const uint8_t* data, size_t len,
                                    const meridian_node_t* target) {
     if (protocol == NULL || data == NULL || target == NULL) return -1;
-    if (!protocol->running) return -1;
+    if (!ATOMIC_LOAD(&protocol->running)) return -1;
 
     // Find connection for target
     HQUIC Connection = NULL;
@@ -1105,7 +1176,7 @@ int meridian_protocol_set_callbacks(meridian_protocol_t* protocol,
 int meridian_protocol_get_local_node(meridian_protocol_t* protocol,
                                       uint32_t* addr, uint16_t* port) {
     if (protocol == NULL) return -1;
-    if (!protocol->running) return -1;
+    if (!ATOMIC_LOAD(&protocol->running)) return -1;
 
     if (addr) *addr = protocol->local_addr.sin_addr.s_addr;
     if (port) *port = ntohs(protocol->local_addr.sin_port);
@@ -1137,19 +1208,15 @@ ListenerCallback(HQUIC Listener, void* Context,
             return Status;
         }
 
-        // Add to connected peers
-        platform_mutex_lock(protocol->lock);
-        if (protocol->num_connected_peers < 64) {
-            // Get peer address - need to query connection params
-            uint32_t addr = 0;
-            uint16_t port = 0;
-
-            // For now, store NULL node - address will be updated when we get peer address
-            protocol->connected_peers[protocol->num_connected_peers] = Connection;
-            protocol->peer_nodes[protocol->num_connected_peers] = NULL;
-            protocol->num_connected_peers++;
+        /* The peer table belongs to the protocol's actor: the event is
+         * handed over and the callback moves on. The address is filled in
+         * later, when the peer address is known. */
+        meridian_protocol_peer_added_msg_t* event =
+            get_clear_memory(sizeof(meridian_protocol_peer_added_msg_t));
+        if (event != NULL) {
+            event->connection = Connection;
+            protocol_post_event(protocol, MERIDIAN_PROTOCOL_PEER_ADDED, event, free);
         }
-        platform_mutex_unlock(protocol->lock);
 
         return QUIC_STATUS_SUCCESS;
     }

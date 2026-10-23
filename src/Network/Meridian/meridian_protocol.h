@@ -11,6 +11,9 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include "../../Platform/platform_thread.h"
+#include "../../Actor/actor.h"
+#include "../../Scheduler/scheduler.h"
+#include "../../Util/atomic_compat.h"
 #include "meridian.h"
 #include "meridian_ring.h"
 #include "meridian_query.h"
@@ -99,6 +102,7 @@ typedef struct meridian_protocol_config_t {
     poseidon_node_id_t local_node_id;        /**< This node's identity */
     work_pool_t* pool;                       /**< Work pool for async operations */
     hierarchical_timing_wheel_t* wheel;       /**< Timing wheel for scheduling */
+    scheduler_pool_t* sched;                 /**< Scheduler pool that runs the protocol actor */
 } meridian_protocol_config_t;
 
 // ============================================================================
@@ -159,13 +163,16 @@ typedef struct meridian_protocol_t {
 
     meridian_protocol_callbacks_t callbacks;   /**< Protocol event callbacks */
 
-    // Per-message stream tracking (replaces datagram)
+    // Per-message stream tracking (replaces datagram). The actor owns the
+    // table: the msquic callbacks hand the stream events over to it.
     meridian_stream_entry_t** active_streams;  /**< Array of active stream entries */
     size_t num_active_streams;                  /**< Count of active streams */
     size_t active_streams_cap;                  /**< Allocated capacity for stream entries */
 
     platform_mutex_t* lock;                    /**< Thread-safe state access */
-    bool running;                              /**< True when protocol is active */
+    scheduler_pool_t* sched;                  /**< Scheduler pool that runs the actor */
+    actor_t actor;                             /**< Owns the peer and stream tables */
+    ATOMIC(uint8_t) running;                   /**< True when protocol is active */
 } meridian_protocol_t;
 
 // ============================================================================

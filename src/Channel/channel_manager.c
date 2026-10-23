@@ -120,7 +120,7 @@ poseidon_channel_manager_t* poseidon_channel_manager_create(
        settings. */
     poseidon_channel_config_t dial_config = poseidon_channel_config_defaults();
     mgr->dial_channel = poseidon_channel_create(
-        dial_key_pair, "dial", dial_port, &dial_config, pool, wheel);
+        dial_key_pair, "dial", dial_port, &dial_config, pool, wheel, sched);
     if (mgr->dial_channel == NULL) {
         platform_mutex_destroy(mgr->external_lock);
         free(mgr);
@@ -544,7 +544,9 @@ poseidon_channel_t* poseidon_channel_manager_create_channel_impl(
     poseidon_key_pair_t* kp = poseidon_key_pair_create(key_type);
     if (kp == NULL) return NULL;
 
-    poseidon_channel_t* channel = poseidon_channel_create(kp, name, port, config, mgr->pool, mgr->wheel);
+    poseidon_channel_t* channel = poseidon_channel_create(kp, name, port, config,
+                                                          mgr->pool, mgr->wheel,
+                                                          mgr->actor.pool);
     poseidon_key_pair_destroy(kp);
     if (channel == NULL) return NULL;
 
@@ -622,7 +624,9 @@ poseidon_channel_t* poseidon_channel_manager_join_channel_impl(
     if (port == 0) return NULL;
 
     poseidon_channel_config_t config = poseidon_channel_config_defaults();
-    poseidon_channel_t* channel = poseidon_channel_create(NULL, topic_str, port, &config, mgr->pool, mgr->wheel);
+    poseidon_channel_t* channel = poseidon_channel_create(NULL, topic_str, port,
+                                                          &config, mgr->pool,
+                                                          mgr->wheel, mgr->actor.pool);
     if (channel == NULL) return NULL;
     channel->state = POSEIDON_CHANNEL_STATE_BOOTSTRAPPING;
 

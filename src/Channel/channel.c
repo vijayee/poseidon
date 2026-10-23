@@ -44,7 +44,8 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
                                              uint16_t listen_port,
                                              const poseidon_channel_config_t* config,
                                              work_pool_t* pool,
-                                             hierarchical_timing_wheel_t* wheel) {
+                                             hierarchical_timing_wheel_t* wheel,
+                                             scheduler_pool_t* sched) {
     if (config == NULL || pool == NULL || wheel == NULL) return NULL;
 
     bool created_key_pair = false;
@@ -105,7 +106,8 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
         .tls_cert_path = cert_path,
         .local_node_id = channel->node_id,
         .pool = pool,
-        .wheel = wheel
+        .wheel = wheel,
+        .sched = sched
     };
 
     channel->protocol = meridian_protocol_create(&proto_config);

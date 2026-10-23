@@ -14,6 +14,10 @@
 #include "Platform/platform_time.h"
 #include "Util/portable_endian.h"
 
+extern "C" {
+#include "Scheduler/scheduler.h"
+}
+
 #define TEST_NODE_COUNT 3
 #define TEST_TIMEOUT_MS 1000
 
@@ -63,7 +67,9 @@ static void cleanup_node_tls(test_node_context_t* node) {
     node->key_pair = NULL;
 }
 
-static meridian_protocol_config_t make_config(uint16_t port, const char* key_path, const char* cert_path) {
+static meridian_protocol_config_t make_config(uint16_t port, const char* key_path,
+                                            const char* cert_path,
+                                            scheduler_pool_t* sched) {
     meridian_protocol_config_t config = {
         .listen_port = port,
         .info_port = 0,
@@ -79,7 +85,8 @@ static meridian_protocol_config_t make_config(uint16_t port, const char* key_pat
         .tls_key_path = key_path,
         .tls_cert_path = cert_path,
         .pool = NULL,
-        .wheel = NULL
+        .wheel = NULL,
+        .sched = sched
     };
     return config;
 }
@@ -92,6 +99,12 @@ protected:
         memset(nodes, 0, sizeof(nodes));
         base_port = next_base_port;
         next_base_port += TEST_NODE_COUNT;
+
+        // The protocol's actor runs on a scheduler pool. One pool serves
+        // the whole fixture, the way the daemon serves the whole process.
+        sched = scheduler_pool_create(2);
+        ASSERT_NE(nullptr, sched);
+        scheduler_pool_start(sched);
     }
 
     void TearDown() override {
@@ -104,10 +117,16 @@ protected:
             cleanup_node_tls(&nodes[i]);
             platform_mutex_destroy(nodes[i].mutex);
         }
+        if (sched != nullptr) {
+            scheduler_pool_stop(sched);
+            scheduler_pool_destroy(sched);
+            sched = nullptr;
+        }
     }
 
     test_node_context_t nodes[TEST_NODE_COUNT];
     int base_port;
+    scheduler_pool_t* sched = nullptr;
 };
 
 int MeridianIntegrationTest::next_base_port = 12000;
@@ -120,7 +139,7 @@ TEST_F(MeridianIntegrationTest, CreateMultipleNodes) {
 
         ASSERT_EQ(0, setup_node_tls(&nodes[i], i));
 
-        meridian_protocol_config_t config = make_config(port, nodes[i].key_path, nodes[i].cert_path);
+        meridian_protocol_config_t config = make_config(port, nodes[i].key_path, nodes[i].cert_path, sched);
         nodes[i].protocol = meridian_protocol_create(&config);
         ASSERT_NE(nullptr, nodes[i].protocol);
     }
@@ -138,7 +157,7 @@ TEST_F(MeridianIntegrationTest, StartNodes) {
 
         ASSERT_EQ(0, setup_node_tls(&nodes[i], i));
 
-        meridian_protocol_config_t config = make_config(port, nodes[i].key_path, nodes[i].cert_path);
+        meridian_protocol_config_t config = make_config(port, nodes[i].key_path, nodes[i].cert_path, sched);
         nodes[i].protocol = meridian_protocol_create(&config);
         ASSERT_NE(nullptr, nodes[i].protocol);
 
@@ -164,7 +183,7 @@ TEST_F(MeridianIntegrationTest, ConnectNodesInRing) {
 
         ASSERT_EQ(0, setup_node_tls(&nodes[i], i));
 
-        meridian_protocol_config_t config = make_config(port, nodes[i].key_path, nodes[i].cert_path);
+        meridian_protocol_config_t config = make_config(port, nodes[i].key_path, nodes[i].cert_path, sched);
         nodes[i].protocol = meridian_protocol_create(&config);
         ASSERT_NE(nullptr, nodes[i].protocol);
         if (!quic_available(nodes[i].protocol)) {
@@ -204,7 +223,7 @@ TEST_F(MeridianIntegrationTest, FindClosestNode) {
 
         ASSERT_EQ(0, setup_node_tls(&nodes[i], i));
 
-        meridian_protocol_config_t config = make_config(port, nodes[i].key_path, nodes[i].cert_path);
+        meridian_protocol_config_t config = make_config(port, nodes[i].key_path, nodes[i].cert_path, sched);
         nodes[i].protocol = meridian_protocol_create(&config);
         ASSERT_NE(nullptr, nodes[i].protocol);
         if (!quic_available(nodes[i].protocol)) {
@@ -234,7 +253,7 @@ TEST_F(MeridianIntegrationTest, SendPacketBetweenNodes) {
 
         ASSERT_EQ(0, setup_node_tls(&nodes[i], i));
 
-        meridian_protocol_config_t config = make_config(port, nodes[i].key_path, nodes[i].cert_path);
+        meridian_protocol_config_t config = make_config(port, nodes[i].key_path, nodes[i].cert_path, sched);
         nodes[i].protocol = meridian_protocol_create(&config);
         ASSERT_NE(nullptr, nodes[i].protocol);
         if (!quic_available(nodes[i].protocol)) {
@@ -269,7 +288,7 @@ TEST_F(MeridianIntegrationTest, StopAndRestart) {
 
     ASSERT_EQ(0, setup_node_tls(&nodes[0], 0));
 
-    meridian_protocol_config_t config = make_config(port, nodes[0].key_path, nodes[0].cert_path);
+    meridian_protocol_config_t config = make_config(port, nodes[0].key_path, nodes[0].cert_path, sched);
     nodes[0].protocol = meridian_protocol_create(&config);
     ASSERT_NE(nullptr, nodes[0].protocol);
     if (!quic_available(nodes[0].protocol)) {
@@ -290,7 +309,7 @@ TEST_F(MeridianIntegrationTest, AddSeedNodes) {
     nodes[0].port = port;
 
     // No TLS needed for just adding seed nodes (no protocol start)
-    meridian_protocol_config_t config = make_config(port, NULL, NULL);
+    meridian_protocol_config_t config = make_config(port, NULL, NULL, sched);
     nodes[0].protocol = meridian_protocol_create(&config);
     ASSERT_NE(nullptr, nodes[0].protocol);
 
@@ -310,7 +329,7 @@ TEST_F(MeridianIntegrationTest, DisconnectNode) {
 
         ASSERT_EQ(0, setup_node_tls(&nodes[i], i));
 
-        meridian_protocol_config_t config = make_config(port, nodes[i].key_path, nodes[i].cert_path);
+        meridian_protocol_config_t config = make_config(port, nodes[i].key_path, nodes[i].cert_path, sched);
         nodes[i].protocol = meridian_protocol_create(&config);
         ASSERT_NE(nullptr, nodes[i].protocol);
         if (!quic_available(nodes[i].protocol)) {
@@ -342,7 +361,7 @@ TEST_F(MeridianIntegrationTest, GetLocalNodeInfo) {
 
     ASSERT_EQ(0, setup_node_tls(&nodes[0], 0));
 
-    meridian_protocol_config_t config = make_config(port, nodes[0].key_path, nodes[0].cert_path);
+    meridian_protocol_config_t config = make_config(port, nodes[0].key_path, nodes[0].cert_path, sched);
     nodes[0].protocol = meridian_protocol_create(&config);
     ASSERT_NE(nullptr, nodes[0].protocol);
     if (!quic_available(nodes[0].protocol)) {

@@ -19,6 +19,10 @@ extern "C" {
 extern "C" {
 #include "Scheduler/scheduler.h"
 }
+
+extern "C" {
+#include "Scheduler/scheduler.h"
+}
 #include "Time/wheel.h"
 #include <cbor.h>
 }
@@ -123,6 +127,11 @@ TEST(ModifyNoticePacketTest, DecodeNullReturnsError) {
 class ChannelNoticeTest : public ::testing::Test {
 protected:
     void SetUp() override {
+        // The channel's protocol runs its actor on a scheduler pool.
+        sched = scheduler_pool_create(1);
+        ASSERT_NE(sched, nullptr);
+        scheduler_pool_start(sched);
+
         pool = work_pool_create(2);
         ASSERT_NE(pool, nullptr);
         work_pool_launch(pool);
@@ -136,7 +145,7 @@ protected:
 
         poseidon_channel_config_t config = poseidon_channel_config_defaults();
         channel = poseidon_channel_create(key_pair, "test-channel", 17000,
-                                           &config, pool, wheel);
+                                           &config, pool, wheel, sched);
         ASSERT_NE(channel, nullptr);
     }
 
@@ -155,6 +164,11 @@ protected:
             hierarchical_timing_wheel_destroy(wheel);
             wheel = nullptr;
         }
+        if (sched != nullptr) {
+            scheduler_pool_stop(sched);
+            scheduler_pool_destroy(sched);
+            sched = nullptr;
+        }
         if (pool != nullptr) {
             work_pool_shutdown(pool);
             work_pool_join_all(pool);
@@ -164,8 +178,8 @@ protected:
     }
 
     work_pool_t* pool = nullptr;
-    hierarchical_timing_wheel_t* wheel = nullptr;
     scheduler_pool_t* sched = nullptr;
+    hierarchical_timing_wheel_t* wheel = nullptr;
     poseidon_key_pair_t* key_pair = nullptr;
     poseidon_channel_t* channel = nullptr;
 };
@@ -276,6 +290,11 @@ protected:
         ASSERT_NE(sched, nullptr);
         scheduler_pool_start(sched);
 
+        // The channel's protocol runs its actor on a scheduler pool.
+        sched = scheduler_pool_create(1);
+        ASSERT_NE(sched, nullptr);
+        scheduler_pool_start(sched);
+
         pool = work_pool_create(2);
         ASSERT_NE(pool, nullptr);
         work_pool_launch(pool);
@@ -312,6 +331,11 @@ protected:
             hierarchical_timing_wheel_destroy(wheel);
             wheel = nullptr;
         }
+        if (sched != nullptr) {
+            scheduler_pool_stop(sched);
+            scheduler_pool_destroy(sched);
+            sched = nullptr;
+        }
         if (pool != nullptr) {
             work_pool_shutdown(pool);
             work_pool_join_all(pool);
@@ -321,8 +345,8 @@ protected:
     }
 
     work_pool_t* pool = nullptr;
-    hierarchical_timing_wheel_t* wheel = nullptr;
     scheduler_pool_t* sched = nullptr;
+    hierarchical_timing_wheel_t* wheel = nullptr;
     poseidon_key_pair_t* dial_key_pair = nullptr;
     poseidon_channel_manager_t* mgr = nullptr;
 };

@@ -171,7 +171,8 @@ static void handle_subscribe(client_session_t* s, client_session_msg_topic_t* p)
         if (channel == NULL) {
             poseidon_channel_config_t config = poseidon_channel_config_defaults();
             channel = poseidon_channel_create(NULL, p->topic_path, 0, &config,
-                                              s->manager->pool, s->manager->wheel);
+                                              s->manager->pool, s->manager->wheel,
+                                              s->manager->actor.pool);
         }
         if (channel != NULL) {
             poseidon_channel_set_message_callback(channel, session_dispatch_message, s->manager);
@@ -255,7 +256,8 @@ static void handle_handle_request(client_session_t* s,
         if (ch != NULL) { rc = -1; break; }
         poseidon_channel_config_t config = poseidon_channel_config_defaults();
         ch = poseidon_channel_create(NULL, p->frame->topic_path, 0, &config,
-                                     s->manager->pool, s->manager->wheel);
+                                     s->manager->pool, s->manager->wheel,
+                                     s->manager->actor.pool);
         rc = (ch != NULL) ? 0 : -1;
         break;
     }

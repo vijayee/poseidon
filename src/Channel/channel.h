@@ -86,6 +86,7 @@ typedef struct poseidon_channel_t {
  * @param config      Channel configuration
  * @param pool        Work pool for async operations
  * @param wheel       Timing wheel for scheduling
+ * @param sched       Scheduler pool that runs the protocol's actor
  * @return            New channel with refcount=1, or NULL on failure
  */
 poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
@@ -93,7 +94,8 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
                                              uint16_t listen_port,
                                              const poseidon_channel_config_t* config,
                                              work_pool_t* pool,
-                                             hierarchical_timing_wheel_t* wheel);
+                                             hierarchical_timing_wheel_t* wheel,
+                                             scheduler_pool_t* sched);
 
 void poseidon_channel_destroy(poseidon_channel_t* channel);
 
