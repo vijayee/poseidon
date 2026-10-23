@@ -13,14 +13,14 @@ protected:
 TEST_F(RelayTest, CreateDestroyClientWithoutMsquic) {
     // Without msquic, create returns NULL — verify the null check works
     meridian_rendv_t* server = meridian_rendv_create(0x01020304, 8080);
-    meridian_relay_t* relay = meridian_relay_create(NULL, NULL, server, NULL, NULL);
+    meridian_relay_t* relay = meridian_relay_create(NULL, NULL, server, NULL, NULL, NULL);
     EXPECT_EQ(nullptr, relay);
     meridian_rendv_destroy(server);
 }
 
 TEST_F(RelayTest, CreateDestroyClientWithNullServer) {
     // Without server, create returns NULL
-    meridian_relay_t* relay = meridian_relay_create(NULL, NULL, NULL, NULL, NULL);
+    meridian_relay_t* relay = meridian_relay_create(NULL, NULL, NULL, NULL, NULL, NULL);
     EXPECT_EQ(nullptr, relay);
 }
 

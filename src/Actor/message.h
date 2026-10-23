@@ -453,6 +453,11 @@ typedef enum {
   MERIDIAN_RENDV_STREAM_DATA,
   /* Detect the NAT type. The actor sends the address requests. */
   MERIDIAN_RENDV_DETECT_NAT,
+  /* A relay client learned this node's reflexive address. The relay
+   * client hands it to the rendezvous's actor as an event, the way
+   * upstream's relay client hands the address response to the NAT
+   * detector's actor (liboffs/src/Network/relay_client.c). */
+  MERIDIAN_RENDV_ADDR_RESPONSE,
 
   /* ========================================================================
    * 2.20 Quasar overlay — actor messages

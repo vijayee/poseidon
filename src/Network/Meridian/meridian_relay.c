@@ -4,6 +4,8 @@
 
 #include "meridian_relay.h"
 #include "meridian_packet.h"
+#include "meridian_rendv.h"
+#include "meridian_rendv_messages.h"
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
 #include <stdlib.h>
@@ -129,6 +131,7 @@ static void relay_release_own_pool(meridian_relay_t* relay) {
 meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
                                         HQUIC registration,
                                         meridian_rendv_t* server,
+                                        meridian_rendv_handle_t* handle,
                                         const meridian_relay_config_t* config,
                                         scheduler_pool_t* pool) {
     if (msquic == NULL || server == NULL) return NULL;
@@ -140,14 +143,13 @@ meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
     relay->msquic = msquic;
     relay->registration = registration;
     relay->server = server;
+    relay->handle = handle;
     relay->configuration = NULL;
     relay->connection = NULL;
     ATOMIC_STORE(&relay->local_endpoint_id, 0);
     ATOMIC_STORE(&relay->connected, 0);
     relay->on_datagram = NULL;
     relay->on_datagram_ctx = NULL;
-    relay->on_addr_response = NULL;
-    relay->on_addr_response_ctx = NULL;
     relay->pool = pool;
     relay->own_pool = NULL;
 
@@ -526,16 +528,6 @@ void meridian_relay_on_datagram(meridian_relay_t* relay,
     platform_mutex_unlock(relay->lock);
 }
 
-void meridian_relay_on_addr_response(meridian_relay_t* relay,
-                                      meridian_relay_addr_cb_t callback, void* ctx) {
-    if (relay == NULL) return;
-
-    platform_mutex_lock(relay->lock);
-    relay->on_addr_response = callback;
-    relay->on_addr_response_ctx = ctx;
-    platform_mutex_unlock(relay->lock);
-}
-
 // ============================================================================
 // RELAY STATE QUERY
 // ============================================================================
@@ -548,6 +540,43 @@ uint32_t meridian_relay_get_endpoint_id(meridian_relay_t* relay) {
 bool meridian_relay_is_connected(meridian_relay_t* relay) {
     if (relay == NULL) return false;
     return ATOMIC_LOAD(&relay->connected) != 0;
+}
+
+/**
+ * Hands the relay's address response to the rendezvous handle's actor.
+ *
+ * This is upstream's shape: the relay client posts the address response
+ * to the NAT detector's actor as an event
+ * (liboffs/src/Network/relay_client.c, NETWORK_ADDR_RESPONSE), and the
+ * detector answers with its own event. A callback would run on the
+ * relay's stream actor — a pool worker — and the worker that waits for
+ * an answer is a worker that runs no actor.
+ */
+static void relay_post_addr_response(meridian_relay_t* relay,
+                                      uint32_t reflexive_addr,
+                                      uint16_t reflexive_port,
+                                      uint32_t endpoint_id) {
+    if (relay == NULL || relay->handle == NULL) return;
+
+    meridian_rendv_addr_response_msg_t* request =
+        (meridian_rendv_addr_response_msg_t*)
+        get_clear_memory(sizeof(meridian_rendv_addr_response_msg_t));
+    if (request == NULL) return;
+    request->relay = relay;
+    request->reflexive_addr = reflexive_addr;
+    request->reflexive_port = reflexive_port;
+    request->endpoint_id = endpoint_id;
+
+    /* The event is the worker's to free: the request carries no reply
+     * block, because nobody waits for this one. */
+    message_t msg = {
+        .type = MERIDIAN_RENDV_ADDR_RESPONSE,
+        .payload = request,
+        .payload_destroy = NULL,
+    };
+    if (!actor_send(&relay->handle->actor, &msg)) {
+        free(request);
+    }
 }
 
 // ============================================================================
@@ -622,19 +651,10 @@ static void relay_process_uni_message(meridian_relay_t* relay,
             if (addr_resp != NULL) {
                 ATOMIC_STORE(&relay->local_endpoint_id, addr_resp->endpoint_id);
 
-                platform_mutex_lock(relay->lock);
-                meridian_relay_addr_cb_t callback = relay->on_addr_response;
-                void* callback_ctx = relay->on_addr_response_ctx;
-                platform_mutex_unlock(relay->lock);
-
-                // The callback runs outside the lock: it may call back
-                // into the relay.
-                if (callback != NULL) {
-                    callback(callback_ctx,
-                             addr_resp->reflexive_addr,
-                             addr_resp->reflexive_port,
-                             addr_resp->endpoint_id);
-                }
+                relay_post_addr_response(relay,
+                                         addr_resp->reflexive_addr,
+                                         addr_resp->reflexive_port,
+                                         addr_resp->endpoint_id);
 
                 meridian_addr_response_destroy(addr_resp);
             }
@@ -707,17 +727,10 @@ static void relay_process_bidi_message(meridian_relay_t* relay,
         if (addr_resp != NULL) {
             ATOMIC_STORE(&relay->local_endpoint_id, addr_resp->endpoint_id);
 
-            platform_mutex_lock(relay->lock);
-            meridian_relay_addr_cb_t callback = relay->on_addr_response;
-            void* callback_ctx = relay->on_addr_response_ctx;
-            platform_mutex_unlock(relay->lock);
-
-            if (callback != NULL) {
-                callback(callback_ctx,
-                         addr_resp->reflexive_addr,
-                         addr_resp->reflexive_port,
-                         addr_resp->endpoint_id);
-            }
+            relay_post_addr_response(relay,
+                                     addr_resp->reflexive_addr,
+                                     addr_resp->reflexive_port,
+                                     addr_resp->endpoint_id);
 
             meridian_addr_response_destroy(addr_resp);
         }

@@ -276,7 +276,16 @@ void answering_worker_dispatch(void* state, message_t* msg) {
     ask_t* p = static_cast<ask_t*>(msg->payload);
     if (p == nullptr) return;
     /* The worker answers the actor that asked: the answer goes back as a
-     * message, so the asking actor is not holding a thread. */
+     * message, so the asking actor is not holding a thread. The answer
+     * carries its own payload, the way upstream's result events do
+     * (liboffs/src/BlockCache/section.h: section_read_result_payload_t
+     * carries the data the asker asked for). */
+    int* payload = static_cast<int*>(calloc(1, sizeof(int)));
+    if (payload != NULL) {
+        *payload = 7 + p->request_id;
+        p->answer.data = payload;
+        p->answer.data_destroy = (void (*)(void*))free;
+    }
     actor_answer_send(&p->answer, 42 + p->request_id);
     /* The request was the worker's. */
     actor_reply_destroy(&p->reply);
@@ -288,6 +297,7 @@ struct waiting_state_t {
     actor_t* worker;
     int asks;
     int answers;
+    int last_payload;
 };
 
 void waiting_dispatch(void* state, message_t* msg) {
@@ -324,6 +334,11 @@ void waiting_dispatch(void* state, message_t* msg) {
         actor_answer_t* answer = static_cast<actor_answer_t*>(msg->payload);
         if (answer == nullptr) return;
         s->answers++;
+        s->last_payload = (answer->data != NULL)
+                              ? *static_cast<int*>(answer->data)
+                              : 0;
+        /* The answer's payload belongs to the asker. */
+        actor_answer_free(answer);
         /* The answer carries the requester's own state back to it. */
         outer_t* p = static_cast<outer_t*>(answer->token);
         if (p != nullptr) {
@@ -349,7 +364,7 @@ TEST_F(ActorTest, AnActorCanHaveAnAnswerWithoutAWorkerWaiting) {
     actor_t worker;
     actor_init(&worker, &worker_state, answering_worker_dispatch, pool);
 
-    waiting_state_t waiting_state{nullptr, &worker, 0, 0};
+    waiting_state_t waiting_state{nullptr, &worker, 0, 0, 0};
     actor_t waiting;
     actor_init(&waiting, &waiting_state, waiting_dispatch, pool);
     waiting_state.self = &waiting;
@@ -379,6 +394,9 @@ TEST_F(ActorTest, AnActorCanHaveAnAnswerWithoutAWorkerWaiting) {
     EXPECT_EQ(1, waiting_state.asks);
     EXPECT_EQ(1, waiting_state.answers);
     EXPECT_EQ(1, worker_state.works);
+    /* The answer carried its own payload, the way upstream's result
+     * events do. */
+    EXPECT_EQ(7 + 7, waiting_state.last_payload);
 
     actor_reply_destroy(&request->reply);
     free(request);

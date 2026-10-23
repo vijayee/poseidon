@@ -128,6 +128,8 @@ bool actor_answer_send(const actor_answer_t* answer, int result) {
     copy->reply_type = answer->reply_type;
     copy->token = answer->token;
     copy->result = result;
+    copy->data = answer->data;
+    copy->data_destroy = answer->data_destroy;
 
     message_t message;
     memset(&message, 0, sizeof(message));
@@ -137,6 +139,15 @@ bool actor_answer_send(const actor_answer_t* answer, int result) {
     message.payload_destroy = (void (*)(void*))free;
     actor_send(answer->reply_to, &message);
     return true;
+}
+
+void actor_answer_free(actor_answer_t* answer) {
+    if (answer == NULL) return;
+    if (answer->data != NULL && answer->data_destroy != NULL) {
+        answer->data_destroy(answer->data);
+    }
+    answer->data = NULL;
+    answer->data_destroy = NULL;
 }
 
 int actor_reply_wait(actor_reply_t* reply, uint32_t timeout_ms) {

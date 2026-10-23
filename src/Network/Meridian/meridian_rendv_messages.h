@@ -62,6 +62,18 @@ typedef struct meridian_rendv_find_peer_msg_t {
     void* out_peer;         /**< The actor writes the found peer here. */
 } meridian_rendv_find_peer_msg_t;
 
+/* A relay client learned this node's reflexive address: the address the
+ * relay saw, which is the only view of it that matters for the NAT
+ * classification. The relay client names itself so the actor can tell
+ * the two relays apart. */
+typedef struct meridian_rendv_addr_response_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
+    void* relay;            /**< The relay client that answered. */
+    uint32_t reflexive_addr; /**< The address the relay saw. */
+    uint16_t reflexive_port; /**< The port the relay saw. */
+    uint32_t endpoint_id;   /**< The relay's endpoint id for this node. */
+} meridian_rendv_addr_response_msg_t;
+
 /* Register the application callback for tunnel data. */
 typedef struct meridian_rendv_set_stream_cb_msg_t {
     actor_reply_t reply;   /**< Must stay first. */

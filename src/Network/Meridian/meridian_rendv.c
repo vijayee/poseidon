@@ -419,6 +419,10 @@ meridian_rendv_t* meridian_rendv_handle_find_peer(meridian_rendv_handle_t* handl
 // ACTOR DISPATCH
 // ============================================================================
 
+/* Classifies the local NAT type from the reflexive address the relay
+ * reported. Defined below the dispatch that uses it. */
+static meridian_nat_type_t rendv_classify_nat(meridian_rendv_handle_t* handle);
+
 /**
  * The rendezvous handle's actor owns the handle's state.
  *
@@ -560,25 +564,33 @@ static void meridian_rendv_dispatch(void* state, message_t* msg) {
                     meridian_rendv_get_reflexive_addr(handle->local_rendv);
                 uint16_t reflexive_port =
                     meridian_rendv_get_reflexive_port(handle->local_rendv);
-                uint32_t local_addr = handle->local_rendv->addr;
-
-                meridian_nat_type_t nat_type = MERIDIAN_NAT_TYPE_UNKNOWN;
-                if (local_addr != 0 && local_addr == reflexive_addr) {
-                    nat_type = MERIDIAN_NAT_TYPE_OPEN;
-                } else if (reflexive_addr != 0) {
-                    nat_type = MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE;
-                }
-                handle->local_rendv->nat_type = nat_type;
 
                 p->reflexive_addr = reflexive_addr;
                 p->reflexive_port = reflexive_port;
-                p->nat_type = (int)nat_type;
+                p->nat_type = (int)rendv_classify_nat(handle);
             }
 
             if (actor_reply_complete(&p->reply)) {
                 actor_reply_destroy(&p->reply);
                 free(p);
             }
+            break;
+        }
+        case MERIDIAN_RENDV_ADDR_RESPONSE: {
+            meridian_rendv_addr_response_msg_t* p =
+                (meridian_rendv_addr_response_msg_t*)msg->payload;
+            /* A relay saw this node's address from the outside. That is
+             * the only view of it the classification can use, and it is
+             * the reason the relay hands the response over as an event
+             * rather than a callback: this runs on the actor that owns
+             * the state. */
+            if (handle->local_rendv != NULL) {
+                meridian_rendv_set_reflexive_addr(handle->local_rendv,
+                                                  p->reflexive_addr,
+                                                  p->reflexive_port);
+                (void)rendv_classify_nat(handle);
+            }
+            free(p);
             break;
         }
         default:
@@ -589,6 +601,32 @@ static void meridian_rendv_dispatch(void* state, message_t* msg) {
 // ============================================================================
 // TUNNEL STREAM CALLBACKS
 // ============================================================================
+
+/**
+ * Classifies the local NAT type from the reflexive address the relay
+ * reported, and records it on the local rendezvous point.
+ *
+ * The classification runs on the handle's actor: the reflexive address
+ * is the handle's state.
+ */
+static meridian_nat_type_t rendv_classify_nat(meridian_rendv_handle_t* handle) {
+    if (handle == NULL || handle->local_rendv == NULL) {
+        return MERIDIAN_NAT_TYPE_UNKNOWN;
+    }
+
+    uint32_t reflexive_addr =
+        meridian_rendv_get_reflexive_addr(handle->local_rendv);
+    uint32_t local_addr = handle->local_rendv->addr;
+
+    meridian_nat_type_t nat_type = MERIDIAN_NAT_TYPE_UNKNOWN;
+    if (local_addr != 0 && local_addr == reflexive_addr) {
+        nat_type = MERIDIAN_NAT_TYPE_OPEN;
+    } else if (reflexive_addr != 0) {
+        nat_type = MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE;
+    }
+    handle->local_rendv->nat_type = nat_type;
+    return nat_type;
+}
 
 /**
  * The owner handler for a tunnel stream.

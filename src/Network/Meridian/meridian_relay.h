@@ -31,16 +31,6 @@ extern "C" {
 typedef void (*meridian_relay_datagram_cb_t)(void* ctx, const uint8_t* data, size_t len,
                                              uint32_t src_endpoint_id);
 
-/**
- * Callback invoked when a reflexive address response is received from the relay.
- *
- * @param ctx            User context from meridian_relay_on_addr_response
- * @param reflexive_addr Discovered public IPv4 address
- * @param reflexive_port Discovered public port
- * @param endpoint_id    Assigned endpoint ID for this peer
- */
-typedef void (*meridian_relay_addr_cb_t)(void* ctx, uint32_t reflexive_addr,
-                                         uint16_t reflexive_port, uint32_t endpoint_id);
 
 // ============================================================================
 // RELAY CLIENT CONFIGURATION
@@ -81,13 +71,15 @@ typedef struct meridian_relay_t {
     HQUIC configuration;                           /**< msquic configuration handle */
     HQUIC connection;                              /**< QUIC connection to relay server */
     meridian_rendv_t* server;                       /**< Relay server rendezvous point */
+    struct meridian_rendv_handle_t* handle;        /**< The rendezvous handle that owns the NAT
+                                detection. The address response goes to its
+                                actor as an event, the way upstream's relay
+                                client hands it to the NAT detector's actor. */
     meridian_relay_config_t config;                /**< Client configuration */
     ATOMIC(uint32_t) local_endpoint_id;             /**< Assigned endpoint ID from relay */
     ATOMIC(uint8_t) connected;                      /**< Connection state to relay */
     meridian_relay_datagram_cb_t on_datagram;       /**< Datagram received callback */
     void* on_datagram_ctx;                          /**< User context for datagram callback */
-    meridian_relay_addr_cb_t on_addr_response;      /**< Address response callback */
-    void* on_addr_response_ctx;                     /**< User context for address callback */
     meridian_stream_entry_t** active_streams;        /**< Tracking array for open streams */
     size_t num_active_streams;                       /**< Number of active streams */
     size_t active_streams_cap;                       /**< Capacity of active_streams array */
@@ -119,6 +111,7 @@ typedef struct meridian_relay_t {
 meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
                                         HQUIC registration,
                                         meridian_rendv_t* server,
+                                        struct meridian_rendv_handle_t* handle,
                                         const meridian_relay_config_t* config,
                                         scheduler_pool_t* pool);
 
@@ -173,7 +166,14 @@ int meridian_relay_send_datagram(meridian_relay_t* relay, const uint8_t* data,
 
 /**
  * Requests the client's reflexive address from the relay server.
- * The response is delivered via the callback registered with meridian_relay_on_addr_response.
+ *
+ * The response is not a callback: the relay client posts it to the
+ * rendezvous handle's actor as an event, the way upstream's relay client
+ * hands the address response to the NAT detector's actor
+ * (liboffs/src/Network/relay_client.c, NETWORK_ADDR_RESPONSE). A
+ * callback would run on the relay's stream actor — a pool worker — and a
+ * worker that waits is a worker that runs no actor; the event runs on
+ * the actor that owns the state instead.
  *
  * @param relay  Relay client
  * @return       0 on success, -1 on failure
@@ -194,15 +194,6 @@ int meridian_relay_send_addr_request(meridian_relay_t* relay);
 void meridian_relay_on_datagram(meridian_relay_t* relay,
                                  meridian_relay_datagram_cb_t callback, void* ctx);
 
-/**
- * Registers a handler for address discovery responses.
- *
- * @param relay     Relay client
- * @param callback  Function to call when reflexive address is discovered
- * @param ctx       User context passed to callback
- */
-void meridian_relay_on_addr_response(meridian_relay_t* relay,
-                                      meridian_relay_addr_cb_t callback, void* ctx);
 
 // ============================================================================
 // RELAY STATE QUERY

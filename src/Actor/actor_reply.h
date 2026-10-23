@@ -134,6 +134,9 @@ typedef struct actor_answer_t {
     uint32_t reply_type;  /**< The message type the answer arrives as. */
     void* token;          /**< The requester's own state, carried back. */
     int result;           /**< The answer, written by the worker. */
+    void* data;           /**< The answer's own payload, if it has one. The
+                               worker hands it over; the asker frees it. */
+    void (*data_destroy)(void*); /**< Frees the payload, if there is one. */
 } actor_answer_t;
 
 /**
@@ -144,11 +147,25 @@ typedef struct actor_answer_t {
  * thread: it is unscheduled until the message arrives, and it picks the
  * answer up when it is next run.
  *
+ * The payload travels with the answer and belongs to the asker: the
+ * worker builds it, the asker frees it with data_destroy. That is
+ * upstream's shape — a result event carries the result the asker needs
+ * (liboffs/src/BlockCache/section.h: section_read_result_payload_t
+ * carries the data), and it is Pony's: the answer is what the asker
+ * asked for.
+ *
  * @param answer The answer block the request carried.
  * @param result The worker's answer.
  * @return true when the answer was sent.
  */
 bool actor_answer_send(const actor_answer_t* answer, int result);
+
+/**
+ * Releases the payload the answer carried, if it had one.
+ *
+ * The asker calls this when it is done with the answer.
+ */
+void actor_answer_free(actor_answer_t* answer);
 
 /**
  * Sends a request to an actor, and waits for the answer — unless the
