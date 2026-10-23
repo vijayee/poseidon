@@ -11,6 +11,11 @@
 #include <unistd.h>
 #include <openssl/pem.h>
 #include <openssl/err.h>
+/* EVP_PKEY_CTX_set_rsa_keygen_bits lives here. Without the header the
+ * call is implicitly declared, which in C99 means the compiler assumes
+ * an int return — and the build flag that turns implicit declarations
+ * into errors catches it. */
+#include <openssl/rsa.h>
 
 // ============================================================================
 // KEY GENERATION HELPERS

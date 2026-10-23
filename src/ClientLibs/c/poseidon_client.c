@@ -582,7 +582,13 @@ poseidon_client_t* poseidon_client_connect(const char* transport_url) {
     client->running = true;
     client->lock = platform_mutex_create();;
 
-    if (client->recv_thread = platform_thread_create((platform_thread_fn_t)recv_thread_func, client) != 0) {
+    /* The assignment has to stand on its own: `x = f() != 0` parses as
+     * `x = (f() != 0)`, which stores the comparison in the handle and
+     * loses the thread. platform_thread_create returns NULL on
+     * failure. */
+    client->recv_thread =
+        platform_thread_create((platform_thread_fn_t)recv_thread_func, client);
+    if (client->recv_thread == NULL) {
         platform_mutex_destroy(client->lock);;
         free(client);
         close(fd);

@@ -676,8 +676,19 @@ meridian_protocol_t* meridian_protocol_create(const meridian_protocol_config_t* 
     protocol->config.replace_interval_s = config->replace_interval_s;
     protocol->config.gossip_timeout_ms = config->gossip_timeout_ms;
     protocol->config.measure_timeout_ms = config->measure_timeout_ms;
-    protocol->config.tls_key_path = config->tls_key_path;
-    protocol->config.tls_cert_path = config->tls_cert_path;
+    /* The TLS paths belong to the protocol now: the caller usually hands
+     * over stack locals, and the credential is loaded later, in the
+     * start. */
+    protocol->tls_key_path = NULL;
+    protocol->tls_cert_path = NULL;
+    if (config->tls_key_path != NULL) {
+        protocol->tls_key_path = strdup(config->tls_key_path);
+    }
+    if (config->tls_cert_path != NULL) {
+        protocol->tls_cert_path = strdup(config->tls_cert_path);
+    }
+    protocol->config.tls_key_path = protocol->tls_key_path;
+    protocol->config.tls_cert_path = protocol->tls_cert_path;
     memcpy(&protocol->config.local_node_id, &config->local_node_id, sizeof(poseidon_node_id_t));
     protocol->config.pool = config->pool;
     protocol->config.wheel = config->wheel;
@@ -778,6 +789,18 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol) {
             protocol->msquic = NULL;
         }
 
+        /* The TLS path copies are the protocol's. */
+        if (protocol->tls_key_path != NULL) {
+            free(protocol->tls_key_path);
+            protocol->tls_key_path = NULL;
+        }
+        if (protocol->tls_cert_path != NULL) {
+            free(protocol->tls_cert_path);
+            protocol->tls_cert_path = NULL;
+        }
+        protocol->config.tls_key_path = NULL;
+        protocol->config.tls_cert_path = NULL;
+
         if (protocol->ring_set) {
             meridian_ring_set_destroy(protocol->ring_set);
         }
@@ -873,9 +896,9 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
     // Load credentials
     QUIC_CREDENTIAL_CONFIG CredConfig = {0};
     QUIC_CERTIFICATE_FILE CertFile = {0};
-    if (protocol->config.tls_key_path != NULL && protocol->config.tls_cert_path != NULL) {
-        CertFile.PrivateKeyFile = protocol->config.tls_key_path;
-        CertFile.CertificateFile = protocol->config.tls_cert_path;
+    if (protocol->tls_key_path != NULL && protocol->tls_cert_path != NULL) {
+        CertFile.PrivateKeyFile = protocol->tls_key_path;
+        CertFile.CertificateFile = protocol->tls_cert_path;
         CredConfig.CertificateFile = &CertFile;
         CredConfig.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
     } else {

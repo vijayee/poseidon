@@ -236,7 +236,11 @@ meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
             CredConfig.Type = QUIC_CREDENTIAL_TYPE_CERTIFICATE_FILE;
             CredConfig.Flags = QUIC_CREDENTIAL_FLAG_NO_CERTIFICATE_VALIDATION;
         } else {
-            CredConfig.Flags = QUIC_CREDENTIAL_FLAG_NONE;
+            /* No certificate: the client does not validate the server's.
+             * MsQuic v2 only accepts a NONE credential for a client —
+             * the TLS layer returns QUIC_STATUS_INVALID_PARAMETER for a
+             * server (deps/msquic/src/platform/tls_openssl.c). */
+            CredConfig.Flags = QUIC_CREDENTIAL_FLAG_CLIENT;
             CredConfig.Type = QUIC_CREDENTIAL_TYPE_NONE;
         }
 

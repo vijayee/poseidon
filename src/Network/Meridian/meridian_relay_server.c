@@ -4,6 +4,12 @@
 
 #include "meridian_relay_server.h"
 #include "meridian_packet.h"
+/* The process-wide msquic helpers. Without this header the calls below
+ * are implicitly declared, the compiler assumes they return int, and the
+ * API table pointer they return is truncated to 32 bits and sign
+ * extended — the relay server then calls through a pointer that is not
+ * the table. */
+#include "../../Platform/poseidon_msquic.h"
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
 #include <stdlib.h>

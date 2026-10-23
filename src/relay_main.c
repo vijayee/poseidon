@@ -4,6 +4,7 @@
 
 #include "Network/Meridian/meridian_relay_server.h"
 #include "Platform/poseidon_msquic.h"
+#include "Crypto/key_pair.h"
 #include "Util/log.h"
 #include "Util/allocator.h"
 #include <stdio.h>
@@ -31,6 +32,13 @@
 // ============================================================================
 
 static meridian_relay_server_t* g_server = NULL;
+
+/* The relay server's TLS material. MsQuic v2 does not let a server load
+ * a NONE credential, so the daemon generates a self-signed certificate at
+ * startup and removes it on the way out. */
+static poseidon_key_pair_t* g_key_pair = NULL;
+static const char* RELAY_TLS_KEY_PATH = "/tmp/poseidon_relay_key.pem";
+static const char* RELAY_TLS_CERT_PATH = "/tmp/poseidon_relay_cert.pem";
 static scheduler_pool_t* g_sched = NULL;
 static volatile bool g_running = true;
 
@@ -151,13 +159,38 @@ static int start_relay_server(const relay_options_t* opts) {
         return -1;
     }
 
+    // Generate the TLS files.
+    //
+    // MsQuic v2 does not let a server load a NONE credential — the TLS
+    // layer returns QUIC_STATUS_INVALID_PARAMETER for one
+    // (deps/msquic/src/platform/tls_openssl.c: "Required for server").
+    // The relay server therefore presents a self-signed certificate, the
+    // way the channel does; the relay clients do not validate it.
+    g_key_pair = poseidon_key_pair_create("ED25519");
+    if (g_key_pair == NULL) {
+        log_error("relay: failed to create the TLS key pair");
+        poseidon_msquic_close();
+        return -1;
+    }
+    if (poseidon_key_pair_generate_tls_files(g_key_pair, "meridian_relay",
+                                              RELAY_TLS_KEY_PATH,
+                                              RELAY_TLS_CERT_PATH) != 0) {
+        log_error("relay: failed to generate the TLS files");
+        poseidon_key_pair_destroy(g_key_pair);
+        g_key_pair = NULL;
+        poseidon_msquic_close();
+        return -1;
+    }
+
     // Configure server
     meridian_relay_server_config_t config = {
         .alpn = "meridian_relay",
         .listen_port = opts->port,
         .idle_timeout_ms = opts->idle_timeout_ms,
         .keepalive_interval_ms = opts->keepalive_ms,
-        .max_datagram_size = opts->max_datagram_size
+        .max_datagram_size = opts->max_datagram_size,
+        .tls_key_path = RELAY_TLS_KEY_PATH,
+        .tls_cert_path = RELAY_TLS_CERT_PATH
     };
 
     // Create server
@@ -172,6 +205,12 @@ static int start_relay_server(const relay_options_t* opts) {
     g_server = meridian_relay_server_create(msquic, &config, g_sched);
     if (g_server == NULL) {
         log_error("Failed to create relay server");
+        if (g_key_pair != NULL) {
+            poseidon_key_pair_destroy(g_key_pair);
+            g_key_pair = NULL;
+        }
+        unlink(RELAY_TLS_KEY_PATH);
+        unlink(RELAY_TLS_CERT_PATH);
         poseidon_msquic_close();
         return -1;
     }
@@ -268,6 +307,12 @@ int main(int argc, char* argv[]) {
         scheduler_pool_destroy(g_sched);
         g_sched = NULL;
     }
+    if (g_key_pair != NULL) {
+        poseidon_key_pair_destroy(g_key_pair);
+        g_key_pair = NULL;
+    }
+    unlink(RELAY_TLS_KEY_PATH);
+    unlink(RELAY_TLS_CERT_PATH);
 
     poseidon_msquic_close();
 

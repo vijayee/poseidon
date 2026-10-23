@@ -10,6 +10,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 # Compiler warnings
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_compile_options(-Wall -Wextra -Wpedantic)
+    # An implicit declaration is an error, not a warning. C99 removed
+    # implicit declarations: the compiler assumes the function returns
+    # int, so a function that returns a pointer gets truncated to 32 bits
+    # and sign extended, and the caller then dereferences an address that
+    # was never mapped. That is exactly how the relay server's msquic
+    # API table pointer was lost, and it cost a segfault at startup.
+    add_compile_options(-Werror=implicit-function-declaration)
+    add_compile_options(-Werror=int-conversion)
 endif()
 
 # Dependencies

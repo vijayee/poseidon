@@ -190,6 +190,12 @@ typedef struct meridian_protocol_t {
 
     platform_mutex_t* lock;                    /**< Thread-safe state access */
     scheduler_pool_t* sched;                  /**< Scheduler pool that runs the actor */
+    /* The TLS paths the config named, copied. The caller usually passes
+     * stack locals — the channel builds them in its create frame and the
+     * protocol loads the credential later, in its start — so the config's
+     * pointers are not the protocol's to keep. */
+    char* tls_key_path;                        /**< Owned: the private key path. */
+    char* tls_cert_path;                       /**< Owned: the certificate path. */
     actor_t actor;                             /**< Owns the peer and stream tables */
     ATOMIC(uint8_t) running;                   /**< True when protocol is active */
 } meridian_protocol_t;

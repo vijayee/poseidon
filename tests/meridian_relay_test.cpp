@@ -3,6 +3,12 @@
 #include "Network/Meridian/meridian_relay.h"
 #include "Network/Meridian/meridian_relay_server.h"
 #include "Network/Meridian/meridian_packet.h"
+#include "Platform/poseidon_msquic.h"
+#include "Crypto/key_pair.h"
+
+extern "C" {
+#include "Scheduler/scheduler.h"
+}
 
 class RelayTest : public ::testing::Test {
 protected:
@@ -102,4 +108,60 @@ TEST_F(RelayTest, PunchSyncCreateEncodeDecode) {
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();
+}
+
+// The server's lifecycle: start, stop, destroy.
+//
+// The stop path is the one that changed with upstream's relay server: it
+// snapshots the connections under the lock, shuts them down outside it,
+// and waits for the SHUTDOWN_COMPLETE callbacks to quiesce before the
+// table goes away (liboffs/src/Network/Relay/relay_server.c).
+TEST_F(RelayTest, ServerStartStopDestroy) {
+    // MsQuic v2 does not let a server load a NONE credential, so the
+    // server needs a certificate.
+    poseidon_key_pair_t* key_pair = poseidon_key_pair_create("ED25519");
+    ASSERT_NE(nullptr, key_pair);
+    char key_path[256];
+    char cert_path[256];
+    snprintf(key_path, sizeof(key_path), "/tmp/poseidon_relay_test_key.pem");
+    snprintf(cert_path, sizeof(cert_path), "/tmp/poseidon_relay_test_cert.pem");
+    ASSERT_EQ(0, poseidon_key_pair_generate_tls_files(key_pair, "relay-test",
+                                                       key_path, cert_path));
+
+    const struct QUIC_API_TABLE* msquic = poseidon_msquic_open();
+    ASSERT_NE(nullptr, msquic);
+
+    scheduler_pool_t* sched = scheduler_pool_create(2);
+    ASSERT_NE(nullptr, sched);
+    scheduler_pool_start(sched);
+
+    meridian_relay_server_config_t config = {
+        .alpn = "meridian-relay-test",
+        .listen_port = 0,          /* the OS picks a port */
+        .idle_timeout_ms = 30000,
+        .keepalive_interval_ms = 5000,
+        .max_datagram_size = 1400,
+        .tls_key_path = key_path,
+        .tls_cert_path = cert_path
+    };
+
+    meridian_relay_server_t* server =
+        meridian_relay_server_create(msquic, &config, sched);
+    ASSERT_NE(nullptr, server);
+
+    EXPECT_EQ(0, meridian_relay_server_start(server));
+
+    meridian_relay_server_stats_t stats;
+    EXPECT_EQ(0, meridian_relay_server_get_stats(server, &stats));
+    EXPECT_EQ(0u, stats.num_clients);
+
+    EXPECT_EQ(0, meridian_relay_server_stop(server));
+
+    meridian_relay_server_destroy(server);
+    scheduler_pool_stop(sched);
+    scheduler_pool_destroy(sched);
+    poseidon_key_pair_destroy(key_pair);
+    unlink(key_path);
+    unlink(cert_path);
+    poseidon_msquic_close();
 }
