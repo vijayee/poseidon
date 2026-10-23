@@ -100,7 +100,6 @@ bool actor_run(actor_t* actor, size_t batch_size);
  * The wrapper's contract is unchanged: when this returns, the message it
  * sent has been dispatched and the out-field the dispatch wrote is visible
  * to the caller. */
-bool actor_run_inline(actor_t* actor, size_t batch_size);
 void backpressure_apply(actor_t* actor);
 void backpressure_release(actor_t* actor);
 
@@ -110,9 +109,10 @@ void backpressure_release(actor_t* actor);
  * - L2 provenance added: this file is a vendored copy of liboffs's actor.h,
  *   surgically transplanted to live under poseidon/src/Actor/.
  * - Forward decl of `bool` added via <stdbool.h> for actor_send/actor_run.
- * - actor_run_inline added (poseidon-only): upstream has no inline
- *   actor_run caller, so upstream has no need to claim the actor for the
- *   calling thread. Poseidon's synchronous wrappers do.
+ * - The inline actor run that poseidon once carried here is gone: the
+ *   synchronous wrappers answer their callers over a round trip
+ *   (src/Actor/actor_reply.h) instead of running the actor on the
+ *   calling thread, which is how upstream does it.
  *
  * No behaviour changes; no symbols renamed; the actor_t layout is byte-for-byte
  * the liboffs layout so that poseidon's Workers/, Time/, and downstream

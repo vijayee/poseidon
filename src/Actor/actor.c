@@ -11,11 +11,6 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
-/* The actor an inline caller is running right now, if any. The destroy
- * path skips its wait for that actor: the thread that would be waited for
- * is the caller itself, and waiting for it would deadlock. */
-static PLATFORM_THREAD_LOCAL actor_t* t_inline_actor = NULL;
-
 
 void actor_init(actor_t* actor, void* state, void (*dispatch)(void* state, message_t* msg), scheduler_pool_t* pool) {
   message_queue_init(&actor->queue);
@@ -109,8 +104,7 @@ void actor_destroy(actor_t* actor) {
      its saved-payload path. For non-pool / inline actors RUNNING is never set,
      so the wait is a no-op. */
   scheduler_t* self = scheduler_get_current();
-  bool self_is_running = (self != NULL && self->current == actor) ||
-                         (t_inline_actor == actor);
+  bool self_is_running = (self != NULL && self->current == actor);
   if (!self_is_running) {
     while (atomic_load(&actor->flags) & ACTOR_FLAG_RUNNING) {
       platform_sleep_ms(0);
@@ -238,37 +232,6 @@ bool actor_send(actor_t* actor, message_t* msg) {
     }
   }
   return was_empty;
-}
-
-bool actor_run_inline(actor_t* actor, size_t batch_size) {
-  if (actor == NULL) return false;
-
-  /* Claim the actor. A pool worker may already be running it: that run
-   * is waited for, and the message the caller sent is either dispatched by
-   * it or is still queued and is picked up below. The claim keeps a worker
-   * from picking the actor up while this thread runs it: the worker sees
-   * ACTOR_FLAG_RUNNING and re-queues the actor instead of running it. */
-  for (;;) {
-    uint8_t flags = atomic_load(&actor->flags);
-    if (flags & ACTOR_FLAG_RUNNING) {
-      platform_sleep_ms(0);
-      continue;
-    }
-    if (atomic_compare_exchange_weak(&actor->flags, &flags,
-                                     flags | ACTOR_FLAG_RUNNING)) {
-      break;
-    }
-  }
-
-  actor_t* previous = t_inline_actor;
-  t_inline_actor = actor;
-  bool has_more = actor_run(actor, batch_size);
-  t_inline_actor = previous;
-
-  /* Release the claim. This is the last touch of the actor: a destroy
-   * that was waiting for the claim may free it right after. */
-  atomic_fetch_and(&actor->flags, ~ACTOR_FLAG_RUNNING);
-  return has_more;
 }
 
 bool actor_run(actor_t* actor, size_t batch_size) {
