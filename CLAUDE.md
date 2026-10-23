@@ -1447,3 +1447,119 @@ events carry the data the asker asked for. `actor_answer_t` now carries
 ### Build
 
 Green, 25/25 ctest.
+
+## Phase 2 (2.27) — the relay, the way upstream's relay is
+
+Upstream's relay is two files: `src/Network/relay_client.c` and
+`src/Network/Relay/relay_server.c`. Poseidon's is
+`src/Network/Meridian/meridian_relay.c` and
+`meridian_relay_server.c`. Read side by side, they were the same shape
+in the places that matter and different in the places that cost.
+
+### The server
+
+Upstream's server is an actor with an **empty dispatch**
+(`liboffs/src/Network/Relay/relay_server.c`):
+
+```c
+void relay_server_dispatch(void* state, message_t* msg) {
+  relay_server_t* server = (relay_server_t*)state;
+  if (msg == NULL) return;
+  (void)server;
+}
+```
+
+The client table is guarded by `clients_lock`, because the msquic
+callbacks that mutate it run on their own threads. Upstream also keeps
+`ATOMIC(uint8_t) running` and a `destroy_lock` beside it.
+
+Poseidon's server had a `lock` and no actor and no running flag. It now
+has the same three things, under upstream's names: `clients_lock`, an
+actor whose dispatch is empty, and `ATOMIC(uint8_t) running`.
+
+### The three bugs that came with it
+
+**The lock was held across the msquic calls.** The start path held
+`clients_lock` across `ListenerOpen`, `SetCallbackHandler` and
+`ListenerStart`; the stop path held it across `ConnectionShutdown`,
+`ConnectionClose`, `ListenerStop` and `ListenerClose`. msquic may answer
+a call with a callback on the same thread, and that callback takes
+`clients_lock` — a call under the lock deadlocks on itself. Upstream
+states the rule at `liboffs/src/Network/quic_listener.c:225`:
+
+> Snapshot the connection list under the lock, then release it before
+> calling ConnectionShutdown. This avoids holding conn_lock during msquic
+> API calls which could deadlock if SHUTDOWN_COMPLETE fires
+> synchronously and tries to acquire conn_lock.
+
+The stop path now snapshots the connections under the lock, releases it,
+and shuts them down outside it.
+
+**The table was freed underneath the callbacks.** The stop path destroyed
+the client table and nulled the connections while the SHUTDOWN_COMPLETE
+callbacks were still running on the msquic threads — and those callbacks
+free the stream entries and decrement the client count. Upstream waits
+for the quiesce before the table goes away (the same file, a 5s bound
+polling `num_clients`), and says why:
+
+> Await quiesce: poll num_clients until 0 or a 5s timeout. The
+> _relay_connection_callback SHUTDOWN_COMPLETE handler decrements
+> num_clients and calls _relay_remove_client + ConnectionClose under
+> clients_lock. Do NOT null clients[index].connection here — the
+> SHUTDOWN_COMPLETE handler matches its connection handle against
+> clients[index].connection and will null it via _relay_remove_client.
+
+Poseidon's stop path now waits the same way, and leaves the connections
+and the stream entries to the handler that owns them. The double free
+that the old stop path had — it destroyed the stream entries that the
+stream's own SHUTDOWN_COMPLETE handler destroys — goes with it.
+
+**The connection handle was never closed.** The SHUTDOWN_COMPLETE arm
+now closes it, outside the lock, the way upstream's does.
+
+### The client
+
+Upstream's client keeps more state than poseidon's did, and all of it
+matters:
+
+- `ATOMIC(uint8_t) running` — the retry never fires once it is clear.
+- `reflexive_addr` / `reflexive_port` — the address the relay saw.
+  Upstream's client keeps it (`liboffs/src/Network/relay_client.h`) and
+  also hands it to the NAT detector as an event. Poseidon's client now
+  does both.
+- The **retry**: a relay that bounces orphans the client until the
+  process restarts, so the client reconnects on its own — a bounded
+  number of times, with an exponential backoff, reset on a successful
+  connect. Upstream counts the transport-initiated and peer-initiated
+  shutdowns, and an app-initiated shutdown never retries. Poseidon's
+  client now has the same budget (`max_retries`, `retry_delay_ms`,
+  `retry_count`, `shutdown_pending`), the same `MERIDIAN_RELAY_RETRY`
+  event, and the same backoff (`retry_delay_ms * (1 << (retry_count - 1))`).
+
+  One difference, deliberately: upstream sleeps through the backoff
+  inside the dispatch, which blocks a pool worker. Poseidon's client
+  arms the **timing wheel** instead, and the wheel's callback hands the
+  reconnect to the actor as an event — the same shape as Pony's timer
+  actor, and the same rule this tree already follows: a dispatch never
+  waits.
+
+### Build
+
+Green, 25/25 ctest.
+
+### One thing that is broken, and is not this
+
+The relay daemon **crashes on startup**, and did before this phase: the
+msquic API table pointer is corrupted before the server's create uses
+it. The pointer's high 32 bits are overwritten with 0xffffffff inside
+`meridian_relay_server_create` — a four-byte write of -1 next to the
+pointer — and the table it names is then unmapped, so the
+`ConfigurationOpen` call faults. It reproduces at `7e9f486`, before any
+of this work. A forty-line probe narrows it: `poseidon_msquic_open()`,
+a scheduler pool, a registration and a `ConfigurationOpen` in sequence
+all work; the same sequence through `meridian_relay_server_create`
+faults. The main daemon fails the same way, one layer up ("failed to
+start channel manager dial channel").
+
+That is the msquic binding, not the relay's shape — but the relay
+cannot be exercised end to end until it is fixed.
