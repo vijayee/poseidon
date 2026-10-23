@@ -416,6 +416,33 @@ typedef enum {
   MERIDIAN_PROTOCOL_SEND_MEASURE,
   /* Send a packet to every peer. The actor does the fan-out. */
   MERIDIAN_PROTOCOL_BROADCAST,
+
+  /* ========================================================================
+   * 2.19 Meridian rendezvous — actor messages
+   * ========================================================================
+   *
+   * The rendezvous handle follows the shape upstream's nat_detect uses: an
+   * actor, a scheduler pool, the state embedded in the struct and no
+   * mutex. The tunnel data arrives on msquic's worker threads and is
+   * handed to the actor, which delivers it to the application callback.
+   *
+   * Payload structs live in
+   * src/Network/Meridian/meridian_rendv_messages.h; this enum only
+   * carries the type tags. */
+  /* Set the local rendezvous point. */
+  MERIDIAN_RENDV_SET_LOCAL,
+  /* Add a peer rendezvous point. */
+  MERIDIAN_RENDV_ADD_PEER,
+  /* Remove a peer rendezvous by address. */
+  MERIDIAN_RENDV_REMOVE_PEER,
+  /* Find a peer rendezvous by address. */
+  MERIDIAN_RENDV_FIND_PEER,
+  /* Register the application callback for tunnel data. */
+  MERIDIAN_RENDV_SET_STREAM_CB,
+  /* Tunnel data arrived. The actor delivers it to the callback. */
+  MERIDIAN_RENDV_STREAM_DATA,
+  /* Detect the NAT type. The actor sends the address requests. */
+  MERIDIAN_RENDV_DETECT_NAT,
 } message_type_e;
 
 /* Base message. The actor's dispatch receives one of these; type selects the
@@ -566,6 +593,13 @@ typedef struct message_t {
  * families are unchanged. The QUIC family mirrors the WebTransport one:
  * msquic owns the I/O and delivers the data through the transport's
  * callbacks, so DATA carries the bytes themselves.
+ *
+ * Phase 2 (commit 2.19) adds the MERIDIAN_RENDV_* family (7 entries)
+ * above the local-modifications block. The enum is still the global
+ * message_type_e; the payload structs live in the per-subsystem header
+ * Network/Meridian/meridian_rendv_messages.h, keeping message.h free of
+ * Meridian / msquic dependencies. The change is purely additive to the
+ * enum.
  *
  * Phase 2 (commit 2.18) adds the MERIDIAN_PROTOCOL_* family (6 entries)
  * above the local-modifications block. The enum is still the global

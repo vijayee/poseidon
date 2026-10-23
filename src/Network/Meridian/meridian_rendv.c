@@ -4,6 +4,10 @@
 
 #include "../../Platform/platform_thread.h"
 #include "meridian_rendv.h"
+#include "meridian_rendv_messages.h"
+
+/* The dispatch is defined further down. */
+static void meridian_rendv_dispatch(void* state, message_t* msg);
 #include "meridian_relay.h"
 #include "meridian_stream.h"
 #include "../../Util/allocator.h"
@@ -117,13 +121,14 @@ bool meridian_rendv_can_direct_connect(const meridian_rendv_t* rendv) {
  *
  * @return  New handle with refcount=1, or NULL on failure
  */
-meridian_rendv_handle_t* meridian_rendv_handle_create(void) {
+meridian_rendv_handle_t* meridian_rendv_handle_create(scheduler_pool_t* pool) {
     meridian_rendv_handle_t* handle = (meridian_rendv_handle_t*)
         get_clear_memory(sizeof(meridian_rendv_handle_t));
 
     vec_init(&handle->peer_rendvs);
     vec_init(&handle->connections);
-    handle->lock = platform_mutex_create();;
+    handle->pool = pool;
+    actor_init(&handle->actor, handle, meridian_rendv_dispatch, pool);
     refcounter_init(&handle->refcounter);
     handle->msquic = NULL;
     handle->registration = NULL;
@@ -223,7 +228,7 @@ void meridian_rendv_handle_destroy(meridian_rendv_handle_t* handle) {
         // Do NOT close configuration/registration here — they are borrowed from
         // the protocol. The protocol owns and closes them in stop/destroy.
 
-        platform_mutex_destroy(handle->lock);;
+        actor_destroy(&handle->actor);
         free(handle);
     }
 }
@@ -233,10 +238,31 @@ void meridian_rendv_handle_on_stream_data(meridian_rendv_handle_t* handle,
                                            void* ctx) {
     if (handle == NULL) return;
 
-    platform_mutex_lock(handle->lock);
-    handle->on_stream_data = callback;
-    handle->on_stream_data_ctx = ctx;
-    platform_mutex_unlock(handle->lock);
+    /* The callback belongs to the actor: the tunnel data is delivered
+     * from there. */
+    meridian_rendv_set_stream_cb_msg_t* request =
+        (meridian_rendv_set_stream_cb_msg_t*)
+        get_clear_memory(sizeof(meridian_rendv_set_stream_cb_msg_t));
+    if (request == NULL) return;
+    request->callback = (void*)callback;
+    request->ctx = ctx;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return;
+    }
+
+    int trip = actor_round_trip(&handle->actor, MERIDIAN_RENDV_SET_STREAM_CB,
+                                &request->reply, MERIDIAN_RENDV_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return;
+    }
+    if (trip != 0) return;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
 }
 
 /**
@@ -250,18 +276,28 @@ void meridian_rendv_handle_on_stream_data(meridian_rendv_handle_t* handle,
 int meridian_rendv_handle_set_local(meridian_rendv_handle_t* handle, meridian_rendv_t* rendv) {
     if (handle == NULL || rendv == NULL) return -1;
 
-    platform_mutex_lock(handle->lock);
+    meridian_rendv_set_local_msg_t* request =
+        (meridian_rendv_set_local_msg_t*)
+        get_clear_memory(sizeof(meridian_rendv_set_local_msg_t));
+    if (request == NULL) return -1;
+    request->rendv = rendv;
 
-    // Release previous local rendezvous if any
-    if (handle->local_rendv) {
-        refcounter_dereference(&handle->local_rendv->refcounter);
-        if (refcounter_count(&handle->local_rendv->refcounter) == 0) {
-            free(handle->local_rendv);
-        }
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
     }
 
-    handle->local_rendv = (meridian_rendv_t*) refcounter_reference(&rendv->refcounter);
-    platform_mutex_unlock(handle->lock);
+    int trip = actor_round_trip(&handle->actor, MERIDIAN_RENDV_SET_LOCAL,
+                                &request->reply, MERIDIAN_RENDV_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
     return 0;
 }
 
@@ -276,23 +312,29 @@ int meridian_rendv_handle_set_local(meridian_rendv_handle_t* handle, meridian_re
 int meridian_rendv_handle_add_peer(meridian_rendv_handle_t* handle, meridian_rendv_t* rendv) {
     if (handle == NULL || rendv == NULL) return -1;
 
-    platform_mutex_lock(handle->lock);
+    meridian_rendv_add_peer_msg_t* request =
+        (meridian_rendv_add_peer_msg_t*)
+        get_clear_memory(sizeof(meridian_rendv_add_peer_msg_t));
+    if (request == NULL) return -1;
+    request->rendv = rendv;
 
-    // Check if already exists
-    for (size_t i = 0; i < handle->peer_rendvs.length; i++) {
-        if (handle->peer_rendvs.data[i]->addr == rendv->addr &&
-            handle->peer_rendvs.data[i]->port == rendv->port) {
-            platform_mutex_unlock(handle->lock);
-            return 0;  // Already exists, no-op
-        }
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
     }
 
-    // Add new peer with reference
-    int result = vec_push(&handle->peer_rendvs,
-        (meridian_rendv_t*) refcounter_reference(&rendv->refcounter));
+    int trip = actor_round_trip(&handle->actor, MERIDIAN_RENDV_ADD_PEER,
+                                &request->reply, MERIDIAN_RENDV_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
 
-    platform_mutex_unlock(handle->lock);
-    return result;
+    actor_reply_destroy(&request->reply);
+    free(request);
+    return 0;
 }
 
 /**
@@ -307,23 +349,30 @@ int meridian_rendv_handle_remove_peer(meridian_rendv_handle_t* handle,
                                       uint32_t addr, uint16_t port) {
     if (handle == NULL) return -1;
 
-    platform_mutex_lock(handle->lock);
+    meridian_rendv_remove_peer_msg_t* request =
+        (meridian_rendv_remove_peer_msg_t*)
+        get_clear_memory(sizeof(meridian_rendv_remove_peer_msg_t));
+    if (request == NULL) return -1;
+    request->addr = addr;
+    request->port = port;
 
-    for (size_t i = 0; i < handle->peer_rendvs.length; i++) {
-        if (handle->peer_rendvs.data[i]->addr == addr &&
-            handle->peer_rendvs.data[i]->port == port) {
-            refcounter_dereference(&handle->peer_rendvs.data[i]->refcounter);
-            if (refcounter_count(&handle->peer_rendvs.data[i]->refcounter) == 0) {
-                free(handle->peer_rendvs.data[i]);
-            }
-            vec_splice(&handle->peer_rendvs, i, 1);
-            platform_mutex_unlock(handle->lock);
-            return 0;
-        }
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
     }
 
-    platform_mutex_unlock(handle->lock);
-    return -1;
+    int trip = actor_round_trip(&handle->actor, MERIDIAN_RENDV_REMOVE_PEER,
+                                &request->reply, MERIDIAN_RENDV_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
+    return 0;
 }
 
 /**
@@ -339,19 +388,202 @@ meridian_rendv_t* meridian_rendv_handle_find_peer(meridian_rendv_handle_t* handl
                                                   uint32_t addr, uint16_t port) {
     if (handle == NULL) return NULL;
 
-    platform_mutex_lock(handle->lock);
+    meridian_rendv_find_peer_msg_t* request =
+        (meridian_rendv_find_peer_msg_t*)
+        get_clear_memory(sizeof(meridian_rendv_find_peer_msg_t));
+    if (request == NULL) return NULL;
+    request->addr = addr;
+    request->port = port;
 
-    for (size_t i = 0; i < handle->peer_rendvs.length; i++) {
-        if (handle->peer_rendvs.data[i]->addr == addr &&
-            handle->peer_rendvs.data[i]->port == port) {
-            platform_mutex_unlock(handle->lock);
-            return (meridian_rendv_t*) refcounter_reference(
-                &handle->peer_rendvs.data[i]->refcounter);
-        }
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return NULL;
     }
 
-    platform_mutex_unlock(handle->lock);
-    return NULL;
+    int trip = actor_round_trip(&handle->actor, MERIDIAN_RENDV_FIND_PEER,
+                                &request->reply, MERIDIAN_RENDV_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return NULL;
+    }
+    if (trip != 0) return NULL;  /* the actor owns the request now */
+
+    meridian_rendv_t* peer = (meridian_rendv_t*)request->out_peer;
+    actor_reply_destroy(&request->reply);
+    free(request);
+    return peer;
+}
+
+// ============================================================================
+// ACTOR DISPATCH
+// ============================================================================
+
+/**
+ * The rendezvous handle's actor owns the handle's state.
+ *
+ * Upstream's nat_detect has the same shape: an actor, a scheduler pool,
+ * the state in the struct and no mutex. The tunnel data arrives on
+ * msquic's worker threads and is handed to the actor, which delivers it
+ * to the application callback.
+ */
+static void meridian_rendv_dispatch(void* state, message_t* msg) {
+    meridian_rendv_handle_t* handle = (meridian_rendv_handle_t*)state;
+    if (msg == NULL) return;
+
+    switch (msg->type) {
+        case MERIDIAN_RENDV_SET_LOCAL: {
+            meridian_rendv_set_local_msg_t* p =
+                (meridian_rendv_set_local_msg_t*)msg->payload;
+            if (handle->local_rendv) {
+                refcounter_dereference(&handle->local_rendv->refcounter);
+                if (refcounter_count(&handle->local_rendv->refcounter) == 0) {
+                    free(handle->local_rendv);
+                }
+            }
+            handle->local_rendv = (meridian_rendv_t*)
+                refcounter_reference(&((meridian_rendv_t*)p->rendv)->refcounter);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_RENDV_ADD_PEER: {
+            meridian_rendv_add_peer_msg_t* p =
+                (meridian_rendv_add_peer_msg_t*)msg->payload;
+            meridian_rendv_t* rendv = (meridian_rendv_t*)p->rendv;
+            bool known = false;
+            for (size_t i = 0; i < handle->peer_rendvs.length; i++) {
+                if (handle->peer_rendvs.data[i]->addr == rendv->addr &&
+                    handle->peer_rendvs.data[i]->port == rendv->port) {
+                    known = true;
+                    break;
+                }
+            }
+            if (!known) {
+                vec_push(&handle->peer_rendvs,
+                         (meridian_rendv_t*)refcounter_reference(&rendv->refcounter));
+            }
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_RENDV_REMOVE_PEER: {
+            meridian_rendv_remove_peer_msg_t* p =
+                (meridian_rendv_remove_peer_msg_t*)msg->payload;
+            for (size_t i = 0; i < handle->peer_rendvs.length; i++) {
+                if (handle->peer_rendvs.data[i]->addr == p->addr &&
+                    handle->peer_rendvs.data[i]->port == p->port) {
+                    refcounter_dereference(&handle->peer_rendvs.data[i]->refcounter);
+                    if (refcounter_count(&handle->peer_rendvs.data[i]->refcounter) == 0) {
+                        free(handle->peer_rendvs.data[i]);
+                    }
+                    vec_splice(&handle->peer_rendvs, i, 1);
+                    break;
+                }
+            }
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_RENDV_FIND_PEER: {
+            meridian_rendv_find_peer_msg_t* p =
+                (meridian_rendv_find_peer_msg_t*)msg->payload;
+            p->out_peer = NULL;
+            for (size_t i = 0; i < handle->peer_rendvs.length; i++) {
+                if (handle->peer_rendvs.data[i]->addr == p->addr &&
+                    handle->peer_rendvs.data[i]->port == p->port) {
+                    p->out_peer = (meridian_rendv_t*)refcounter_reference(
+                        &handle->peer_rendvs.data[i]->refcounter);
+                    break;
+                }
+            }
+            if (actor_reply_complete(&p->reply)) {
+                if (p->out_peer != NULL) {
+                    refcounter_dereference(&((meridian_rendv_t*)p->out_peer)->refcounter);
+                }
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_RENDV_SET_STREAM_CB: {
+            meridian_rendv_set_stream_cb_msg_t* p =
+                (meridian_rendv_set_stream_cb_msg_t*)msg->payload;
+            handle->on_stream_data =
+                (meridian_rendv_stream_data_cb_t*)p->callback;
+            handle->on_stream_data_ctx = p->ctx;
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_RENDV_STREAM_DATA: {
+            meridian_rendv_stream_data_msg_t* p =
+                (meridian_rendv_stream_data_msg_t*)msg->payload;
+            if (handle->on_stream_data != NULL) {
+                handle->on_stream_data(handle->on_stream_data_ctx, p->data,
+                                       p->len, p->is_bidi);
+            }
+            free(p->data);
+            p->data = NULL;
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_RENDV_DETECT_NAT: {
+            meridian_rendv_detect_nat_msg_t* p =
+                (meridian_rendv_detect_nat_msg_t*)msg->payload;
+            p->reflexive_addr = 0;
+            p->reflexive_port = 0;
+            p->nat_type = MERIDIAN_NAT_TYPE_UNKNOWN;
+
+            if (handle->local_rendv != NULL) {
+                if (p->relay_a != NULL) {
+                    meridian_relay_send_addr_request(
+                        (struct meridian_relay_t*)p->relay_a);
+                }
+                if (p->relay_b != NULL) {
+                    meridian_relay_send_addr_request(
+                        (struct meridian_relay_t*)p->relay_b);
+                }
+
+                uint32_t reflexive_addr =
+                    meridian_rendv_get_reflexive_addr(handle->local_rendv);
+                uint16_t reflexive_port =
+                    meridian_rendv_get_reflexive_port(handle->local_rendv);
+                uint32_t local_addr = handle->local_rendv->addr;
+
+                meridian_nat_type_t nat_type = MERIDIAN_NAT_TYPE_UNKNOWN;
+                if (local_addr != 0 && local_addr == reflexive_addr) {
+                    nat_type = MERIDIAN_NAT_TYPE_OPEN;
+                } else if (reflexive_addr != 0) {
+                    nat_type = MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE;
+                }
+                handle->local_rendv->nat_type = nat_type;
+
+                p->reflexive_addr = reflexive_addr;
+                p->reflexive_port = reflexive_port;
+                p->nat_type = (int)nat_type;
+            }
+
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        default:
+            break;
+    }
 }
 
 // ============================================================================
@@ -390,13 +622,41 @@ rendv_uni_stream_callback(HQUIC Stream, void* Context,
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
         if (entry != NULL && entry->user_context != NULL) {
             meridian_rendv_handle_t* handle = (meridian_rendv_handle_t*)entry->user_context;
-            platform_mutex_lock(handle->lock);
-            meridian_rendv_stream_data_cb_t cb = handle->on_stream_data;
-            void* ctx = handle->on_stream_data_ctx;
-            platform_mutex_unlock(handle->lock);
-
-            if (cb != NULL) {
-                cb(ctx, entry->recv_buf, entry->recv_len, false);
+            /* The handle's actor delivers the data to the application
+             * callback. The request carries its own copy of the bytes:
+             * the stream buffer dies with the entry. */
+            meridian_rendv_stream_data_msg_t* request =
+                (meridian_rendv_stream_data_msg_t*)
+                get_clear_memory(sizeof(meridian_rendv_stream_data_msg_t));
+            if (request != NULL) {
+                request->len = entry->recv_len;
+                request->is_bidi = false;
+                request->data = (uint8_t*)get_memory(entry->recv_len > 0 ? entry->recv_len : 1);
+                if (request->data != NULL) {
+                    if (entry->recv_len > 0) {
+                        memcpy(request->data, entry->recv_buf, entry->recv_len);
+                    }
+                    if (actor_reply_init(&request->reply) == 0) {
+                        /* The caller does not wait: the request is the
+                         * actor's to free. */
+                        request->reply.orphaned = 1;
+                        message_t msg = {
+                            .type = MERIDIAN_RENDV_STREAM_DATA,
+                            .payload = request,
+                            .payload_destroy = NULL,
+                        };
+                        if (!actor_send(&handle->actor, &msg)) {
+                            /* The actor is gone: actor_send released the
+                             * request and its reply plumbing. */
+                            actor_reply_destroy(&request->reply);
+                        }
+                    } else {
+                        free(request->data);
+                        free(request);
+                    }
+                } else {
+                    free(request);
+                }
             }
         }
         break;
@@ -461,13 +721,39 @@ rendv_bidi_stream_callback(HQUIC Stream, void* Context,
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
         if (entry != NULL && entry->user_context != NULL) {
             meridian_rendv_handle_t* handle = (meridian_rendv_handle_t*)entry->user_context;
-            platform_mutex_lock(handle->lock);
-            meridian_rendv_stream_data_cb_t cb = handle->on_stream_data;
-            void* ctx = handle->on_stream_data_ctx;
-            platform_mutex_unlock(handle->lock);
-
-            if (cb != NULL) {
-                cb(ctx, entry->recv_buf, entry->recv_len, true);
+            /* The handle's actor delivers the data to the application
+             * callback. The request carries its own copy of the bytes:
+             * the stream buffer dies with the entry. */
+            meridian_rendv_stream_data_msg_t* request =
+                (meridian_rendv_stream_data_msg_t*)
+                get_clear_memory(sizeof(meridian_rendv_stream_data_msg_t));
+            if (request != NULL) {
+                request->len = entry->recv_len;
+                request->is_bidi = true;
+                request->data = (uint8_t*)get_memory(entry->recv_len > 0 ? entry->recv_len : 1);
+                if (request->data != NULL) {
+                    if (entry->recv_len > 0) {
+                        memcpy(request->data, entry->recv_buf, entry->recv_len);
+                    }
+                    if (actor_reply_init(&request->reply) == 0) {
+                        /* The caller does not wait: the request is the
+                         * actor's to free. */
+                        request->reply.orphaned = 1;
+                        message_t msg = {
+                            .type = MERIDIAN_RENDV_STREAM_DATA,
+                            .payload = request,
+                            .payload_destroy = NULL,
+                        };
+                        if (!actor_send(&handle->actor, &msg)) {
+                            actor_reply_destroy(&request->reply);
+                        }
+                    } else {
+                        free(request->data);
+                        free(request);
+                    }
+                } else {
+                    free(request);
+                }
             }
 
             // Shut down our send side
@@ -641,41 +927,35 @@ int meridian_rendv_handle_detect_nat(meridian_rendv_handle_t* handle,
                                       struct meridian_relay_t* relay_b,
                                       meridian_nat_callback_t callback, void* ctx) {
     if (handle == NULL || callback == NULL) return -1;
-    if (handle->local_rendv == NULL) return -1;
 
-    platform_mutex_lock(handle->lock);
+    /* The local rendezvous belongs to the handle's actor: it sends the
+     * address requests, reads the reflexive address and classifies. */
+    meridian_rendv_detect_nat_msg_t* request =
+        (meridian_rendv_detect_nat_msg_t*)
+        get_clear_memory(sizeof(meridian_rendv_detect_nat_msg_t));
+    if (request == NULL) return -1;
+    request->relay_a = relay_a;
+    request->relay_b = relay_b;
 
-    // Send address requests to relay servers
-    if (relay_a != NULL) {
-        meridian_relay_send_addr_request(relay_a);
-    }
-    if (relay_b != NULL) {
-        meridian_relay_send_addr_request(relay_b);
-    }
-
-    // Read stored reflexive addresses from local rendezvous
-    uint32_t reflexive_addr = meridian_rendv_get_reflexive_addr(handle->local_rendv);
-    uint16_t reflexive_port = meridian_rendv_get_reflexive_port(handle->local_rendv);
-    uint32_t local_addr = handle->local_rendv->addr;
-
-    // Classification algorithm
-    meridian_nat_type_t nat_type = MERIDIAN_NAT_TYPE_UNKNOWN;
-
-    if (local_addr != 0 && local_addr == reflexive_addr) {
-        // Local address matches reflexive — we're not behind NAT
-        nat_type = MERIDIAN_NAT_TYPE_OPEN;
-    } else if (reflexive_addr != 0) {
-        // We have at least one reflexive address that differs from local
-        // With two relays we can distinguish EIM from EDM
-        // For now, default to PORT_RESTRICTED_CONE when we have reflexive info
-        // Full two-relay comparison happens when both responses arrive
-        nat_type = MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE;
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
     }
 
-    handle->local_rendv->nat_type = nat_type;
-    meridian_nat_type_t result_type = nat_type;
+    int trip = actor_round_trip(&handle->actor, MERIDIAN_RENDV_DETECT_NAT,
+                                &request->reply, MERIDIAN_RENDV_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
 
-    platform_mutex_unlock(handle->lock);
+    uint32_t reflexive_addr = request->reflexive_addr;
+    uint16_t reflexive_port = request->reflexive_port;
+    meridian_nat_type_t result_type = (meridian_nat_type_t)request->nat_type;
+    actor_reply_destroy(&request->reply);
+    free(request);
 
     callback(ctx, reflexive_addr, reflexive_port, result_type);
     return 0;

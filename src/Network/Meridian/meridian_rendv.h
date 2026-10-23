@@ -10,6 +10,8 @@
 #include <stddef.h>
 #include <sys/socket.h>
 #include "../../Platform/platform_thread.h"
+#include "../../Actor/actor.h"
+#include "../../Scheduler/scheduler.h"
 #include "meridian.h"
 #include "msquic.h"
 
@@ -111,6 +113,16 @@ typedef struct meridian_rendv_config_t {
  * Handle for managing rendezvous operations.
  * Manages local and peer rendezvous points and tunneled connections.
  */
+/**
+ * How long a public call waits for the rendezvous handle's actor to
+ * answer.
+ *
+ * The call sends a request to the actor and waits on the request's
+ * condition variable — the round trip upstream's peer book uses. The
+ * actor runs on a pool worker, never on the calling thread.
+ */
+#define MERIDIAN_RENDV_TIMEOUT_MS 5000
+
 typedef struct meridian_rendv_handle_t {
     refcounter_t refcounter;                    /**< Reference counting for lifetime */
     meridian_rendv_t* local_rendv;               /**< Local rendezvous point (if any) */
@@ -121,7 +133,8 @@ typedef struct meridian_rendv_handle_t {
     HQUIC configuration;                     /**< msquic configuration for tunnels */
     meridian_rendv_stream_data_cb_t on_stream_data;  /**< Stream data received callback */
     void* on_stream_data_ctx;                       /**< User context for stream data callback */
-    platform_mutex_t* lock;                    /**< Thread-safe access */
+    scheduler_pool_t* pool;                     /**< Scheduler pool that runs the handle's actor */
+    actor_t actor;                              /**< Owns the handle's state */
 } meridian_rendv_handle_t;
 
 // ============================================================================
@@ -207,7 +220,7 @@ bool meridian_rendv_can_direct_connect(const meridian_rendv_t* rendv);
  *
  * @return  New handle with refcount=1, or NULL on failure
  */
-meridian_rendv_handle_t* meridian_rendv_handle_create(void);
+meridian_rendv_handle_t* meridian_rendv_handle_create(scheduler_pool_t* pool);
 
 /**
  * Sets the msquic handle and creates QUIC configuration on the rendezvous handle.

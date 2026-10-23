@@ -503,7 +503,7 @@ meridian_protocol_t* meridian_protocol_create(const meridian_protocol_config_t* 
         config->ring_exponent_base
     );
 
-    protocol->rendv_handle = meridian_rendv_handle_create();
+    protocol->rendv_handle = meridian_rendv_handle_create(protocol->sched);
     protocol->latency_cache = meridian_latency_cache_create(MERIDIAN_PROBE_CACHE_SIZE);
 
     protocol->pending_measures = NULL;
