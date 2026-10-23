@@ -41,6 +41,12 @@ protocol_bidi_stream_callback(HQUIC Stream, void* Context,
 // ACTOR DISPATCH
 // ============================================================================
 
+/* The actor-thread body of the send path. */
+static int meridian_protocol_send_packet_impl(meridian_protocol_t* protocol,
+                                               const uint8_t* data, size_t len,
+                                               uint32_t target_addr,
+                                               uint16_t target_port);
+
 /* The stream table helpers live below; the dispatch calls them. */
 static int protocol_add_stream(meridian_protocol_t* protocol,
                                 meridian_stream_entry_t* entry);
@@ -134,20 +140,8 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
         case MERIDIAN_PROTOCOL_SEND_PACKET: {
             meridian_protocol_send_packet_msg_t* p =
                 (meridian_protocol_send_packet_msg_t*)msg->payload;
-            int sent = -1;
-            for (size_t i = 0; i < protocol->num_connected_peers; i++) {
-                meridian_node_t* node = protocol->peer_nodes[i];
-                if (node != NULL && node->addr == p->target_addr &&
-                    node->port == p->target_port) {
-                    HQUIC connection = protocol->connected_peers[i];
-                    if (connection != NULL) {
-                        sent = meridian_stream_send_uni(protocol->msquic,
-                                                        connection, p->data,
-                                                        p->len, NULL);
-                    }
-                    break;
-                }
-            }
+            p->reply.result = meridian_protocol_send_packet_impl(
+                protocol, p->data, p->len, p->target_addr, p->target_port);
             free(p->data);
             p->data = NULL;
             if (actor_reply_complete(&p->reply)) {
@@ -1118,6 +1112,34 @@ int meridian_protocol_disconnect(meridian_protocol_t* protocol,
 // NETWORK I/O
 // ============================================================================
 
+/**
+ * @brief The actor-thread body of MERIDIAN_PROTOCOL_SEND_PACKET.
+ *
+ * Finds the peer's connection and sends the bytes. The gossip's outbound
+ * callback runs on this same thread, so the send must not go back through
+ * a round trip: the actor cannot answer itself while it is inside its own
+ * dispatch.
+ */
+static int meridian_protocol_send_packet_impl(meridian_protocol_t* protocol,
+                                               const uint8_t* data, size_t len,
+                                               uint32_t target_addr,
+                                               uint16_t target_port) {
+    int sent = -1;
+    for (size_t i = 0; i < protocol->num_connected_peers; i++) {
+        meridian_node_t* node = protocol->peer_nodes[i];
+        if (node != NULL && node->addr == target_addr &&
+            node->port == target_port) {
+            HQUIC connection = protocol->connected_peers[i];
+            if (connection != NULL) {
+                sent = meridian_stream_send_uni(protocol->msquic, connection,
+                                                data, len, NULL);
+            }
+            break;
+        }
+    }
+    return sent;
+}
+
 int meridian_protocol_send_packet(meridian_protocol_t* protocol,
                                    const uint8_t* data, size_t len,
                                    const meridian_node_t* target) {
@@ -1145,6 +1167,16 @@ int meridian_protocol_send_packet(meridian_protocol_t* protocol,
         free(request->data);
         free(request);
         return -1;
+    }
+
+    /* A call from inside the protocol's own dispatch — the gossip's
+     * outbound callback — must not wait for the actor to answer itself. */
+    if (actor_is_running_on_this_thread(&protocol->actor)) {
+        int rc = meridian_protocol_send_packet_impl(protocol, data, len,
+                                                    target->addr, target->port);
+        free(request->data);
+        free(request);
+        return rc;
     }
 
     int trip = actor_round_trip(&protocol->actor, MERIDIAN_PROTOCOL_SEND_PACKET,

@@ -11,6 +11,10 @@
 #include <stdbool.h>
 #include <stdlib.h>
 
+/* The actor an inline caller is running right now, if any. The destroy
+ * path and the running-thread check both need to know it. */
+static PLATFORM_THREAD_LOCAL actor_t* t_inline_actor = NULL;
+
 
 void actor_init(actor_t* actor, void* state, void (*dispatch)(void* state, message_t* msg), scheduler_pool_t* pool) {
   message_queue_init(&actor->queue);
@@ -232,6 +236,16 @@ bool actor_send(actor_t* actor, message_t* msg) {
     }
   }
   return was_empty;
+}
+
+bool actor_is_running_on_this_thread(actor_t* actor) {
+  if (actor == NULL) return false;
+  /* An inline run: this thread holds the claim and is inside the
+   * dispatch. */
+  if (t_inline_actor == actor) return true;
+  /* A pool worker: the scheduler marks the actor it is running. */
+  scheduler_t* self = scheduler_get_current();
+  return (self != NULL && self->current == actor);
 }
 
 bool actor_run(actor_t* actor, size_t batch_size) {
