@@ -101,6 +101,17 @@ bool actor_run(actor_t* actor, size_t batch_size);
  * sent has been dispatched and the out-field the dispatch wrote is visible
  * to the caller. */
 bool actor_run_inline(actor_t* actor, size_t batch_size);
+/* True when the calling thread is the one running this actor right now:
+ * an inline run (actor_run_inline) on this thread, or a pool worker
+ * running it.
+ *
+ * A subsystem that hands work to its own actor from inside a callback
+ * the actor invoked needs this. Such a call cannot queue a message and
+ * wait for it: the actor is claimed by this thread, so a second claim
+ * would spin forever. The caller either does the work itself — it is
+ * already on the actor's thread — or queues the message and lets the
+ * run that is already in progress pick it up. */
+bool actor_is_running_on_this_thread(actor_t* actor);
 void backpressure_apply(actor_t* actor);
 void backpressure_release(actor_t* actor);
 
@@ -110,6 +121,14 @@ void backpressure_release(actor_t* actor);
  * - L2 provenance added: this file is a vendored copy of liboffs's actor.h,
  *   surgically transplanted to live under poseidon/src/Actor/.
  * - Forward decl of `bool` added via <stdbool.h> for actor_send/actor_run.
+ * - actor_run_inline added (poseidon-only): upstream has no inline
+ *   actor_run caller, so upstream has no need to claim the actor for the
+ *   calling thread. Poseidon's synchronous wrappers do.
+ * - actor_is_running_on_this_thread added (poseidon-only): tells a
+ *   subsystem whether the thread it is on is already running the actor it
+ *   is about to hand work to. A re-entrant call — a callback the actor
+ *   invoked calling back into the same subsystem — cannot queue a message
+ *   and wait for it, because the actor is claimed by that thread.
  *
  * No behaviour changes; no symbols renamed; the actor_t layout is byte-for-byte
  * the liboffs layout so that poseidon's Workers/, Time/, and downstream
