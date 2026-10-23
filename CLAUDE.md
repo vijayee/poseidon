@@ -22,6 +22,8 @@ Always read and follow the coding conventions in [STYLEGUIDE.md](./STYLEGUIDE.md
 - **CRITICAL allocator rule**: `poseidon_alloc` / `poseidon_free` are liboffs-isms. NEVER USE — use `calloc` / `malloc` / `free`. `get_clear_memory` IS a poseidon API and is still in use.
 - **`actor_send` contract**: wraps caller-provided `message_t*` in heap `message_node_t`, returns `false` on DESTROY or queue rejection. Caller MUST NOT wrap, MUST NOT free.
 - **Wrapper→actor return-value rule**: every public wrapper that has an `_impl` variant MUST capture `_impl`'s return value into a manager out-field, then return that field. Audit ALL wrappers when actorizing.
+- **One actor, one thread**: a synchronous wrapper MUST drain with `actor_run_inline(&actor, 32)`, never `actor_run`. The plain run does not claim the actor, and `actor_send` injects the actor into the scheduler pool when the mailbox was empty — a pool worker can then run the very same actor while the wrapper runs it, and two threads popping one mailbox free the same node. `meridian_conn`'s wrappers were the last ones still on the plain run; they were moved in `758dcf1`.
+- **2.16 (committed)**: the Meridian relay client is actor-owned and its mutex is gone. The public API and the msquic callbacks both hand their work to the relay's actor; the two re-entrancy rules (an event that arrives while the actor runs on this thread, and an application callback that calls back in) are in the 2.16 section below.
 
 ## Phase 2 / 3 — `client_session` actorization (committed `f88699d`)
 
