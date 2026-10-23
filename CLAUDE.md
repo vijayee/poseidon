@@ -1313,3 +1313,61 @@ already queued for it stay with it.
 
 Green, 25/25 ctest. Every dispatch in the tree is free of a call that
 can wait.
+
+## Phase 2 (2.25) — the answer comes back as a message
+
+2.22 made a dispatch stop waiting. It did that by *dropping* the answer:
+a request made from inside a dispatch went out detached and nobody read
+the result. That is upstream's first half, not its second.
+
+Upstream's second half is the `reply_to` idiom: the request carries the
+actor the answer belongs to, and the worker "replies to reply_to with a
+summary" (`liboffs/src/OFFStreams/representation_actor.h`, whose answer
+payload carries the source it came from). The answer arrives as a
+message, so the actor that is waiting for it is unscheduled while it
+waits — it holds no thread. Pony's shape is the same: the promise is an
+actor, the fulfilment is a message, and the waiting actor resumes when
+the message arrives.
+
+### What is in the tree now
+
+`actor_answer_t` (`src/Actor/actor_reply.h`) is the answer block a
+request can carry: the actor the answer belongs to, the message type it
+arrives as, and the requester's own state, carried back. `actor_answer_send`
+is the worker's side: it fills in the result and sends the answer on.
+
+The overlay's publish has a form that uses it —
+`quasar_publish_reply_to(...)` — and the client session's publish uses
+that form. The session's dispatch no longer waits and no longer drops
+the answer: it publishes, the overlay applies the publish and sends the
+answer back, and the session's actor finishes the caller's request when
+the answer arrives.
+
+### What that fixed
+
+The detached publish had a bug in it: the session's dispatch cleared the
+channel's `publisher_session` as soon as the publish was queued, but the
+overlay delivers the message to the local subscribers *while it applies
+the publish* — which now happens after the dispatch returned. The
+loopback filter therefore saw no publisher and the publisher received
+its own message. The answer is what orders the two: the publisher stays
+set until the overlay says it is done, and the answer says it.
+
+The other thing the answer restores: the caller's result. A publish that
+failed used to come back as -1; now the caller gets the overlay's real
+answer again, delivered as a message.
+
+### The rule, complete
+
+- A dispatch never waits. A call that crosses an actor boundary from
+  inside a dispatch is queued.
+- A dispatch may still have an answer: the request names the actor the
+  answer belongs to, and the answer comes back as a message.
+- A thread that is not running an actor may wait — that is the round
+  trip, and it is the only way a caller gets an answer directly.
+
+### Build
+
+Green, 25/25 ctest. Two tests in `tests/actor_test.cpp` use a
+one-worker pool: a dispatch that waits deadlocks that pool, and an
+answer that never arrives fails the wait.
