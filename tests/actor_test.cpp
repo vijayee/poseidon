@@ -86,3 +86,147 @@ TEST_F(ActorTest, InitSendRunDestroy) {
     actor_destroy(&actor);
     SUCCEED();
 }
+
+// ============================================================================
+// A DISPATCH NEVER WAITS FOR ANOTHER ACTOR
+// ============================================================================
+//
+// The rule, from the two references: a dispatch runs on a pool worker, and
+// a worker that waits for another actor is a worker that runs no actor.
+// Upstream keeps the peer book's round trip off the pool for exactly this
+// reason (liboffs/src/Network/peer_book.h: the stop path "must only be
+// called from a thread that may block and is never a pool worker"), and a
+// Pony behaviour call is fire-and-forget for the same reason.
+//
+// The pool here has ONE worker. If the dispatch below waited for the
+// second actor, the one worker would be waiting for itself: the request
+// would never be dispatched, the answer would never come, and the test
+// would hang until the harness's timeout. So this test is a guard: a
+// change that makes a dispatch wait again fails here.
+
+extern "C" {
+#include "Actor/actor_reply.h"
+#include "Scheduler/scheduler.h"
+}
+
+namespace {
+
+constexpr uint32_t TEST_MSG_PING = 1;
+
+/* A request: the reply block first, the way the wrappers build it. */
+struct test_request_t {
+    actor_reply_t reply;
+    actor_t* worker;
+};
+
+/* The second actor: it counts the pings it is asked for. */
+struct worker_state_t {
+    int pings;
+};
+
+void worker_dispatch(void* state, message_t* msg) {
+    worker_state_t* s = static_cast<worker_state_t*>(state);
+    if (msg->type != TEST_MSG_PING) return;
+    s->pings++;
+    test_request_t* p = static_cast<test_request_t*>(msg->payload);
+    if (p == nullptr) return;
+    /* The request is the worker's now: the caller detached it, so nobody
+     * is waiting for the answer and the worker frees the request. */
+    if (actor_reply_complete(&p->reply)) {
+        actor_reply_destroy(&p->reply);
+        free(p);
+    }
+}
+
+/* The first actor: its dispatch asks the second actor for a pong. */
+struct caller_state_t {
+    actor_t* worker;
+    int requests;
+    int detached;
+};
+
+void caller_dispatch(void* state, message_t* msg) {
+    caller_state_t* s = static_cast<caller_state_t*>(state);
+    test_request_t* p = static_cast<test_request_t*>(msg->payload);
+    if (msg->type != TEST_MSG_PING || p == nullptr) return;
+
+    s->requests++;
+
+    /* Ask the other actor. This call is made from inside a dispatch, so
+     * it must not wait: the request goes out detached and the worker does
+     * the work when it gets to it. */
+    test_request_t* inner =
+        static_cast<test_request_t*>(calloc(1, sizeof(test_request_t)));
+    if (inner != nullptr) {
+        inner->worker = s->worker;
+        actor_reply_init(&inner->reply);
+        int trip = actor_request(s->worker, TEST_MSG_PING, &inner->reply, 1000);
+        if (trip == ACTOR_REQUEST_DETACHED) {
+            s->detached++;
+            /* The worker owns the request now. */
+        } else {
+            /* Answered, or the caller gave up: the caller owns it. */
+            actor_reply_destroy(&inner->reply);
+            free(inner);
+        }
+    }
+
+    /* Answer the test's own request. The test's thread is not running an
+     * actor, so it is waiting for this answer — that is the round trip. */
+    if (actor_reply_complete(&p->reply)) {
+        actor_reply_destroy(&p->reply);
+        free(p);
+    }
+}
+
+} // namespace
+
+TEST_F(ActorTest, ADispatchDoesNotWaitForAnotherActor) {
+    scheduler_pool_t* pool = scheduler_pool_create(1);
+    ASSERT_NE(nullptr, pool);
+    scheduler_pool_start(pool);
+
+    worker_state_t worker_state{0};
+    actor_t worker;
+    actor_init(&worker, &worker_state, worker_dispatch, pool);
+
+    caller_state_t caller_state{&worker, 0, 0};
+    actor_t caller;
+    actor_init(&caller, &caller_state, caller_dispatch, pool);
+
+    /* The test's own thread asks the caller actor to run. The test's
+     * thread is not running an actor, so this request waits for the
+     * answer — that is the round trip, and it is legal here. */
+    test_request_t* request =
+        static_cast<test_request_t*>(calloc(1, sizeof(test_request_t)));
+    ASSERT_NE(nullptr, request);
+    request->worker = &worker;
+    ASSERT_EQ(0, actor_reply_init(&request->reply));
+
+    message_t msg;
+    msg.type = TEST_MSG_PING;
+    msg.payload = &request->reply;
+    msg.payload_destroy = nullptr;
+    actor_send(&caller, &msg);
+
+    /* The caller's dispatch runs on the one worker. If it waited for the
+     * second actor, the worker would be waiting for itself and the answer
+     * below would never come. */
+    int waited = actor_reply_wait(&request->reply, 5000);
+    EXPECT_EQ(0, waited) << "the dispatch blocked: the answer never came";
+
+    /* The dispatch detached the request rather than waiting for it. */
+    EXPECT_EQ(1, caller_state.requests);
+    EXPECT_EQ(1, caller_state.detached);
+
+    /* And the worker did the work: the request was queued, not dropped. */
+    scheduler_pool_wait_for_idle(pool);
+    EXPECT_EQ(1, worker_state.pings);
+
+    actor_reply_destroy(&request->reply);
+    free(request);
+    actor_destroy(&caller);
+    actor_destroy(&worker);
+    scheduler_pool_stop(pool);
+    scheduler_pool_destroy(pool);
+}
