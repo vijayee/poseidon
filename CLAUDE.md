@@ -1092,3 +1092,32 @@ however the header is reached.
 ### Build
 
 Green, 25/25 ctest.
+
+## Phase 2 (2.19) — the rendezvous, the gossip, the query table, the measurements and the ring set
+
+The rest of the Meridian tree, in upstream's shape. Each of these is a
+structure upstream keeps **inside the network actor**, and each of them
+carried a mutex here because nothing owned them.
+
+| Poseidon | Upstream | What changed |
+|---|---|---|
+| `meridian_rendv` | `nat_detect` — it has an actor | the handle gets an actor and a pool; the local rendezvous, the peer list and the registered callback are the actor's; the tunnel data is handed over from msquic's threads; the NAT detection is the actor's work. **The file has no mutex left.** |
+| `meridian_gossip` | the gossip inside `network_t` | the scheduler, the in-flight gossips and the query table are the protocol actor's; the gossip reply is handed over; the `running` flag is atomic. **No mutex left.** |
+| `meridian_query` | the rings and the latency cache | the query table was inert — the gossip tracks its exchanges in its own list — and it is the protocol actor's state now. **No mutex left.** |
+| `meridian_measure` | the latency cache | the measurement reply is handed over; recording a result is a round trip. **No mutex left.** |
+| `meridian_ring` | `ring_set_t` | the lock field was never used. **Gone.** |
+
+### The one rule that decides where a lock may stay
+
+A mutex is only right where a **foreign thread** mutates the state. The
+protocol's remaining four lock sites are the stream table and the
+start/stop transition — both foreign-thread cases, and upstream keeps
+exactly such a table behind `quic_listener_t.conn_lock`.
+
+The same rule applies to the relay client and the relay server: upstream
+keeps `clients_lock` for the server's client table, because msquic's
+callbacks add and remove clients. Those locks stay.
+
+### Build
+
+Green, 25/25 ctest.
