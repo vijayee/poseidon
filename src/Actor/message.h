@@ -368,55 +368,23 @@ typedef enum {
   POSEIDON_QUIC_CONNECTION_PEER_SHUTDOWN,
 
   /* ========================================================================
-   * 2.16 Meridian relay client — actor messages
+   * 2.16 Meridian relay client — work queue
    * ========================================================================
    *
-   * Gives the relay client one actor that owns its mutable state. The
-   * relay is a foreign-thread subsystem: msquic delivers the connection
-   * and stream events on its own worker threads, and the application calls
-   * the public API from its own thread. Both paths hand work to the actor
-   * through actor_send; the actor is the single serialization point that
-   * replaces the relay's platform mutex.
+   * The relay client is a foreign-thread subsystem: msquic delivers the
+   * connection and the stream events on its own worker threads, and the
+   * application calls the public API from its own thread. It follows the
+   * shape upstream's relay client uses — the flags that are read across
+   * threads are atomic, the connection table and the registered callbacks
+   * are guarded by one small mutex, and the actor carries the outbound
+   * work that must not run on a callback thread.
    *
-   * The family splits in two halves. The first six are the public API
-   * calls (connect, disconnect, send_datagram, send_addr_request and the
-   * two callback registrations). The last seven are the msquic events
-   * handed over from the callback threads.
-   *
-   * Payload structs live in
-   * src/Network/Meridian/meridian_relay_messages.h; this enum only carries
-   * the type tags. */
-  /* Open the QUIC connection to the relay server (was:
-   * meridian_relay_connect). */
-  MERIDIAN_RELAY_CONNECT,
-  /* Close the QUIC connection to the relay server (was:
-   * meridian_relay_disconnect). */
-  MERIDIAN_RELAY_DISCONNECT,
-  /* Forward a datagram to a peer through the relay (was:
-   * meridian_relay_send_datagram). */
-  MERIDIAN_RELAY_SEND_DATAGRAM,
-  /* Ask the relay for this client's reflexive address (was:
-   * meridian_relay_send_addr_request). */
-  MERIDIAN_RELAY_SEND_ADDR_REQUEST,
-  /* Register the datagram callback (was: meridian_relay_on_datagram). */
-  MERIDIAN_RELAY_SET_DATAGRAM_CB,
-  /* Register the address-response callback (was:
-   * meridian_relay_on_addr_response). */
-  MERIDIAN_RELAY_SET_ADDR_CB,
-  /* msquic: the connection to the relay server is up. */
-  MERIDIAN_RELAY_CONNECTED,
-  /* msquic: the connection to the relay server is going down. */
-  MERIDIAN_RELAY_SHUTDOWN,
-  /* msquic: the connection to the relay server is fully closed. */
-  MERIDIAN_RELAY_SHUTDOWN_COMPLETE,
-  /* msquic: the peer opened a stream that the actor must track. */
-  MERIDIAN_RELAY_PEER_STREAM_STARTED,
-  /* msquic: a tracked stream is gone and must be dropped. */
-  MERIDIAN_RELAY_STREAM_CLOSED,
-  /* The relay answered the address request. */
-  MERIDIAN_RELAY_ADDR_RESPONSE,
-  /* A peer datagram arrived through the relay. */
-  MERIDIAN_RELAY_DATAGRAM,
+   * There is one message: the address request the msquic connection
+   * callback hands over, so the request is not built on msquic's worker
+   * thread. The public API does its work on the calling thread and
+   * returns its result, the way upstream's relay client connect and
+   * disconnect do. */
+  MERIDIAN_RELAY_ADDR_REQUEST,
 } message_type_e;
 
 /* Base message. The actor's dispatch receives one of these; type selects the
@@ -564,17 +532,15 @@ typedef struct message_t {
  * msquic owns the I/O and delivers the data through the transport's
  * callbacks, so DATA carries the bytes themselves.
  *
- * Phase 2 (commit 2.16) adds the MERIDIAN_RELAY_* family (13 entries) above
+ * Phase 2 (commit 2.16) adds the MERIDIAN_RELAY_* family (1 entry) above
  * the local-modifications block. The enum is still the global
- * message_type_e; the relay payload structs live in the per-subsystem
- * header Network/Meridian/meridian_relay_messages.h, keeping message.h
- * free of Meridian / msquic / stream dependencies. The change is purely
- * additive to the enum; the 4 TIMER_*, 11 MERIDIAN_CONN_*, 11
- * POSEIDON_CHANNEL_MANAGER_*, 8 POSEIDON_UNIX_*, 6 POSEIDON_TCP_*, 6
- * POSEIDON_WS_*, 5 POSEIDON_WT_* and 5 POSEIDON_QUIC_* families are
- * unchanged. The relay family is the first one that mixes two kinds of
- * sender in a single family: the public API calls come from the
- * application thread, the event half comes from msquic's worker threads.
- * Both hand their work to the same actor, which is the relay's single
- * serialization point once the relay's platform mutex is retired.
+ * message_type_e; the change is purely additive to the enum; the 4
+ * TIMER_*, 11 MERIDIAN_CONN_*, 11 POSEIDON_CHANNEL_MANAGER_*, 8
+ * POSEIDON_UNIX_*, 6 POSEIDON_TCP_*, 6 POSEIDON_WS_*, 5 POSEIDON_WT_* and
+ * 5 POSEIDON_QUIC_* families are unchanged. The relay family carries the
+ * one piece of work the relay must not build on msquic's callback thread:
+ * the address request. The relay's other state is guarded the way
+ * upstream's relay client guards it — atomic flags, one small mutex for
+ * the connection table and the registered callbacks, and no msquic call
+ * made while that mutex is held.
  */

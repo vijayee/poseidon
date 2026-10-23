@@ -67,10 +67,12 @@ typedef struct meridian_relay_config_t {
  * Relay client for establishing peer-to-peer communication through a relay server.
  * Maintains a QUIC connection to the relay and provides datagram forwarding.
  *
- * Thread safety: the relay's state belongs to its actor. Every exported
- * function hands its work to the actor and waits for the answer, so the
- * exported functions are safe to call from any thread. The two state
- * queries are snapshots: they read the last value the actor wrote.
+ * Thread safety: the relay follows the shape upstream's relay client uses.
+ * The flags that are read across threads are atomic, the connection table
+ * and the registered callbacks are guarded by one small mutex, and the
+ * actor carries the outbound work that must not run on a callback thread.
+ * An msquic call is never made while the mutex is held: msquic may answer
+ * it with a callback on the same thread, and that callback takes the mutex.
  */
 typedef struct meridian_relay_t {
     refcounter_t refcounter;                        /**< Reference counting for lifetime */
@@ -80,8 +82,8 @@ typedef struct meridian_relay_t {
     HQUIC connection;                              /**< QUIC connection to relay server */
     meridian_rendv_t* server;                       /**< Relay server rendezvous point */
     meridian_relay_config_t config;                /**< Client configuration */
-    uint32_t local_endpoint_id;                     /**< Assigned endpoint ID from relay */
-    bool connected;                                 /**< Connection state to relay */
+    ATOMIC(uint32_t) local_endpoint_id;             /**< Assigned endpoint ID from relay */
+    ATOMIC(uint8_t) connected;                      /**< Connection state to relay */
     meridian_relay_datagram_cb_t on_datagram;       /**< Datagram received callback */
     void* on_datagram_ctx;                          /**< User context for datagram callback */
     meridian_relay_addr_cb_t on_addr_response;      /**< Address response callback */
@@ -89,8 +91,9 @@ typedef struct meridian_relay_t {
     meridian_stream_entry_t** active_streams;        /**< Tracking array for open streams */
     size_t num_active_streams;                       /**< Number of active streams */
     size_t active_streams_cap;                       /**< Capacity of active_streams array */
+    platform_mutex_t* lock;                         /**< Guards the stream table, the callbacks and the connection handle */
     scheduler_pool_t* pool;                          /**< Scheduler pool owning this actor (NULL = caller-thread dispatch) */
-    actor_t actor;                                   /**< Mailbox / dispatch state (embedded by value) */
+    actor_t actor;                                   /**< Work queue (embedded by value) */
 } meridian_relay_t;
 
 // ============================================================================
@@ -204,22 +207,18 @@ void meridian_relay_on_addr_response(meridian_relay_t* relay,
 /**
  * Gets the endpoint ID assigned to this client by the relay server.
  *
- * The value is a snapshot: it is the last one the relay's actor wrote.
- *
  * @param relay  Relay client
  * @return       Assigned endpoint ID, or 0 if not connected
  */
-uint32_t meridian_relay_get_endpoint_id(const meridian_relay_t* relay);
+uint32_t meridian_relay_get_endpoint_id(meridian_relay_t* relay);
 
 /**
  * Checks whether the relay client is connected to the relay server.
  *
- * The value is a snapshot: it is the last one the relay's actor wrote.
- *
  * @param relay  Relay client
  * @return       True if connected, false otherwise
  */
-bool meridian_relay_is_connected(const meridian_relay_t* relay);
+bool meridian_relay_is_connected(meridian_relay_t* relay);
 
 #ifdef __cplusplus
 }

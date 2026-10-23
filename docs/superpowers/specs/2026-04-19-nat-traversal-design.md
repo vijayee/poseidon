@@ -121,10 +121,11 @@ typedef struct meridian_relay_t {
     HQUIC connection;                         // QUIC connection to relay server
     meridian_rendv_t* server;                 // Relay server address
     meridian_relay_config_t config;
-    uint32_t local_endpoint_id;              // Our assigned endpoint ID
-    bool connected;
+    ATOMIC(uint32_t) local_endpoint_id;      // Our assigned endpoint ID
+    ATOMIC(uint8_t) connected;               // Connection state
+    platform_mutex_t* lock;                  // Stream table, callbacks, handle
     scheduler_pool_t* pool;                  // Scheduler pool owning this actor
-    actor_t actor;                           // Mailbox / dispatch state
+    actor_t actor;                           // Work queue
 } meridian_relay_t;
 ```
 

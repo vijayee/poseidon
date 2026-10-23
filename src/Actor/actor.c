@@ -271,16 +271,6 @@ bool actor_run_inline(actor_t* actor, size_t batch_size) {
   return has_more;
 }
 
-bool actor_is_running_on_this_thread(actor_t* actor) {
-  if (actor == NULL) return false;
-  /* An inline run: this thread holds the claim and is inside the
-   * dispatch. */
-  if (t_inline_actor == actor) return true;
-  /* A pool worker: the scheduler marks the actor it is running. */
-  scheduler_t* self = scheduler_get_current();
-  return (self != NULL && self->current == actor);
-}
-
 bool actor_run(actor_t* actor, size_t batch_size) {
   for (size_t count = 0; count < batch_size; count++) {
     if (atomic_load(&actor->flags) & ACTOR_FLAG_DESTROY) {
