@@ -3,16 +3,35 @@
 //
 
 #include <gtest/gtest.h>
+
+extern "C" {
 #include "ClientAPIs/client_session.h"
+#include "Scheduler/scheduler.h"
+}
 
 class ClientSessionTest : public ::testing::Test {
 protected:
-    void SetUp() override {}
-    void TearDown() override {}
+    // The session's actor runs on a pool worker: the public calls send a
+    // request to the actor and wait for its answer.
+    void SetUp() override {
+        pool_ = scheduler_pool_create(1);
+        ASSERT_NE(nullptr, pool_);
+        scheduler_pool_start(pool_);
+    }
+
+    void TearDown() override {
+        if (pool_ != nullptr) {
+            scheduler_pool_stop(pool_);
+            scheduler_pool_destroy(pool_);
+            pool_ = nullptr;
+        }
+    }
+
+    scheduler_pool_t* pool_ = nullptr;
 };
 
 TEST_F(ClientSessionTest, CreateDestroy) {
-    client_session_t* session = client_session_create(123, nullptr);
+    client_session_t* session = client_session_create(123, nullptr, pool_);
     ASSERT_NE(nullptr, session);
     EXPECT_EQ(123u, session->session_id);
     EXPECT_EQ(-1, session->client_fd);
@@ -24,7 +43,7 @@ TEST_F(ClientSessionTest, CreateDestroy) {
 }
 
 TEST_F(ClientSessionTest, SubscribeUnsubscribe) {
-    client_session_t* session = client_session_create(1, nullptr);
+    client_session_t* session = client_session_create(1, nullptr, pool_);
     ASSERT_NE(nullptr, session);
 
     EXPECT_EQ(0, client_session_subscribe(session, "Feeds/public", false));

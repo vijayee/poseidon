@@ -264,7 +264,7 @@ static QUIC_STATUS QUIC_API _quic_connection_callback(HQUIC connection,
         // per-client state the channel manager registry holds.
         uint32_t session_id = (uint32_t)s_next_session_id++;
         client_session_t* session =
-            client_session_create(session_id, transport->base.manager);
+            client_session_create(session_id, transport->base.manager, transport->base.pool);
         if (session == NULL) {
             log_error("quic transport: failed to create client session");
             transport->api->ConnectionShutdown(

@@ -24,6 +24,15 @@ extern "C" {
 
 #define CLIENT_SESSION_MAX_SUBSCRIPTIONS 256
 
+/**
+ * How long a public call waits for the session's actor to answer.
+ *
+ * The call sends a request to the actor and waits on the request's
+ * condition variable — the round trip upstream's peer book uses. The
+ * actor runs on a pool worker, never on the calling thread.
+ */
+#define CLIENT_SESSION_TIMEOUT_MS 5000
+
 typedef struct client_subscription_t {
     char topic_path[CLIENT_MAX_TOPIC_PATH];
     bool active;
@@ -41,20 +50,23 @@ typedef struct client_session_t {
     client_subscription_t subscriptions[CLIENT_SESSION_MAX_SUBSCRIPTIONS];
     size_t num_subscriptions;
     uint32_t next_request_id;
-    // Actor-query out-fields: pre-initialised by the wrapper before actor_send,
-    // written by the matching _impl during dispatch, read by the wrapper after
-    // actor_run returns. See channel_manager.h for the established pattern.
-    int register_out;
-    int subscribe_out;
-    int unsubscribe_out;
-    bool is_subscribed_out;
-    bool has_loopback_out;
-    cbor_item_t* handle_request_response_out;
-    int handle_request_rc_out;
 } client_session_t;
 
+/**
+ * Creates a session.
+ *
+ * The session's actor needs a scheduler pool: the public calls send a
+ * request to the actor and wait for its answer, and only a pool worker
+ * runs the actor. The manager's pool is used when there is one; the
+ * caller supplies the fallback.
+ *
+ * @param session_id The session's id.
+ * @param manager    The channel manager (may be NULL).
+ * @param pool       The pool to run the actor on when there is no manager.
+ */
 client_session_t* client_session_create(uint32_t session_id,
-                                         poseidon_channel_manager_t* manager);
+                                         poseidon_channel_manager_t* manager,
+                                         scheduler_pool_t* pool);
 void client_session_destroy(client_session_t* session);
 
 int client_session_handle_request(client_session_t* session,

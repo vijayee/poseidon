@@ -217,8 +217,7 @@ static void _accept_callback(pd_loop_t* loop,
     // Bind a client session to the connection. The session is the
     // per-client state the channel manager registry holds.
     client_session_t* session =
-        client_session_create((uint32_t)s_next_session_id++,
-                              transport->base.manager);
+        client_session_create((uint32_t)s_next_session_id++, transport->base.manager, transport->base.pool);
     if (session == NULL) {
         log_error("ws transport: failed to create client session");
         platform_socket_destroy(client_sock);

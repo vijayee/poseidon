@@ -16,6 +16,7 @@
 #include "../Util/allocator.h"
 #include "../Platform/platform_thread.h"
 #include "../Actor/actor.h"
+#include "../Actor/actor_reply.h"
 #include "../Actor/message.h"
 #include <cbor.h>
 #include <string.h>
@@ -39,41 +40,61 @@
 #define POSEIDON_CLIENT_SESSION_MSG_CLEANUP_SUBS      0x07
 #define POSEIDON_CLIENT_SESSION_MSG_DISPATCH_EVENT    0x08
 
-// HANDLE_REQUEST carries a heap-allocated client_frame_t by pointer so the
-// wrapper can pass a stable copy to dispatch (the wrapper's stack frame
-// vanishes as soon as actor_run returns). dispatch frees the frame.
+// Every request the public API sends is a heap-allocated shell whose FIRST
+// member is the reply block: the wrapper waits on the block's condition
+// variable until the actor has written the answer, and the actor hands the
+// request back. The request owns everything it carries, because the actor may
+// still be holding it after the caller has given up and walked away.
+
+typedef struct client_session_msg_topic_t {
+    actor_reply_t reply;   /**< Must stay first. */
+    char* topic_path;      /**< Owned: the request's copy of the caller's path. */
+    bool loopback;
+    int result;            /**< The actor writes the answer here: 0/-1 for the
+                                subscribe calls, 0/1 for the two queries. */
+} client_session_msg_topic_t;
+
 typedef struct client_session_msg_handle_request_t {
-    client_frame_t* frame;
+    actor_reply_t reply;   /**< Must stay first. */
+    client_frame_t* frame; /**< Owned: the request's copy of the caller's frame.
+                                The actor frees it. */
+    cbor_item_t* response; /**< The actor's answer. The caller takes it. */
+    int rc;                /**< The actor writes the request outcome here. */
 } client_session_msg_handle_request_t;
+
+typedef struct client_session_msg_dispatch_event_t {
+    actor_reply_t reply;   /**< Must stay first. */
+    uint8_t event_type;
+    char* topic_path;      /**< Owned by the request; the actor frees it. */
+    char* subtopic;        /**< Owned by the request; the actor frees it. */
+    uint8_t* payload;      /**< Owned by the request; the actor frees it. */
+    size_t payload_len;
+} client_session_msg_dispatch_event_t;
+
+typedef struct client_session_msg_cleanup_subs_t {
+    actor_reply_t reply;   /**< Must stay first. */
+} client_session_msg_cleanup_subs_t;
 
 // DELIVER carries the wire bytes (already cbor-encoded by the channel
 // fan-out path) and the null-terminated topic path used for subscription
-// filtering. dispatch owns both buffers and frees them.
+// filtering. The fan-out hands the request over and does not wait: the
+// actor owns the buffers and frees them.
 typedef struct client_session_msg_deliver_t {
     char* topic_path;
     uint8_t* buf;
     size_t buf_len;
 } client_session_msg_deliver_t;
 
-// DISPATCH_EVENT carries the raw inputs to the public dispatch_event API.
-// Strings and the payload are heap-copied by the wrapper so the actor's
-// dispatch can outlive the wrapper's stack frame. dispatch owns every
-// pointer and frees them after encoding and sending.
-typedef struct client_session_msg_dispatch_event_t {
-    uint8_t event_type;
-    char* topic_path;
-    char* subtopic;
-    uint8_t* payload;
-    size_t payload_len;
-} client_session_msg_dispatch_event_t;
-
-// SUBSCRIBE / UNSUBSCRIBE / IS_SUBSCRIBED / HAS_LOOPBACK / CLEANUP_SUBS
-// payloads — plain data, no allocation. The wrappers read/write the matching
-// out-fields on the session struct after actor_run returns.
-typedef struct client_session_msg_topic_t {
-    const char* topic_path;
-    bool loopback;
-} client_session_msg_topic_t;
+/* Releases a deliver request: the topic path, the bytes and the shell.
+   Registered as the message's payload_destroy, so a message dropped
+   without being dispatched still releases them. */
+static void client_session_msg_deliver_destroy(void* payload) {
+    client_session_msg_deliver_t* p = (client_session_msg_deliver_t*)payload;
+    if (p == NULL) return;
+    free(p->topic_path);
+    free(p->buf);
+    free(p);
+}
 
 // ============================================================================
 // STATIC HELPERS (pure functions — no actor needed)
@@ -115,20 +136,20 @@ static int verify_channel_owner_signature(poseidon_channel_t* channel,
 // ACTOR DISPATCH
 // ============================================================================
 
-static void handle_subscribe(client_session_t* s, const client_session_msg_topic_t* p) {
-    s->subscribe_out = -1;
+static void handle_subscribe(client_session_t* s, client_session_msg_topic_t* p) {
+    p->result = -1;
     if (p->topic_path == NULL) return;
 
     // Dedup: if already subscribed to this exact topic, succeed (idempotent).
     for (size_t i = 0; i < s->num_subscriptions; i++) {
         if (s->subscriptions[i].active &&
             strcmp(s->subscriptions[i].topic_path, p->topic_path) == 0) {
-            s->subscribe_out = 0;
+            p->result = 0;
             return;
         }
     }
     if (s->num_subscriptions >= CLIENT_SESSION_MAX_SUBSCRIPTIONS) {
-        s->subscribe_out = -1;
+        p->result = -1;
         return;
     }
 
@@ -142,7 +163,7 @@ static void handle_subscribe(client_session_t* s, const client_session_msg_topic
             CLIENT_MAX_TOPIC_PATH - 1);
     s->subscriptions[s->num_subscriptions].topic_path[CLIENT_MAX_TOPIC_PATH - 1] = '\0';
     s->num_subscriptions++;
-    s->subscribe_out = 0;
+    p->result = 0;
 
     if (s->manager != NULL) {
         // Ensure the channel exists, then attach the per-session callback.
@@ -162,8 +183,8 @@ static void handle_subscribe(client_session_t* s, const client_session_msg_topic
     }
 }
 
-static void handle_unsubscribe(client_session_t* s, const client_session_msg_topic_t* p) {
-    s->unsubscribe_out = -1;
+static void handle_unsubscribe(client_session_t* s, client_session_msg_topic_t* p) {
+    p->result = -1;
     if (p->topic_path == NULL) return;
     for (size_t i = 0; i < s->num_subscriptions; i++) {
         if (s->subscriptions[i].active &&
@@ -184,32 +205,32 @@ static void handle_unsubscribe(client_session_t* s, const client_session_msg_top
                                                   strlen(p->topic_path));
                 }
             }
-            s->unsubscribe_out = 0;
+            p->result = 0;
             return;
         }
     }
-    s->unsubscribe_out = -1;
+    p->result = -1;
 }
 
-static void handle_is_subscribed(client_session_t* s, const client_session_msg_topic_t* p) {
-    s->is_subscribed_out = false;
+static void handle_is_subscribed(client_session_t* s, client_session_msg_topic_t* p) {
+    p->result = 0;
     if (p->topic_path == NULL) return;
     for (size_t i = 0; i < s->num_subscriptions; i++) {
         if (s->subscriptions[i].active &&
             strcmp(s->subscriptions[i].topic_path, p->topic_path) == 0) {
-            s->is_subscribed_out = true;
+            p->result = 1;
             return;
         }
     }
 }
 
-static void handle_has_loopback(client_session_t* s, const client_session_msg_topic_t* p) {
-    s->has_loopback_out = false;
+static void handle_has_loopback(client_session_t* s, client_session_msg_topic_t* p) {
+    p->result = 0;
     if (p->topic_path == NULL) return;
     for (size_t i = 0; i < s->num_subscriptions; i++) {
         if (s->subscriptions[i].active &&
             strcmp(s->subscriptions[i].topic_path, p->topic_path) == 0) {
-            s->has_loopback_out = s->subscriptions[i].loopback;
+            p->result = s->subscriptions[i].loopback ? 1 : 0;
             return;
         }
     }
@@ -217,8 +238,8 @@ static void handle_has_loopback(client_session_t* s, const client_session_msg_to
 
 static void handle_handle_request(client_session_t* s,
                                   client_session_msg_handle_request_t* p) {
-    s->handle_request_response_out = NULL;
-    s->handle_request_rc_out = -1;
+    p->response = NULL;
+    p->rc = -1;
     if (p->frame == NULL) return;
     // CHANNEL_DESTROY and CHANNEL_MODIFY both have cbor-heavy paths that
     // must live inside the actor (the original direct callsite now runs
@@ -413,8 +434,8 @@ static void handle_handle_request(client_session_t* s,
                                                    (rc == 0) ? CLIENT_ERROR_OK : CLIENT_ERROR_INVALID_PARAMS,
                                                    "");
     }
-    s->handle_request_response_out = response;
-    s->handle_request_rc_out = rc;
+    p->response = response;
+    p->rc = rc;
 }
 
 static void handle_deliver(client_session_t* s, client_session_msg_deliver_t* p) {
@@ -424,7 +445,7 @@ static void handle_deliver(client_session_t* s, client_session_msg_deliver_t* p)
 }
 
 static void handle_dispatch_event(client_session_t* s,
-                                   const client_session_msg_dispatch_event_t* p) {
+                                   client_session_msg_dispatch_event_t* p) {
     // cbor encode/decode must happen inside the actor (boss directive).
     // We replicate the old wrapper's encode-then-send pipeline but on the
     // actor's own thread, then free the heap-copied inputs the wrapper
@@ -484,43 +505,93 @@ static void client_session_dispatch(void* state, message_t* msg) {
     client_session_t* s = (client_session_t*)state;
     switch (msg->type) {
     case POSEIDON_CLIENT_SESSION_MSG_SUBSCRIBE: {
-        const client_session_msg_topic_t* p = (const client_session_msg_topic_t*)msg->payload;
+        client_session_msg_topic_t* p = (client_session_msg_topic_t*)msg->payload;
         handle_subscribe(s, p);
+        if (actor_reply_complete(&p->reply)) {
+            /* The caller gave up on the request and handed it over. */
+            free(p->topic_path);
+            actor_reply_destroy(&p->reply);
+            free(p);
+        }
         break;
     }
     case POSEIDON_CLIENT_SESSION_MSG_UNSUBSCRIBE: {
-        const client_session_msg_topic_t* p = (const client_session_msg_topic_t*)msg->payload;
+        client_session_msg_topic_t* p = (client_session_msg_topic_t*)msg->payload;
         handle_unsubscribe(s, p);
+        if (actor_reply_complete(&p->reply)) {
+            free(p->topic_path);
+            actor_reply_destroy(&p->reply);
+            free(p);
+        }
         break;
     }
     case POSEIDON_CLIENT_SESSION_MSG_IS_SUBSCRIBED: {
-        const client_session_msg_topic_t* p = (const client_session_msg_topic_t*)msg->payload;
+        client_session_msg_topic_t* p = (client_session_msg_topic_t*)msg->payload;
         handle_is_subscribed(s, p);
+        if (actor_reply_complete(&p->reply)) {
+            free(p->topic_path);
+            actor_reply_destroy(&p->reply);
+            free(p);
+        }
         break;
     }
     case POSEIDON_CLIENT_SESSION_MSG_HAS_LOOPBACK: {
-        const client_session_msg_topic_t* p = (const client_session_msg_topic_t*)msg->payload;
+        client_session_msg_topic_t* p = (client_session_msg_topic_t*)msg->payload;
         handle_has_loopback(s, p);
+        if (actor_reply_complete(&p->reply)) {
+            free(p->topic_path);
+            actor_reply_destroy(&p->reply);
+            free(p);
+        }
         break;
     }
     case POSEIDON_CLIENT_SESSION_MSG_HANDLE_REQUEST: {
-        client_session_msg_handle_request_t* p = (client_session_msg_handle_request_t*)msg->payload;
+        client_session_msg_handle_request_t* p =
+            (client_session_msg_handle_request_t*)msg->payload;
         handle_handle_request(s, p);
+        free(p->frame);
+        p->frame = NULL;
+        if (actor_reply_complete(&p->reply)) {
+            /* The caller never got the answer: the actor disposes of it. */
+            if (p->response != NULL) cbor_decref(&p->response);
+            p->response = NULL;
+            actor_reply_destroy(&p->reply);
+            free(p);
+        }
         break;
     }
     case POSEIDON_CLIENT_SESSION_MSG_DELIVER: {
         client_session_msg_deliver_t* p = (client_session_msg_deliver_t*)msg->payload;
         handle_deliver(s, p);
+        /* The message owns the request: the queue releases it after the
+         * dispatch returns. */
         break;
     }
     case POSEIDON_CLIENT_SESSION_MSG_CLEANUP_SUBS: {
+        client_session_msg_cleanup_subs_t* p =
+            (client_session_msg_cleanup_subs_t*)msg->payload;
         handle_cleanup_subs(s);
+        if (actor_reply_complete(&p->reply)) {
+            actor_reply_destroy(&p->reply);
+            free(p);
+        }
         break;
     }
     case POSEIDON_CLIENT_SESSION_MSG_DISPATCH_EVENT: {
-        const client_session_msg_dispatch_event_t* p =
-            (const client_session_msg_dispatch_event_t*)msg->payload;
+        client_session_msg_dispatch_event_t* p =
+            (client_session_msg_dispatch_event_t*)msg->payload;
         handle_dispatch_event(s, p);
+        /* The actor owns the copied inputs and frees them. */
+        free(p->topic_path);
+        free(p->subtopic);
+        free(p->payload);
+        p->topic_path = NULL;
+        p->subtopic = NULL;
+        p->payload = NULL;
+        if (actor_reply_complete(&p->reply)) {
+            actor_reply_destroy(&p->reply);
+            free(p);
+        }
         break;
     }
     default:
@@ -533,7 +604,12 @@ static void client_session_dispatch(void* state, message_t* msg) {
 // ============================================================================
 
 client_session_t* client_session_create(uint32_t session_id,
-                                        poseidon_channel_manager_t* manager) {
+                                        poseidon_channel_manager_t* manager,
+                                        scheduler_pool_t* pool) {
+    /* The session's actor needs a pool: the public calls send a request
+     * and wait for the answer, and only a pool worker runs the actor. */
+    if (manager == NULL && pool == NULL) return NULL;
+
     client_session_t* s = (client_session_t*)get_clear_memory(sizeof(client_session_t));
     if (s == NULL) return NULL;
     s->session_id = session_id;
@@ -542,13 +618,7 @@ client_session_t* client_session_create(uint32_t session_id,
     s->manager = manager;
     s->num_subscriptions = 0;
     s->next_request_id = 1;
-    s->pool = (manager != NULL) ? manager->actor.pool : NULL;
-    s->subscribe_out = -1;
-    s->unsubscribe_out = -1;
-    s->is_subscribed_out = false;
-    s->has_loopback_out = false;
-    s->handle_request_response_out = NULL;
-    s->handle_request_rc_out = -1;
+    s->pool = (manager != NULL) ? manager->actor.pool : pool;
     actor_init(&s->actor, s, client_session_dispatch, s->pool);
     refcounter_init(&s->refcounter);
     return s;
@@ -564,87 +634,202 @@ void client_session_destroy(client_session_t* s) {
 }
 
 // ============================================================================
-// PUBLIC API (wrappers — pre-init out-fields, actor_send, actor_run, read)
+// PUBLIC API
+//
+// Every call sends a request to the session's actor and waits for the
+// answer on the request's condition variable. The actor runs on a pool
+// worker; it is never run on the calling thread. The round trip is the
+// one upstream's peer book uses.
 // ============================================================================
 
 int client_session_subscribe(client_session_t* s, const char* topic_path, bool loopback) {
     if (s == NULL || topic_path == NULL) return -1;
-    client_session_msg_topic_t payload = { .topic_path = topic_path, .loopback = loopback };
-    message_t msg = {
-        .type = POSEIDON_CLIENT_SESSION_MSG_SUBSCRIBE,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&s->actor, &msg)) return -1;
-    actor_run_inline(&s->actor, 32);
-    return s->subscribe_out;
+
+    client_session_msg_topic_t* request = (client_session_msg_topic_t*)
+        get_clear_memory(sizeof(client_session_msg_topic_t));
+    if (request == NULL) return -1;
+    request->topic_path = strdup(topic_path);
+    if (request->topic_path == NULL) {
+        free(request);
+        return -1;
+    }
+    request->loopback = loopback;
+    request->result = -1;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->topic_path);
+        free(request);
+        return -1;
+    }
+
+    int trip = actor_round_trip(&s->actor, POSEIDON_CLIENT_SESSION_MSG_SUBSCRIBE,
+                                &request->reply, CLIENT_SESSION_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request->topic_path);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    int result = request->result;
+    actor_reply_destroy(&request->reply);
+    free(request->topic_path);
+    free(request);
+    return result;
 }
 
 int client_session_unsubscribe(client_session_t* s, const char* topic_path) {
     if (s == NULL || topic_path == NULL) return -1;
-    client_session_msg_topic_t payload = { .topic_path = topic_path };
-    message_t msg = {
-        .type = POSEIDON_CLIENT_SESSION_MSG_UNSUBSCRIBE,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&s->actor, &msg)) return -1;
-    actor_run_inline(&s->actor, 32);
-    return s->unsubscribe_out;
+
+    client_session_msg_topic_t* request = (client_session_msg_topic_t*)
+        get_clear_memory(sizeof(client_session_msg_topic_t));
+    if (request == NULL) return -1;
+    request->topic_path = strdup(topic_path);
+    if (request->topic_path == NULL) {
+        free(request);
+        return -1;
+    }
+    request->result = -1;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->topic_path);
+        free(request);
+        return -1;
+    }
+
+    int trip = actor_round_trip(&s->actor, POSEIDON_CLIENT_SESSION_MSG_UNSUBSCRIBE,
+                                &request->reply, CLIENT_SESSION_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request->topic_path);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    int result = request->result;
+    actor_reply_destroy(&request->reply);
+    free(request->topic_path);
+    free(request);
+    return result;
 }
 
 bool client_session_is_subscribed(client_session_t* s, const char* topic_path) {
     if (s == NULL || topic_path == NULL) return false;
-    client_session_msg_topic_t payload = { .topic_path = topic_path };
-    message_t msg = {
-        .type = POSEIDON_CLIENT_SESSION_MSG_IS_SUBSCRIBED,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&s->actor, &msg)) return false;
-    actor_run_inline(&s->actor, 32);
-    return s->is_subscribed_out;
+
+    client_session_msg_topic_t* request = (client_session_msg_topic_t*)
+        get_clear_memory(sizeof(client_session_msg_topic_t));
+    if (request == NULL) return false;
+    request->topic_path = strdup(topic_path);
+    if (request->topic_path == NULL) {
+        free(request);
+        return false;
+    }
+    request->result = 0;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->topic_path);
+        free(request);
+        return false;
+    }
+
+    int trip = actor_round_trip(&s->actor, POSEIDON_CLIENT_SESSION_MSG_IS_SUBSCRIBED,
+                                &request->reply, CLIENT_SESSION_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request->topic_path);
+        free(request);
+        return false;
+    }
+    if (trip != 0) return false;  /* the actor owns the request now */
+
+    bool result = request->result != 0;
+    actor_reply_destroy(&request->reply);
+    free(request->topic_path);
+    free(request);
+    return result;
 }
 
 bool client_session_has_loopback(client_session_t* s, const char* topic_path) {
     if (s == NULL || topic_path == NULL) return false;
-    client_session_msg_topic_t payload = { .topic_path = topic_path };
-    message_t msg = {
-        .type = POSEIDON_CLIENT_SESSION_MSG_HAS_LOOPBACK,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&s->actor, &msg)) return false;
-    actor_run_inline(&s->actor, 32);
-    return s->has_loopback_out;
+
+    client_session_msg_topic_t* request = (client_session_msg_topic_t*)
+        get_clear_memory(sizeof(client_session_msg_topic_t));
+    if (request == NULL) return false;
+    request->topic_path = strdup(topic_path);
+    if (request->topic_path == NULL) {
+        free(request);
+        return false;
+    }
+    request->result = 0;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->topic_path);
+        free(request);
+        return false;
+    }
+
+    int trip = actor_round_trip(&s->actor, POSEIDON_CLIENT_SESSION_MSG_HAS_LOOPBACK,
+                                &request->reply, CLIENT_SESSION_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request->topic_path);
+        free(request);
+        return false;
+    }
+    if (trip != 0) return false;  /* the actor owns the request now */
+
+    bool result = request->result != 0;
+    actor_reply_destroy(&request->reply);
+    free(request->topic_path);
+    free(request);
+    return result;
 }
 
 int client_session_handle_request(client_session_t* s, const client_frame_t* frame,
                                    cbor_item_t** out_response) {
     if (s == NULL || frame == NULL) return -1;
-    client_frame_t* frame_copy = (client_frame_t*)get_clear_memory(sizeof(client_frame_t));
-    if (frame_copy == NULL) return -1;
-    *frame_copy = *frame;
 
-    client_session_msg_handle_request_t payload = { .frame = frame_copy };
-    message_t msg = {
-        .type = POSEIDON_CLIENT_SESSION_MSG_HANDLE_REQUEST,
-        .payload = &payload,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&s->actor, &msg)) {
-        free(frame_copy);
+    client_session_msg_handle_request_t* request =
+        (client_session_msg_handle_request_t*)
+        get_clear_memory(sizeof(client_session_msg_handle_request_t));
+    if (request == NULL) return -1;
+    request->frame = (client_frame_t*)get_clear_memory(sizeof(client_frame_t));
+    if (request->frame == NULL) {
+        free(request);
         return -1;
     }
-    actor_run_inline(&s->actor, 32);
-    int rc = s->handle_request_rc_out;
-    if (out_response != NULL) {
-        *out_response = s->handle_request_response_out;
-    } else if (s->handle_request_response_out != NULL) {
-        cbor_decref(&s->handle_request_response_out);
+    *request->frame = *frame;
+    request->response = NULL;
+    request->rc = -1;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->frame);
+        free(request);
+        return -1;
     }
-    s->handle_request_response_out = NULL;
-    free(frame_copy);
+
+    int trip = actor_round_trip(&s->actor, POSEIDON_CLIENT_SESSION_MSG_HANDLE_REQUEST,
+                                &request->reply, CLIENT_SESSION_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request->frame);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    int rc = request->rc;
+    if (out_response != NULL) {
+        *out_response = request->response;
+    } else if (request->response != NULL) {
+        cbor_decref(&request->response);
+    }
+    request->response = NULL;
+    actor_reply_destroy(&request->reply);
+    free(request->frame);
+    free(request);
     return rc;
 }
 
@@ -655,9 +840,9 @@ void client_session_dispatch_event(client_session_t* s,
                                     const uint8_t* payload, size_t payload_len) {
     if (s == NULL || topic_path == NULL) return;
 
-    // Heap-copy every input the actor will need so its dispatch can outlive
-    // this wrapper's stack frame. The actor (handle_dispatch_event) owns
-    // and frees all three buffers after encoding and sending.
+    // Heap-copy every input the actor will need: the actor may still be
+    // holding the request after this call returns, so nothing in it may
+    // point at the caller's stack. The actor frees the copies.
     char* topic_copy = strdup(topic_path);
     char* subtopic_copy = (subtopic != NULL) ? strdup(subtopic) : NULL;
     uint8_t* payload_copy = NULL;
@@ -673,36 +858,68 @@ void client_session_dispatch_event(client_session_t* s,
         return;
     }
 
-    client_session_msg_dispatch_event_t dp = {
-        .event_type = event_type,
-        .topic_path = topic_copy,
-        .subtopic = subtopic_copy,
-        .payload = payload_copy,
-        .payload_len = payload_len,
-    };
-    message_t m = {
-        .type = POSEIDON_CLIENT_SESSION_MSG_DISPATCH_EVENT,
-        .payload = &dp,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&s->actor, &m)) {
+    client_session_msg_dispatch_event_t* request =
+        (client_session_msg_dispatch_event_t*)
+        get_clear_memory(sizeof(client_session_msg_dispatch_event_t));
+    if (request == NULL) {
         free(topic_copy);
         free(subtopic_copy);
         free(payload_copy);
         return;
     }
-    actor_run_inline(&s->actor, 32);
+    request->event_type = event_type;
+    request->topic_path = topic_copy;
+    request->subtopic = subtopic_copy;
+    request->payload = payload_copy;
+    request->payload_len = payload_len;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(topic_copy);
+        free(subtopic_copy);
+        free(payload_copy);
+        free(request);
+        return;
+    }
+
+    int trip = actor_round_trip(&s->actor, POSEIDON_CLIENT_SESSION_MSG_DISPATCH_EVENT,
+                                &request->reply, CLIENT_SESSION_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(topic_copy);
+        free(subtopic_copy);
+        free(payload_copy);
+        free(request);
+        return;
+    }
+    if (trip != 0) return;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
 }
 
 void client_session_cleanup_subscriptions(client_session_t* s) {
     if (s == NULL || s->manager == NULL) return;
-    message_t msg = {
-        .type = POSEIDON_CLIENT_SESSION_MSG_CLEANUP_SUBS,
-        .payload = NULL,
-        .payload_destroy = NULL,
-    };
-    if (!actor_send(&s->actor, &msg)) return;
-    actor_run_inline(&s->actor, 32);
+
+    client_session_msg_cleanup_subs_t* request = (client_session_msg_cleanup_subs_t*)
+        get_clear_memory(sizeof(client_session_msg_cleanup_subs_t));
+    if (request == NULL) return;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return;
+    }
+
+    int trip = actor_round_trip(&s->actor, POSEIDON_CLIENT_SESSION_MSG_CLEANUP_SUBS,
+                                &request->reply, CLIENT_SESSION_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return;
+    }
+    if (trip != 0) return;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
 }
 
 // ============================================================================
@@ -822,24 +1039,31 @@ static void session_dispatch_message(void* ctx, const uint8_t* topic, size_t top
         }
         memcpy(buf_copy, buf, buf_len);
 
-        client_session_msg_deliver_t payload = {
-            .topic_path = topic_copy,
-            .buf = buf_copy,
-            .buf_len = buf_len,
-        };
-        message_t m = {
-            .type = POSEIDON_CLIENT_SESSION_MSG_DELIVER,
-            .payload = &payload,
-            .payload_destroy = NULL,
-        };
-        if (!actor_send(&s->actor, &m)) {
+        // The fan-out hands the request over and does not wait: the
+        // delivery happens on the session's actor thread, and the request
+        // owns the buffers until then. Upstream's fan-out is the same
+        // shape — it posts to the session actor and moves on.
+        client_session_msg_deliver_t* request = (client_session_msg_deliver_t*)
+            get_clear_memory(sizeof(client_session_msg_deliver_t));
+        if (request == NULL) {
             free(topic_copy);
             free(buf_copy);
             continue;
         }
-        actor_run_inline(&s->actor, 32);
-        free(topic_copy);
-        free(buf_copy);
+        request->topic_path = topic_copy;
+        request->buf = buf_copy;
+        request->buf_len = buf_len;
+
+        message_t m = {
+            .type = POSEIDON_CLIENT_SESSION_MSG_DELIVER,
+            .payload = request,
+            .payload_destroy = client_session_msg_deliver_destroy,
+        };
+        if (!actor_send(&s->actor, &m)) {
+            /* The actor is gone: actor_send has already released the
+             * request and its buffers. */
+            continue;
+        }
     }
     vec_deinit(&snap);
     free(buf);

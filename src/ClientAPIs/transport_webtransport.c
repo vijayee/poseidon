@@ -179,7 +179,7 @@ static void _wt_session_callback(const wtf_session_event_t* event) {
         // per-client state the channel manager registry holds.
         uint32_t session_id = (uint32_t)s_next_session_id++;
         client_session_t* session =
-            client_session_create(session_id, transport->base.manager);
+            client_session_create(session_id, transport->base.manager, transport->base.pool);
         if (session == NULL) {
             log_error("webtransport: failed to create client session");
             wtf_session_close(event->session, 0, "out of memory");
