@@ -1371,3 +1371,79 @@ answer again, delivered as a message.
 Green, 25/25 ctest. Two tests in `tests/actor_test.cpp` use a
 one-worker pool: a dispatch that waits deadlocks that pool, and an
 answer that never arrives fails the wait.
+
+## Phase 2 (2.26) — the event pattern between actors
+
+### What upstream's events are
+
+Upstream's `src/Actor/message.h` is one flat enum of event types, grouped
+by subsystem, and the shape of a request and its answer is always the
+same:
+
+- A **request event** and its **result event** are separate types:
+  `SECTION_READ` and `SECTION_READ_RESULT`, `CACHE_GET` and
+  `CACHE_GET_RESULT`, `NETWORK_ADDR_RESPONSE` and
+  `NETWORK_NAT_TYPE_DETECTED`.
+- The request payload carries **`actor_t* reply_to`**. Upstream's own
+  comment on the section actor's payload: *"When reply_to is NULL (sync),
+  result is filled by dispatch. When reply_to is set (async), a
+  SECTION_DEALLOCATE_COMPLETE is sent back."*
+- The **result event carries its own typed payload** — the data the asker
+  asked for — and its own destructor: `section_read_result_payload_t`
+  carries the `buffer_t*`, `payload_destroy = section_read_result_destroy`.
+- Between two actors, the work travels as an event and nothing waits.
+  The relay client hands the address response to the NAT detector's
+  actor (`liboffs/src/Network/relay_client.c`:
+  `actor_send(&client->network->nat_detect->actor, &addr_msg)`), and the
+  detector hands the classification back to the network actor
+  (`liboffs/src/Network/nat_detect.c`:
+  `actor_send(&detect->network->actor, &result_msg)`). The relay client
+  has **no callback** for it.
+
+Upstream's condvar round trip exists in exactly two places —
+`src/Network/peer_book.c` and `src/ClientLibs/c/offs_client.c` — and both
+are callers that are not actors.
+
+### What pony's behaviours are
+
+The same thing, one layer down. A behaviour cannot return a value
+(`src/libponyc/pass/syntax.c`), so a behaviour call is a one-way message
+and the thread that sent goes straight back to running actors. An answer
+arrives later as a message: the promise is an actor, the fulfilment is a
+message (`ponyc/packages/promises`).
+
+So: **the unit of work between two actors is a message, and the answer
+is a message too.** Neither reference has an actor waiting on another
+actor.
+
+### The audit of poseidon
+
+| The pattern | Upstream | Pony | Poseidon |
+|---|---|---|---|
+| One global event enum, families per subsystem | yes | — | yes |
+| A request event and its result event are separate types | yes | — | yes |
+| The request names the actor the answer belongs to | `reply_to` | the promise actor | `actor_answer_t.reply_to` |
+| The answer arrives as a message | yes | yes | yes (2.25) |
+| The answer carries the data the asker needed | typed payload | the closure's value | `actor_answer_t.data` (2.26) |
+| A worker never waits for another actor | yes | yes | yes (2.22) |
+| A non-actor caller waits over a condvar | peer book, client library | — | yes |
+
+Two things did not match, and both are now fixed.
+
+**The relay's address response was a callback.** Upstream's relay client
+has no callback for it: the response goes to the NAT detector's actor as
+an event. Poseidon's relay called a user callback, and that callback
+runs on the relay's *stream actor* — a pool worker — so a user who wired
+it to a round trip would have a worker waiting on another actor. The
+relay now posts `MERIDIAN_RENDV_ADDR_RESPONSE` to the rendezvous handle's
+actor, and the handle's actor records the relay's view of the reflexive
+address and classifies the NAT type from it. The callback is gone, as it
+is upstream.
+
+**The answer could not carry anything but a number.** Upstream's result
+events carry the data the asker asked for. `actor_answer_t` now carries
+`data` and its destructor: the worker builds it, the asker frees it.
+
+### Build
+
+Green, 25/25 ctest.
