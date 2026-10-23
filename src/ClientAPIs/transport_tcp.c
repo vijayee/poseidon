@@ -541,13 +541,17 @@ void poseidon_transport_tcp_destroy(poseidon_transport_t* transport) {
     // reply that is on its way can never land on a freed connection.
     // The lock is deliberately not held while the actors are quiesced
     // above: a dispatch may reach back into the transport's send path.
-    platform_mutex_lock(tcp_transport->conn_lock);
+    // The connections are closed and their sessions released outside
+    // the lock: the session wrappers run the session's actor inline and
+    // wait for a pool worker that may be reaching back into this
+    // transport, and the send path takes this lock.
     for (int i = base->connections.length - 1; i >= 0; i--) {
         poseidon_tcp_connection_t* conn =
             (poseidon_tcp_connection_t*)base->connections.data[i];
         if (conn == NULL) continue;
-
         conn->is_closing = 1;
+        ATOMIC_STORE(&conn->closed, 1);
+
 
         // The watcher is unregistered before the socket is closed: the
         // closed descriptor number must not be reused while the
@@ -562,7 +566,6 @@ void poseidon_transport_tcp_destroy(poseidon_transport_t* transport) {
             platform_socket_destroy(conn->sock);
             conn->sock = NULL;
         }
-        ATOMIC_STORE(&conn->closed, 1);
         if (conn->ssl != NULL) {
             SSL_free(conn->ssl);
             conn->ssl = NULL;
@@ -590,10 +593,19 @@ void poseidon_transport_tcp_destroy(poseidon_transport_t* transport) {
             client_session_destroy(conn->session);
             conn->session = NULL;
         }
+    }
+
+    // The connection structs are freed under the lock: the send path
+    // resolves a client under the same lock.
+    platform_mutex_lock(tcp_transport->conn_lock);
+    for (int i = base->connections.length - 1; i >= 0; i--) {
+        poseidon_tcp_connection_t* conn =
+            (poseidon_tcp_connection_t*)base->connections.data[i];
+        if (conn == NULL) continue;
         free(conn);
     }
-    vec_deinit(&base->connections);
     platform_mutex_unlock(tcp_transport->conn_lock);
+    vec_deinit(&base->connections);
 
     // The shared body is actor-shaped: destroy its actor before the
     // loop goes away.

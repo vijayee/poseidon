@@ -146,13 +146,12 @@ void poseidon_channel_manager_destroy(poseidon_channel_manager_t* mgr) {
     if (mgr == NULL) return;
     if (!refcounter_dereference_is_zero(&mgr->refcounter)) return;
 
-    /* Set DESTROY, drain mailbox, free struct. We intentionally bypass
-       actor_destroy's backpressure_release / detach path: this actor is
-       single-owner (poseidond owns the manager) and is being torn down
-       before scheduler_pool_destroy. */
-    atomic_fetch_or_explicit(&mgr->actor.flags, ACTOR_FLAG_DESTROY,
-                              memory_order_acq_rel);
-    actor_run(&mgr->actor, 64);
+    /* Destroy the actor: that sets DESTROY, waits for a dispatch that is
+       already running to finish, drains the mailbox and detaches the actor
+       from the pool's registry. The detach matters: the manager is freed
+       here, and a pool that still holds the actor in its registry would
+       walk the freed block when it is torn down. */
+    actor_destroy(&mgr->actor);
 
     if (mgr->dial_channel != NULL) {
         poseidon_channel_destroy(mgr->dial_channel);
@@ -384,7 +383,7 @@ poseidon_channel_t* poseidon_channel_manager_create_channel(
         .payload_destroy = NULL,
     };
     if (!actor_send(&mgr->actor, &msg)) return NULL;
-    actor_run(&mgr->actor, 32);
+    actor_run_inline(&mgr->actor, 32);
     return mgr->create_channel_out;
 }
 
@@ -427,7 +426,7 @@ poseidon_channel_t* poseidon_channel_manager_join_channel(
         .payload_destroy = NULL,
     };
     if (!actor_send(&mgr->actor, &msg)) return NULL;
-    actor_run(&mgr->actor, 32);
+    actor_run_inline(&mgr->actor, 32);
 
     poseidon_channel_t* channel = mgr->join_channel_out;
 
@@ -504,7 +503,7 @@ int poseidon_channel_manager_destroy_channel(poseidon_channel_manager_t* mgr,
         .payload_destroy = NULL,
     };
     if (!actor_send(&mgr->actor, &msg)) return -1;
-    actor_run(&mgr->actor, 32);
+    actor_run_inline(&mgr->actor, 32);
     return mgr->destroy_channel_out;
 }
 
@@ -573,7 +572,7 @@ int poseidon_channel_manager_handle_bootstrap_reply(
         .payload_destroy = NULL,
     };
     if (!actor_send(&mgr->actor, &msg)) return -1;
-    actor_run(&mgr->actor, 32);
+    actor_run_inline(&mgr->actor, 32);
 
     /* I/O seam: connect on first reply, then add seeds. */
     if (mgr->hbr_first_reply && mgr->hbr_protocol != NULL) {
@@ -666,7 +665,7 @@ int poseidon_channel_manager_handle_bootstrap_request(
         .payload_destroy = NULL,
     };
     if (!actor_send(&mgr->actor, &msg)) return -1;
-    actor_run(&mgr->actor, 32);
+    actor_run_inline(&mgr->actor, 32);
 
     /* I/O seam: branch on out-flags. */
     if (mgr->hbrq_tombstone_encoded != NULL && mgr->hbrq_dial_channel != NULL) {
@@ -864,7 +863,7 @@ void poseidon_channel_manager_handle_delete_notice(
         free(payload.notice);
         return;
     }
-    actor_run(&mgr->actor, 32);
+    actor_run_inline(&mgr->actor, 32);
 
     /* I/O seam: redistribute tombstone on dial channel. */
     if (mgr->hdn_did_work && mgr->dial_channel != NULL) {
@@ -953,7 +952,7 @@ void poseidon_channel_manager_handle_modify_notice(
         free(payload.notice);
         return;
     }
-    actor_run(&mgr->actor, 32);
+    actor_run_inline(&mgr->actor, 32);
 
     /* I/O seam: redistribute on dial channel. */
     if (mgr->hmn_did_work && mgr->dial_channel != NULL) {
@@ -1040,7 +1039,7 @@ int poseidon_channel_manager_tick_all(poseidon_channel_manager_t* mgr) {
         .payload_destroy = NULL,
     };
     if (actor_send(&mgr->actor, &msg)) {
-        actor_run(&mgr->actor, 32);
+        actor_run_inline(&mgr->actor, 32);
     }
     return rc;
 }
@@ -1075,7 +1074,7 @@ int poseidon_channel_manager_add_tombstone(poseidon_channel_manager_t* mgr,
         .payload_destroy = NULL,
     };
     if (!actor_send(&mgr->actor, &msg)) return -1;
-    actor_run(&mgr->actor, 32);
+    actor_run_inline(&mgr->actor, 32);
     return mgr->add_tombstone_out;
 }
 
@@ -1116,7 +1115,7 @@ void poseidon_channel_manager_expire_tombstones(poseidon_channel_manager_t* mgr)
         .payload_destroy = NULL,
     };
     if (!actor_send(&mgr->actor, &msg)) return;
-    actor_run(&mgr->actor, 32);
+    actor_run_inline(&mgr->actor, 32);
 }
 
 void poseidon_channel_manager_expire_tombstones_impl(poseidon_channel_manager_t* mgr) {
@@ -1208,7 +1207,7 @@ int poseidon_channel_manager_register_session(poseidon_channel_manager_t* mgr, v
         .payload_destroy = NULL,
     };
     if (!actor_send(&mgr->actor, &msg)) return -1;
-    actor_run(&mgr->actor, 32);
+    actor_run_inline(&mgr->actor, 32);
     return mgr->register_session_out;
 }
 
@@ -1231,7 +1230,7 @@ int poseidon_channel_manager_unregister_session(poseidon_channel_manager_t* mgr,
         .payload_destroy = NULL,
     };
     if (!actor_send(&mgr->actor, &msg)) return -1;
-    actor_run(&mgr->actor, 32);
+    actor_run_inline(&mgr->actor, 32);
     return mgr->unregister_session_out;
 }
 

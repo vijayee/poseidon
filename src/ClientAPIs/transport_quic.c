@@ -624,14 +624,17 @@ void poseidon_transport_quic_destroy(poseidon_transport_t* transport) {
 
     // Release the connection resources. The actors are quiesced, so
     // nothing touches these fields any more.
-    platform_mutex_lock(quic_transport->conn_lock);
+    // The connections are closed and their sessions released outside
+    // the lock: the session wrappers run the session's actor inline and
+    // wait for a pool worker that may be reaching back into this
+    // transport, and the send path takes this lock.
     for (int i = base->connections.length - 1; i >= 0; i--) {
         poseidon_quic_connection_t* conn =
             (poseidon_quic_connection_t*)base->connections.data[i];
         if (conn == NULL) continue;
-
         conn->is_closing = 1;
         ATOMIC_STORE(&conn->closed, 1);
+
         conn->stream = NULL;
         conn->connection = NULL;
         conn->transport = NULL;
@@ -651,8 +654,18 @@ void poseidon_transport_quic_destroy(poseidon_transport_t* transport) {
         }
         poseidon_quic_connection_destroy(conn);
     }
-    vec_deinit(&base->connections);
+
+    // The connection structs are freed under the lock: the send path
+    // resolves a client under the same lock.
+    platform_mutex_lock(quic_transport->conn_lock);
+    for (int i = base->connections.length - 1; i >= 0; i--) {
+        poseidon_quic_connection_t* conn =
+            (poseidon_quic_connection_t*)base->connections.data[i];
+        if (conn == NULL) continue;
+        free(conn);
+    }
     platform_mutex_unlock(quic_transport->conn_lock);
+    vec_deinit(&base->connections);
 
     // The shared body is actor-shaped: destroy its actor before the
     // transport's memory goes away.

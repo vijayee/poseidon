@@ -85,6 +85,22 @@ void actor_destroy(actor_t* actor);
 void actor_detach_pool(actor_t* actor);
 bool actor_send(actor_t* actor, message_t* msg);
 bool actor_run(actor_t* actor, size_t batch_size);
+/* Runs the actor on the CALLING thread and returns when its mailbox is
+ * drained. Unlike actor_run, which the scheduler's worker calls after it
+ * has won the ACTOR_FLAG_RUNNING claim, this claims the actor itself and
+ * waits for a pool worker that may already be running it.
+ *
+ * The synchronous wrappers (build payload -> actor_send -> run -> read the
+ * out-field) need this: actor_send injects the actor into the scheduler
+ * pool when the mailbox was empty, so a pool worker can pick the very same
+ * actor up while the wrapper is still running it. Two threads popping the
+ * same mailbox corrupt it: message_queue_pop is not safe against two
+ * concurrent pops, and both threads would free the same node.
+ *
+ * The wrapper's contract is unchanged: when this returns, the message it
+ * sent has been dispatched and the out-field the dispatch wrote is visible
+ * to the caller. */
+bool actor_run_inline(actor_t* actor, size_t batch_size);
 void backpressure_apply(actor_t* actor);
 void backpressure_release(actor_t* actor);
 

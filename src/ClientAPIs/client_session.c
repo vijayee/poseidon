@@ -576,7 +576,7 @@ int client_session_subscribe(client_session_t* s, const char* topic_path, bool l
         .payload_destroy = NULL,
     };
     if (!actor_send(&s->actor, &msg)) return -1;
-    actor_run(&s->actor, 32);
+    actor_run_inline(&s->actor, 32);
     return s->subscribe_out;
 }
 
@@ -589,7 +589,7 @@ int client_session_unsubscribe(client_session_t* s, const char* topic_path) {
         .payload_destroy = NULL,
     };
     if (!actor_send(&s->actor, &msg)) return -1;
-    actor_run(&s->actor, 32);
+    actor_run_inline(&s->actor, 32);
     return s->unsubscribe_out;
 }
 
@@ -602,7 +602,7 @@ bool client_session_is_subscribed(client_session_t* s, const char* topic_path) {
         .payload_destroy = NULL,
     };
     if (!actor_send(&s->actor, &msg)) return false;
-    actor_run(&s->actor, 32);
+    actor_run_inline(&s->actor, 32);
     return s->is_subscribed_out;
 }
 
@@ -615,7 +615,7 @@ bool client_session_has_loopback(client_session_t* s, const char* topic_path) {
         .payload_destroy = NULL,
     };
     if (!actor_send(&s->actor, &msg)) return false;
-    actor_run(&s->actor, 32);
+    actor_run_inline(&s->actor, 32);
     return s->has_loopback_out;
 }
 
@@ -636,7 +636,7 @@ int client_session_handle_request(client_session_t* s, const client_frame_t* fra
         free(frame_copy);
         return -1;
     }
-    actor_run(&s->actor, 32);
+    actor_run_inline(&s->actor, 32);
     int rc = s->handle_request_rc_out;
     if (out_response != NULL) {
         *out_response = s->handle_request_response_out;
@@ -691,7 +691,7 @@ void client_session_dispatch_event(client_session_t* s,
         free(payload_copy);
         return;
     }
-    actor_run(&s->actor, 32);
+    actor_run_inline(&s->actor, 32);
 }
 
 void client_session_cleanup_subscriptions(client_session_t* s) {
@@ -702,7 +702,7 @@ void client_session_cleanup_subscriptions(client_session_t* s) {
         .payload_destroy = NULL,
     };
     if (!actor_send(&s->actor, &msg)) return;
-    actor_run(&s->actor, 32);
+    actor_run_inline(&s->actor, 32);
 }
 
 // ============================================================================
@@ -837,7 +837,7 @@ static void session_dispatch_message(void* ctx, const uint8_t* topic, size_t top
             free(buf_copy);
             continue;
         }
-        actor_run(&s->actor, 32);
+        actor_run_inline(&s->actor, 32);
         free(topic_copy);
         free(buf_copy);
     }
