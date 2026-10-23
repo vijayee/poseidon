@@ -879,3 +879,68 @@ teardown released it.
 The dispatch now drops the messages of a **closed** connection and lets
 a **closing** one finish its work, which is the shape the TCP and
 WebSocket backends already have.
+
+## Phase 2 (2.16) — the Meridian relay client is actor-owned
+
+The relay client is the first Meridian subsystem that had to be moved
+whole rather than one mutator at a time: it is a **foreign-thread**
+subsystem. msquic delivers the connection and the stream events on its
+own worker threads, and the application calls the public API from its
+own thread. Both had to end up on the same actor, or the relay would
+need two synchronization mechanisms.
+
+### The shape
+
+- `meridian_relay_t` embeds `actor_t actor;` and `scheduler_pool_t* pool;`
+  by value. **The mutex is gone** — `platform_mutex_t* lock` was deleted
+  from the struct, along with every `platform_mutex_lock` /
+  `platform_mutex_unlock` in the file and the `;;` double-semicolon
+  typos that came with it.
+- `meridian_relay_create` takes the pool as its last argument. A NULL
+  pool means the actor runs on whichever thread drains it.
+- The message family is `MERIDIAN_RELAY_*` — 13 entries in the global
+  `message_type_e`, payload structs in
+  `src/Network/Meridian/meridian_relay_messages.h`. Six are the public
+  API calls, seven are the msquic events.
+- Every public function is a wrapper: build the payload, `actor_send`,
+  `actor_run_inline(&relay->actor, 32)`, read the result. The result
+  slot is the wrapper's own stack frame, borrowed by the handler — the
+  same pattern the Meridian connection migration settled on.
+
+### What the callbacks do and do not do
+
+The msquic callbacks still **parse** — the wire format and the CBOR —
+because that is pure work on the callback's own thread. What they no
+longer do is touch the relay's state. The connection events, the peer
+streams, the stream closes, the address response and the forwarded
+datagrams are all handed to the actor.
+
+The forwarded datagram is **copied** on the way in: its bytes live in
+the stream buffer, which msquic releases as soon as the callback
+returns, while the actor is the one that hands them to the application.
+
+### The two re-entrancy cases
+
+A handler that calls into msquic can get its answer on the same thread,
+and that answer is a callback of ours. Two rules follow:
+
+- A callback that arrives while the actor is already running on this
+  thread **cannot be drained**: the actor is claimed by this thread, and
+  a second claim would spin forever. The event stays in the mailbox and
+  the run in progress picks it up. The stream close is the exception:
+  the entry dies with the callback, so that one drops the entry
+  directly.
+- An application callback that calls back into the relay reaches a
+  public wrapper on the actor's thread. The wrapper notices and runs its
+  handler inline instead of queueing a message it could never wait for.
+
+The second rule is what `actor_is_running_on_this_thread` exists for —
+a poseidon-only addition to `src/Actor/actor.{c,h}`, next to
+`actor_run_inline`, which is the other poseidon-only piece of the
+actor's API. Upstream has no inline `actor_run` caller, so upstream has
+no need for either.
+
+### Build
+
+Green, 25/25 ctest. The relay's own test still covers only the
+creation paths; the connection paths need a real msquic peer.

@@ -67,8 +67,10 @@ typedef struct meridian_relay_config_t {
  * Relay client for establishing peer-to-peer communication through a relay server.
  * Maintains a QUIC connection to the relay and provides datagram forwarding.
  *
- * Thread safety: The relay client uses a platform lock to protect shared state.
- * All exported functions are thread-safe when called with proper synchronization.
+ * Thread safety: the relay's state belongs to its actor. Every exported
+ * function hands its work to the actor and waits for the answer, so the
+ * exported functions are safe to call from any thread. The two state
+ * queries are snapshots: they read the last value the actor wrote.
  */
 typedef struct meridian_relay_t {
     refcounter_t refcounter;                        /**< Reference counting for lifetime */
@@ -89,7 +91,6 @@ typedef struct meridian_relay_t {
     size_t active_streams_cap;                       /**< Capacity of active_streams array */
     scheduler_pool_t* pool;                          /**< Scheduler pool owning this actor (NULL = caller-thread dispatch) */
     actor_t actor;                                   /**< Mailbox / dispatch state (embedded by value) */
-    platform_mutex_t* lock;                         /**< Thread-safe access */
 } meridian_relay_t;
 
 // ============================================================================
@@ -203,6 +204,8 @@ void meridian_relay_on_addr_response(meridian_relay_t* relay,
 /**
  * Gets the endpoint ID assigned to this client by the relay server.
  *
+ * The value is a snapshot: it is the last one the relay's actor wrote.
+ *
  * @param relay  Relay client
  * @return       Assigned endpoint ID, or 0 if not connected
  */
@@ -210,6 +213,8 @@ uint32_t meridian_relay_get_endpoint_id(const meridian_relay_t* relay);
 
 /**
  * Checks whether the relay client is connected to the relay server.
+ *
+ * The value is a snapshot: it is the last one the relay's actor wrote.
  *
  * @param relay  Relay client
  * @return       True if connected, false otherwise

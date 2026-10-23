@@ -350,7 +350,7 @@ All structures with concurrent access use `PLATFORMLOCKTYPE(lock)`:
 - `meridian_rendv_handle_t.lock` — Protects peer rendezvous list
 - `meridian_query_table_t.lock` — Protects query table operations
 - `meridian_conn_t.lock` — Protects per-connection state machine
-- `meridian_relay_t.lock` — Protects relay client state
+- `meridian_relay_t.actor` — Owns the relay client's state; the public API and the msquic callbacks both hand their work to it
 - `meridian_relay_server_t.lock` — Protects relay server client list
 
 Platform abstraction supports:

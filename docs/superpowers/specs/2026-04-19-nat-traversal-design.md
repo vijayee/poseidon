@@ -123,7 +123,8 @@ typedef struct meridian_relay_t {
     meridian_relay_config_t config;
     uint32_t local_endpoint_id;              // Our assigned endpoint ID
     bool connected;
-    PLATFORMLOCKTYPE(lock);
+    scheduler_pool_t* pool;                  // Scheduler pool owning this actor
+    actor_t actor;                           // Mailbox / dispatch state
 } meridian_relay_t;
 ```
 
@@ -131,7 +132,7 @@ typedef struct meridian_relay_t {
 
 | Function | Description |
 |----------|-------------|
-| `meridian_relay_create(msquic, registration, server, config)` | Create relay client |
+| `meridian_relay_create(msquic, registration, server, config, pool)` | Create relay client |
 | `meridian_relay_destroy(relay)` | Destroy relay client |
 | `meridian_relay_connect(relay)` | Open QUIC connection to relay server |
 | `meridian_relay_disconnect(relay)` | Close connection |
