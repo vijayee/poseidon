@@ -107,6 +107,30 @@ bool actor_run(actor_t* actor, size_t batch_size);
 void backpressure_apply(actor_t* actor);
 void backpressure_release(actor_t* actor);
 
+/**
+ * True when the calling thread is running the given actor's dispatch.
+ *
+ * A dispatch runs on a pool worker. A worker that waits for another actor
+ * is a worker that is not running any actor, so a call that needs an
+ * answer has to take the direct path when this is true — the answer is
+ * computed here, on the actor's own thread, not waited for.
+ */
+bool actor_is_running_on_this_thread(actor_t* actor);
+
+/**
+ * True when the calling thread is inside SOME actor's dispatch.
+ *
+ * This is the question a wrapper has to ask before it waits: a thread
+ * that is not running an actor may block (upstream's peer book round trip
+ * is exactly that), a thread that is running an actor may not — it has
+ * other actors to run. Upstream keeps the same split: the peer book's
+ * round trip is legal only "from a thread that may block and is never a
+ * pool worker" (liboffs/src/Network/peer_book.h), and the network actor's
+ * dispatch hands the peer book its work with actor_send, fire and
+ * forget. A Pony behaviour call is fire and forget for the same reason.
+ */
+bool actor_is_inside_dispatch(void);
+
 /* ---- Local modifications (vs upstream) -----------------------------------
  *
  * - Include guard renamed: OFFS_ACTOR_H -> POSEIDON_ACTOR_H.

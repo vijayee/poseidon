@@ -458,10 +458,13 @@ typedef enum {
    * 2.20 Quasar overlay — actor messages
    * ========================================================================
    *
-   * The overlay's state belongs to its actor: the routing filter, the
-   * local subscriptions, the per-neighbour filters, the seen filter and
-   * the application callback. Upstream keeps the gossip inside the
-   * network actor for the same reason.
+   * The overlay's state belongs to the protocol's actor — the network
+   * actor, the way upstream keeps the gossip inside it. The routing
+   * filter, the local subscriptions, the per-neighbour filters, the seen
+   * filter and the application callback all live there, and the overlay
+   * reads the peer table directly instead of asking another actor for
+   * it. A second actor for the overlay would mean a second actor to
+   * wait for, and a worker that waits runs no actor.
    *
    * Payload structs live in src/Network/Quasar/quasar_messages.h; this
    * enum only carries the type tags. */
@@ -487,6 +490,10 @@ typedef enum {
   MERIDIAN_QUASAR_ON_GOSSIP,
   /* A routed message arrived from a peer. */
   MERIDIAN_QUASAR_ON_ROUTE_MESSAGE,
+  /* The overlay is going away: the actor frees the overlay's state. */
+  MERIDIAN_QUASAR_DESTROY,
+  /* Rebuild the overlay's state with a new configuration. */
+  MERIDIAN_QUASAR_RECONFIGURE,
 
   /* ========================================================================
    * 2.21 Meridian stream — per-stream actor messages

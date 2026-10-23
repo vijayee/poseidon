@@ -51,6 +51,9 @@ typedef struct actor_reply_t {
     platform_condvar_t* cv;     /**< Signalled when the answer is in. */
     int done;                   /**< Set by the actor when it has answered. */
     int orphaned;               /**< Set by the caller when it gave up. */
+    int detached;               /**< Set by the caller when it will not wait:
+                                     the actor owns the request from the moment
+                                     it is sent. */
     int result;                 /**< The handler's answer, for the calls
                                      that have one. */
 } actor_reply_t;
@@ -76,6 +79,12 @@ void actor_reply_destroy(actor_reply_t* reply);
  * pointer handed to the actor is the reply block itself and the actor
  * can cast it back to the full request.
  *
+ * A caller that is a pool worker — a dispatch — must NOT use this. A
+ * worker that waits for another actor is a worker that is not running
+ * any actor, and a chain of them starves the pool. Use
+ * actor_send_detached from a dispatch, and this from a thread that may
+ * block.
+ *
  * @param actor      The actor that owns the state the request touches.
  * @param type       The message type.
  * @param reply      The reply block, embedded in the request payload.
@@ -87,6 +96,58 @@ void actor_reply_destroy(actor_reply_t* reply);
  */
 int actor_round_trip(actor_t* actor, uint32_t type, actor_reply_t* reply,
                      uint32_t timeout_ms);
+
+/**
+ * Marks a reply block as one nobody is waiting for.
+ *
+ * The caller sends the request and returns; the actor owns it from that
+ * moment and frees it when it is done. The caller must not touch the
+ * reply block, and must not free the request, afterwards.
+ */
+void actor_reply_detach(actor_reply_t* reply);
+
+/**
+ * The answer of actor_request when the request went out detached: the
+ * actor is doing the work, and nobody waited for the answer.
+ */
+#define ACTOR_REQUEST_DETACHED 2
+
+/**
+ * Sends a request to an actor, and waits for the answer — unless the
+ * caller is inside a dispatch.
+ *
+ * A thread that is not running an actor may block: that is the round
+ * trip upstream's peer book uses, and the caller gets the answer.
+ *
+ * A thread that IS running an actor may not block. It has other actors
+ * to run, and a worker that waits is a worker that runs nothing. So the
+ * request goes out detached: the actor does the work, the answer is
+ * dropped, and the caller carries on. Upstream's network actor hands the
+ * peer book its work the same way, and a Pony behaviour call is fire and
+ * forget for the same reason.
+ *
+ * The request payload MUST start with the reply block, so that the
+ * pointer handed to the actor is the reply block itself and the actor
+ * can cast it back to the full request.
+ *
+ * A detached request that is dropped instead of dispatched — the actor
+ * is being torn down — leaks its shell, and with it whatever the shell
+ * carries. That is the trade upstream makes for the requests it drops
+ * at teardown: bounded, shutdown-only, leak-not-UAF.
+ *
+ * @param actor      The actor that owns the state the request touches.
+ * @param type       The message type.
+ * @param reply      The reply block, embedded in the request payload.
+ * @param timeout_ms How long the caller waits before giving up.
+ * @return 0 when the request was answered, -1 when the caller timed out
+ *         (the request was handed to the actor; the caller must not
+ *         free it), 1 when the request was never queued (the actor is
+ *         gone; the caller frees it), ACTOR_REQUEST_DETACHED when the
+ *         caller is inside a dispatch: the actor owns the request from
+ *         now on and nobody waits for the answer.
+ */
+int actor_request(actor_t* actor, uint32_t type, actor_reply_t* reply,
+                  uint32_t timeout_ms);
 
 /**
  * Waits for the answer to be delivered.

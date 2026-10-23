@@ -35,6 +35,11 @@ extern "C" {
 // Forward declaration
 typedef struct meridian_protocol_t meridian_protocol_t;
 
+/* The Quasar overlay. It has no actor of its own: its state belongs to
+ * this actor, the network actor, the way upstream keeps the gossip
+ * inside the network actor. */
+struct quasar_t;
+
 /**
  * How long a public call waits for the protocol's actor to answer.
  *
@@ -170,6 +175,11 @@ typedef struct meridian_protocol_t {
 
     struct poseidon_channel_manager_t* channel_manager; /**< Set by daemon for bootstrap dispatch */
 
+    /* The Quasar overlay, when one is attached. Its state is this
+     * actor's: the overlay's messages are dispatched here, and the
+     * overlay reads the peer table directly. */
+    struct quasar_t* quasar;
+
     meridian_protocol_callbacks_t callbacks;   /**< Protocol event callbacks */
 
     // Per-message stream tracking (replaces datagram). The actor owns the
@@ -277,6 +287,51 @@ int meridian_protocol_disconnect(meridian_protocol_t* protocol,
 int meridian_protocol_send_packet(meridian_protocol_t* protocol,
                                    const uint8_t* data, size_t len,
                                    const meridian_node_t* target);
+
+// ============================================================================
+// THE ACTOR'S OWN HELPERS
+// ============================================================================
+
+/**
+ * The peer table, read on the actor's own thread.
+ *
+ * The overlay's work runs on this actor, so it reads the peer table
+ * directly instead of asking this actor for it and waiting: a worker
+ * that waits for another actor is a worker that runs no actor. The
+ * caller owns the returned array and frees it; the nodes themselves stay
+ * the table's.
+ *
+ * @param protocol  The protocol.
+ * @param num_peers Receives the number of peers.
+ * @return          The array of peer nodes, or NULL.
+ */
+meridian_node_t** meridian_protocol_peers_on_actor(meridian_protocol_t* protocol,
+                                                   size_t* num_peers);
+
+/**
+ * Sends a packet to one peer, on the actor's own thread.
+ *
+ * @param protocol  The protocol.
+ * @param data      Raw packet bytes.
+ * @param len       Length of data.
+ * @param target    The destination node.
+ * @return          0 on success, -1 on failure.
+ */
+int meridian_protocol_send_on_actor(meridian_protocol_t* protocol,
+                                    const uint8_t* data, size_t len,
+                                    const meridian_node_t* target);
+
+/**
+ * Sends a packet to every connected peer, on the actor's own thread.
+ *
+ * @param protocol  The protocol.
+ * @param data      Raw packet bytes.
+ * @param len       Length of data.
+ * @return          0 on success, -1 on failure.
+ */
+int meridian_protocol_broadcast_on_actor(meridian_protocol_t* protocol,
+                                         const uint8_t* data, size_t len);
+
 
 /**
  * Broadcasts a packet to all connected peers.

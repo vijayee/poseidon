@@ -30,6 +30,7 @@ int actor_reply_init(actor_reply_t* reply) {
 
     reply->done = 0;
     reply->orphaned = 0;
+    reply->detached = 0;
     return 0;
 }
 
@@ -86,6 +87,36 @@ int actor_round_trip(actor_t* actor, uint32_t type, actor_reply_t* reply,
     return 0;
 }
 
+int actor_request(actor_t* actor, uint32_t type, actor_reply_t* reply,
+                  uint32_t timeout_ms) {
+    if (actor == NULL || reply == NULL) return 1;
+
+    /* A dispatch runs on a pool worker, and a worker that waits for
+     * another actor is a worker that runs no actor at all. Inside a
+     * dispatch the request goes out detached: the actor does the work
+     * and the answer is dropped. */
+    if (actor_is_inside_dispatch()) {
+        /* A destroyed actor will never dispatch the request, so nobody
+         * will ever answer it. The caller still owns it. */
+        if (atomic_load(&actor->flags) & ACTOR_FLAG_DESTROY) return 1;
+
+        actor_reply_detach(reply);
+        message_t message;
+        memset(&message, 0, sizeof(message));
+        message.type = type;
+        message.payload = reply;
+        /* payload_destroy stays NULL: the dispatch that handles the
+         * request frees the shell, and a shell freed twice is a crash.
+         * A dropped request leaks its shell, which is the trade upstream
+         * makes at teardown. */
+        message.payload_destroy = NULL;
+        actor_send(actor, &message);
+        return ACTOR_REQUEST_DETACHED;
+    }
+
+    return actor_round_trip(actor, type, reply, timeout_ms);
+}
+
 int actor_reply_wait(actor_reply_t* reply, uint32_t timeout_ms) {
     if (reply == NULL) return -1;
 
@@ -104,8 +135,23 @@ int actor_reply_wait(actor_reply_t* reply, uint32_t timeout_ms) {
     return 0;
 }
 
+void actor_reply_detach(actor_reply_t* reply) {
+    if (reply == NULL) return;
+    /* Set before the request is sent: the actor can only see the request
+     * after the send, and the send is what orders the two. */
+    platform_mutex_lock(reply->mutex);
+    reply->detached = 1;
+    platform_mutex_unlock(reply->mutex);
+}
+
 bool actor_reply_complete(actor_reply_t* reply) {
     if (reply == NULL) return false;
+
+    if (reply->detached) {
+        /* Nobody is waiting for this one: the actor owns the request and
+         * has to free it. */
+        return true;
+    }
 
     platform_mutex_lock(reply->mutex);
     if (reply->orphaned) {

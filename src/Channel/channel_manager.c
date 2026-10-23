@@ -513,8 +513,16 @@ poseidon_channel_t* poseidon_channel_manager_create_channel(
         return NULL;
     }
 
-    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_CREATE_CHANNEL,
-                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    int trip = actor_request(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_CREATE_CHANNEL,
+                                &request->reply,
+                                POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued
+         * and the answer is dropped. A dispatch runs on a
+         * pool worker, and a worker that waits for
+         * another actor is a worker that runs no actor. */
+        return NULL;
+    }
     if (trip == 1) {
         actor_reply_destroy(&request->reply);
         free(request);
@@ -570,8 +578,16 @@ poseidon_channel_t* poseidon_channel_manager_join_channel(
         return NULL;
     }
 
-    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_JOIN_CHANNEL,
-                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    int trip = actor_request(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_JOIN_CHANNEL,
+                                &request->reply,
+                                POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued
+         * and the answer is dropped. A dispatch runs on a
+         * pool worker, and a worker that waits for
+         * another actor is a worker that runs no actor. */
+        return NULL;
+    }
     if (trip == 1) {
         actor_reply_destroy(&request->reply);
         free(request);
@@ -660,8 +676,16 @@ int poseidon_channel_manager_destroy_channel(poseidon_channel_manager_t* mgr,
         return -1;
     }
 
-    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_DESTROY_CHANNEL,
-                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    int trip = actor_request(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_DESTROY_CHANNEL,
+                                &request->reply,
+                                POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued
+         * and the answer is dropped. A dispatch runs on a
+         * pool worker, and a worker that waits for
+         * another actor is a worker that runs no actor. */
+        return 0;
+    }
     if (trip == 1) {
         actor_reply_destroy(&request->reply);
         free(request);
@@ -740,8 +764,16 @@ int poseidon_channel_manager_handle_bootstrap_reply(
         return -1;
     }
 
-    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_BOOTSTRAP_REPLY,
-                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    int trip = actor_request(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_BOOTSTRAP_REPLY,
+                                &request->reply,
+                                POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued
+         * and the answer is dropped. A dispatch runs on a
+         * pool worker, and a worker that waits for
+         * another actor is a worker that runs no actor. */
+        return 0;
+    }
     if (trip == 1) {
         actor_reply_destroy(&request->reply);
         free(request);
@@ -836,8 +868,16 @@ int poseidon_channel_manager_handle_bootstrap_request(
         return -1;
     }
 
-    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_BOOTSTRAP_REQUEST,
-                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    int trip = actor_request(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_BOOTSTRAP_REQUEST,
+                                &request->reply,
+                                POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued
+         * and the answer is dropped. A dispatch runs on a
+         * pool worker, and a worker that waits for
+         * another actor is a worker that runs no actor. */
+        return 0;
+    }
     if (trip == 1) {
         actor_reply_destroy(&request->reply);
         free(request);
@@ -1049,8 +1089,16 @@ void poseidon_channel_manager_handle_delete_notice(
         return;
     }
 
-    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_DELETE_NOTICE,
-                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    int trip = actor_request(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_DELETE_NOTICE,
+                                &request->reply,
+                                POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued
+         * and the answer is dropped. A dispatch runs on a
+         * pool worker, and a worker that waits for
+         * another actor is a worker that runs no actor. */
+        return;
+    }
     if (trip == 1) {
         actor_reply_destroy(&request->reply);
         free(request->notice);
@@ -1112,8 +1160,16 @@ void poseidon_channel_manager_handle_modify_notice(
         return;
     }
 
-    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_MODIFY_NOTICE,
-                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    int trip = actor_request(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_HANDLE_MODIFY_NOTICE,
+                                &request->reply,
+                                POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued
+         * and the answer is dropped. A dispatch runs on a
+         * pool worker, and a worker that waits for
+         * another actor is a worker that runs no actor. */
+        return;
+    }
     if (trip == 1) {
         actor_reply_destroy(&request->reply);
         free(request->notice);
@@ -1173,8 +1229,16 @@ int poseidon_channel_manager_tick_all(poseidon_channel_manager_t* mgr) {
         free(request);
         return rc;
     }
-    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_EXPIRE_TOMBSTONES,
-                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    int trip = actor_request(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_EXPIRE_TOMBSTONES,
+                                &request->reply,
+                                POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued
+         * and the answer is dropped. A dispatch runs on a
+         * pool worker, and a worker that waits for
+         * another actor is a worker that runs no actor. */
+        return 0;
+    }
     if (trip == 1) {
         actor_reply_destroy(&request->reply);
         free(request);
@@ -1221,8 +1285,16 @@ int poseidon_channel_manager_add_tombstone(poseidon_channel_manager_t* mgr,
         return -1;
     }
 
-    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_ADD_TOMBSTONE,
-                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    int trip = actor_request(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_ADD_TOMBSTONE,
+                                &request->reply,
+                                POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued
+         * and the answer is dropped. A dispatch runs on a
+         * pool worker, and a worker that waits for
+         * another actor is a worker that runs no actor. */
+        return 0;
+    }
     if (trip == 1) {
         actor_reply_destroy(&request->reply);
         free(request);
@@ -1276,8 +1348,16 @@ void poseidon_channel_manager_expire_tombstones(poseidon_channel_manager_t* mgr)
         return;
     }
 
-    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_EXPIRE_TOMBSTONES,
-                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    int trip = actor_request(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_EXPIRE_TOMBSTONES,
+                                &request->reply,
+                                POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued
+         * and the answer is dropped. A dispatch runs on a
+         * pool worker, and a worker that waits for
+         * another actor is a worker that runs no actor. */
+        return;
+    }
     if (trip == 1) {
         actor_reply_destroy(&request->reply);
         free(request);
@@ -1380,8 +1460,16 @@ int poseidon_channel_manager_register_session(poseidon_channel_manager_t* mgr, v
         return -1;
     }
 
-    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_REGISTER_SESSION,
-                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    int trip = actor_request(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_REGISTER_SESSION,
+                                &request->reply,
+                                POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued
+         * and the answer is dropped. A dispatch runs on a
+         * pool worker, and a worker that waits for
+         * another actor is a worker that runs no actor. */
+        return 0;
+    }
     if (trip == 1) {
         actor_reply_destroy(&request->reply);
         free(request);
@@ -1416,8 +1504,16 @@ int poseidon_channel_manager_unregister_session(poseidon_channel_manager_t* mgr,
         return -1;
     }
 
-    int trip = actor_round_trip(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_UNREGISTER_SESSION,
-                                &request->reply, POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    int trip = actor_request(&mgr->actor, POSEIDON_CHANNEL_MANAGER_MSG_UNREGISTER_SESSION,
+                                &request->reply,
+                                POSEIDON_CHANNEL_MANAGER_TIMEOUT_MS);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued
+         * and the answer is dropped. A dispatch runs on a
+         * pool worker, and a worker that waits for
+         * another actor is a worker that runs no actor. */
+        return 0;
+    }
     if (trip == 1) {
         actor_reply_destroy(&request->reply);
         free(request);

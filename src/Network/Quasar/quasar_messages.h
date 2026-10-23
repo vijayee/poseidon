@@ -30,6 +30,25 @@
 extern "C" {
 #endif
 
+/* The overlay is going away: the actor releases the overlay's state and
+ * frees the shell. The shell belongs to the actor from the moment the
+ * request is sent, so the caller must not touch it afterwards. */
+typedef struct meridian_quasar_destroy_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
+    struct quasar_t* quasar; /**< The overlay to release. */
+} meridian_quasar_destroy_msg_t;
+
+/* Rebuild the overlay's state: new filters, no subscriptions. The
+ * overlay keeps its identity, so the messages already queued for it stay
+ * with it. */
+typedef struct meridian_quasar_reconfigure_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
+    uint32_t max_hops;     /**< The new routing depth. */
+    uint32_t alpha;        /**< The new fan-out degree. */
+    size_t seen_size;      /**< The new dedup filter size in bits. */
+    uint32_t seen_hashes;  /**< The new dedup filter hash count. */
+} meridian_quasar_reconfigure_msg_t;
+
 /* Register the application callback for delivered messages. */
 typedef struct meridian_quasar_set_message_cb_msg_t {
     actor_reply_t reply;   /**< Must stay first. */

@@ -248,6 +248,18 @@ bool actor_is_running_on_this_thread(actor_t* actor) {
   return (self != NULL && self->current == actor);
 }
 
+bool actor_is_inside_dispatch(void) {
+  /* A pool worker that is running an actor. The scheduler marks the
+   * actor it is running; a worker with no current actor is between
+   * messages, and a thread that is not a worker at all (the app thread)
+   * may block. */
+  scheduler_t* self = scheduler_get_current();
+  if (self != NULL && self->current != NULL) return true;
+  /* An inline run: this thread holds the claim and is inside the
+   * dispatch. */
+  return t_inline_actor != NULL;
+}
+
 bool actor_run(actor_t* actor, size_t batch_size) {
   for (size_t count = 0; count < batch_size; count++) {
     if (atomic_load(&actor->flags) & ACTOR_FLAG_DESTROY) {

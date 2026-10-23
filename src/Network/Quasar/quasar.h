@@ -192,6 +192,10 @@ typedef void (*quasar_message_cb_t)(void* ctx, const uint8_t* topic, size_t topi
  * The call sends a request to the actor and waits on the request's
  * condition variable — the round trip upstream's peer book uses. The
  * actor runs on a pool worker, never on the calling thread.
+ *
+ * A call that is made from inside a dispatch does not wait: it goes out
+ * detached and the answer is dropped. A worker that waits for another
+ * actor is a worker that runs no actor.
  */
 #define MERIDIAN_QUASAR_TIMEOUT_MS 5000
 
@@ -208,9 +212,25 @@ typedef struct quasar_t {
     uint32_t seen_hashes;                    /**< Dedup filter hash count */
     quasar_message_cb_t on_message;              /**< Called when a message is delivered to a local subscriber */
     void* message_ctx;                            /**< User context for message callback */
-    scheduler_pool_t* pool;                        /**< Scheduler pool that runs the overlay's actor */
-    actor_t actor;                                 /**< Owns the overlay's state */
+    scheduler_pool_t* pool;                        /**< Scheduler pool that runs the protocol's actor */
+    /* The actor that owns the overlay's state. With a network, that is
+     * the network actor — the protocol's actor — the way upstream keeps
+     * the gossip inside the network actor. Without one, the overlay has
+     * an actor of its own (own_actor). */
+    actor_t* actor;
+    actor_t own_actor;                              /**< The overlay's own actor, when it has no network */
+    bool owns_actor;                                /**< True when the overlay owns own_actor */
 } quasar_t;
+
+/**
+ * The overlay's dispatch.
+ *
+ * The protocol's actor hands the overlay's messages here. The overlay's
+ * state — the routing filter, the subscriptions, the neighbour filters,
+ * the seen filter, the callback — belongs to that actor, so everything
+ * in here runs on the protocol's thread.
+ */
+void quasar_dispatch(void* state, message_t* msg);
 
 /**
  * The per-neighbour routing filter of a node. It belongs to the
@@ -372,6 +392,22 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
  * @param quasar  Quasar instance
  * @return        0 on success, -1 on failure
  */
+/**
+ * Rebuilds the overlay's state with a new configuration.
+ *
+ * The overlay keeps its identity, so the messages already queued for it
+ * stay with it; its filters are new and its subscriptions are gone.
+ *
+ * @param quasar      The overlay.
+ * @param max_hops   The new routing depth.
+ * @param alpha      The new fan-out degree.
+ * @param seen_size  The new dedup filter size in bits.
+ * @param seen_hashes The new dedup filter hash count.
+ * @return           0 on success, -1 on failure.
+ */
+int quasar_reconfigure(quasar_t* quasar, uint32_t max_hops, uint32_t alpha,
+                      size_t seen_size, uint32_t seen_hashes);
+
 int quasar_propagate(quasar_t* quasar);
 
 // ============================================================================

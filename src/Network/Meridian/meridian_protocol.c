@@ -7,6 +7,7 @@
 #include "meridian_protocol_messages.h"
 #include "Platform/poseidon_msquic.h"
 #include "../Quasar/quasar_route.h"
+#include "../Quasar/quasar.h"
 #include "../../Channel/channel_manager.h"
 #include "../../Util/allocator.h"
 #include "../../Util/vec.h"
@@ -54,6 +55,51 @@ static void protocol_remove_stream(meridian_protocol_t* protocol,
                                    meridian_stream_entry_t* entry);
 
 /**
+ * The peer table, read on the actor's own thread.
+ *
+ * The overlay's work runs on this actor, so it reads the peer table
+ * directly. There is no second actor to ask and no worker to block.
+ */
+meridian_node_t** meridian_protocol_peers_on_actor(meridian_protocol_t* protocol,
+                                                   size_t* num_peers) {
+    if (protocol == NULL || num_peers == NULL) return NULL;
+
+    size_t count = protocol->num_connected_peers;
+    /* The snapshot is always an array: an empty table yields an empty
+     * array, as the raw table did before. */
+    void** peers = get_clear_memory((count > 0 ? count : 1) * sizeof(void*));
+    if (peers == NULL) {
+        count = 0;
+    } else {
+        for (size_t i = 0; i < count; i++) {
+            peers[i] = protocol->peer_nodes[i];
+        }
+    }
+    *num_peers = count;
+    return (meridian_node_t**)peers;
+}
+
+int meridian_protocol_send_on_actor(meridian_protocol_t* protocol,
+                                    const uint8_t* data, size_t len,
+                                    const meridian_node_t* target) {
+    if (protocol == NULL || data == NULL || target == NULL) return -1;
+    return meridian_protocol_send_packet_impl(protocol, data, len,
+                                              target->addr, target->port);
+}
+
+int meridian_protocol_broadcast_on_actor(meridian_protocol_t* protocol,
+                                         const uint8_t* data, size_t len) {
+    if (protocol == NULL || data == NULL) return -1;
+    for (size_t i = 0; i < protocol->num_connected_peers; i++) {
+        HQUIC connection = protocol->connected_peers[i];
+        if (connection != NULL) {
+            meridian_stream_send_uni(protocol->msquic, connection, data, len, NULL);
+        }
+    }
+    return 0;
+}
+
+/**
  * The protocol's actor owns the peer and stream tables.
  *
  * msquic delivers the connection and the stream events on its own worker
@@ -65,6 +111,25 @@ static void protocol_remove_stream(meridian_protocol_t* protocol,
 static void meridian_protocol_dispatch(void* state, message_t* msg) {
     meridian_protocol_t* protocol = (meridian_protocol_t*)state;
     if (msg == NULL) return;
+
+    /* The overlay's messages are this actor's: the overlay has no actor
+     * of its own, the way upstream keeps the gossip inside the network
+     * actor. */
+    if (msg->type >= MERIDIAN_QUASAR_SET_MESSAGE_CB &&
+        msg->type <= MERIDIAN_QUASAR_DESTROY) {
+        if (protocol->quasar != NULL) {
+            quasar_dispatch(protocol->quasar, msg);
+        } else {
+            /* The overlay is gone. The caller is waiting for an answer
+             * that will never come, so give it one now. */
+            actor_reply_t* reply = (actor_reply_t*)msg->payload;
+            if (reply != NULL) {
+                reply->result = -1;
+                actor_reply_complete(reply);
+            }
+        }
+        return;
+    }
 
     switch (msg->type) {
         case MERIDIAN_PROTOCOL_PEER_ADDED: {
@@ -117,17 +182,8 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
         case MERIDIAN_PROTOCOL_PEERS_SNAPSHOT: {
             meridian_protocol_peers_snapshot_msg_t* p =
                 (meridian_protocol_peers_snapshot_msg_t*)msg->payload;
-            size_t count = protocol->num_connected_peers;
-            /* The snapshot is always an array: an empty table yields an
-             * empty array, as the raw table did before. */
-            void** peers = get_clear_memory((count > 0 ? count : 1) * sizeof(void*));
-            if (peers != NULL) {
-                for (size_t i = 0; i < count; i++) {
-                    peers[i] = protocol->peer_nodes[i];
-                }
-            } else {
-                count = 0;
-            }
+            size_t count = 0;
+            void** peers = meridian_protocol_peers_on_actor(protocol, &count);
             p->peers = peers;
             p->num_peers = count;
             if (actor_reply_complete(&p->reply)) {

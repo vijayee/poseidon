@@ -159,21 +159,65 @@ bool quasar_route_message_has_publisher(quasar_route_message_t* msg, const merid
 // ACTOR DISPATCH
 // ============================================================================
 
+/* Releases the overlay's state. The state belongs to the protocol's
+ * actor, so the actor releases it. */
+static void quasar_release_state(quasar_t* quasar);
+
+/* Rebuilds the overlay's state with a new configuration. */
+static int quasar_reconfigure_impl(quasar_t* quasar, uint32_t max_hops,
+                                   uint32_t alpha, size_t seen_size,
+                                   uint32_t seen_hashes);
+
 /**
- * The overlay's actor owns the overlay's state: the routing filter, the
- * local subscriptions, the per-neighbour filters, the seen filter and the
- * application callback.
+ * The overlay's dispatch.
  *
- * Upstream keeps the gossip inside the network actor for the same reason.
+ * The overlay's state — the routing filter, the local subscriptions, the
+ * per-neighbour filters, the seen filter and the application callback —
+ * belongs to the protocol's actor: the network actor, the way upstream
+ * keeps the gossip inside it. The protocol's actor hands the overlay's
+ * messages here.
+ *
  * A request that arrives from the application waits for its answer; a
  * request that arrives from a peer's thread — a gossip, a routed message
  * — is handed over and the run in progress picks it up.
  */
-static void meridian_quasar_dispatch(void* state, message_t* msg) {
+void quasar_dispatch(void* state, message_t* msg) {
     quasar_t* quasar = (quasar_t*)state;
     if (msg == NULL) return;
 
     switch (msg->type) {
+        case MERIDIAN_QUASAR_DESTROY: {
+            meridian_quasar_destroy_msg_t* p =
+                (meridian_quasar_destroy_msg_t*)msg->payload;
+            /* The overlay's state is this actor's: it goes here, not on
+             * the caller's thread. The request names the overlay, so a
+             * destroy that is still in flight lands on the right one. */
+            quasar_t* victim = (p->quasar != NULL) ? p->quasar : quasar;
+            quasar_release_state(victim);
+            if (victim->protocol != NULL && victim->protocol->quasar == victim) {
+                victim->protocol->quasar = NULL;
+            }
+            /* The shell belongs to the actor from the moment the request
+             * was sent. */
+            free(victim);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_QUASAR_RECONFIGURE: {
+            meridian_quasar_reconfigure_msg_t* p =
+                (meridian_quasar_reconfigure_msg_t*)msg->payload;
+            p->reply.result = quasar_reconfigure_impl(quasar, p->max_hops,
+                                                      p->alpha, p->seen_size,
+                                                      p->seen_hashes);
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
         case MERIDIAN_QUASAR_SET_MESSAGE_CB: {
             meridian_quasar_set_message_cb_msg_t* p =
                 (meridian_quasar_set_message_cb_msg_t*)msg->payload;
@@ -316,13 +360,21 @@ static void meridian_quasar_dispatch(void* state, message_t* msg) {
 /* Sends a request to the overlay's actor and waits for the answer.
  *
  * Returns 0 when the request was answered, 1 when it was never queued
- * (the caller still owns it) and -1 when the caller gave up (the actor
- * owns it now, and the caller must not free it). */
+ * (the caller still owns it), -1 when the caller gave up (the actor owns
+ * the request now, and the caller must not free it), and
+ * ACTOR_REQUEST_DETACHED when the caller is inside a dispatch: the
+ * request goes out detached, the actor owns it, and nobody waits for the
+ * answer. A dispatch runs on a pool worker, and a worker that waits for
+ * another actor is a worker that runs no actor. */
 static int quasar_round_trip(quasar_t* quasar, uint32_t type, actor_reply_t* reply) {
     if (quasar == NULL || reply == NULL) return -1;
 
-    int trip = actor_round_trip(&quasar->actor, type, reply,
-                                MERIDIAN_QUASAR_TIMEOUT_MS);
+    int trip = actor_request(quasar->actor, type, reply,
+                             MERIDIAN_QUASAR_TIMEOUT_MS);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request; the answer is dropped. */
+        return ACTOR_REQUEST_DETACHED;
+    }
     if (trip == 1) {
         /* The actor is gone: nobody will ever look at the request. */
         actor_reply_destroy(reply);
@@ -350,7 +402,13 @@ void quasar_set_message_callback(quasar_t* quasar, quasar_message_cb_t cb, void*
         free(request);
         return;
     }
-    quasar_round_trip(quasar, MERIDIAN_QUASAR_SET_MESSAGE_CB, &request->reply);
+    int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_SET_MESSAGE_CB, &request->reply);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the callback is registered when the
+         * actor gets to it. */
+        return;
+    }
+    if (trip < 0) return;  /* the actor owns the request now */
     free(request);
 }
 
@@ -376,6 +434,11 @@ int quasar_subscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len, u
         return -1;
     }
     int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_SUBSCRIBE, &request->reply);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued and the answer
+         * is dropped. A dispatch must not wait for another actor. */
+        return 0;
+    }
     if (trip < 0) return -1;  /* the actor owns the request now */
     int rc = request->reply.result;
     if (trip == 1) free(request->topic);  /* never queued: the actor freed nothing */
@@ -404,6 +467,11 @@ int quasar_unsubscribe(quasar_t* quasar, const uint8_t* topic, size_t topic_len)
         return -1;
     }
     int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_UNSUBSCRIBE, &request->reply);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued and the answer
+         * is dropped. A dispatch must not wait for another actor. */
+        return 0;
+    }
     if (trip < 0) return -1;  /* the actor owns the request now */
     int rc = request->reply.result;
     if (trip == 1) free(request->topic);  /* never queued: the actor freed nothing */
@@ -439,6 +507,11 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
         return -1;
     }
     int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_PUBLISH, &request->reply);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued and the answer
+         * is dropped. A dispatch must not wait for another actor. */
+        return 0;
+    }
     if (trip < 0) return -1;  /* the actor owns the request now */
     int rc = request->reply.result;
     if (trip == 1) {
@@ -446,6 +519,35 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
         free(request->topic);
         free(request->data);
     }
+    free(request);
+    return rc;
+}
+
+int quasar_reconfigure(quasar_t* quasar, uint32_t max_hops, uint32_t alpha,
+                      size_t seen_size, uint32_t seen_hashes) {
+    if (quasar == NULL) return -1;
+
+    meridian_quasar_reconfigure_msg_t* request =
+        (meridian_quasar_reconfigure_msg_t*)
+        get_clear_memory(sizeof(meridian_quasar_reconfigure_msg_t));
+    if (request == NULL) return -1;
+    request->max_hops = max_hops;
+    request->alpha = alpha;
+    request->seen_size = seen_size;
+    request->seen_hashes = seen_hashes;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
+    }
+    int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_RECONFIGURE, &request->reply);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued and the answer
+         * is dropped. A dispatch must not wait for another actor. */
+        return 0;
+    }
+    if (trip < 0) return -1;  /* the actor owns the request now */
+    int rc = request->reply.result;
     free(request);
     return rc;
 }
@@ -463,6 +565,11 @@ int quasar_propagate(quasar_t* quasar) {
         return -1;
     }
     int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_PROPAGATE, &request->reply);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued and the answer
+         * is dropped. A dispatch must not wait for another actor. */
+        return 0;
+    }
     if (trip < 0) return -1;  /* the actor owns the request now */
     int rc = request->reply.result;
     free(request);
@@ -482,6 +589,11 @@ int quasar_tick(quasar_t* quasar) {
         return -1;
     }
     int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_TICK, &request->reply);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued and the answer
+         * is dropped. A dispatch must not wait for another actor. */
+        return 0;
+    }
     if (trip < 0) return -1;  /* the actor owns the request now */
     int rc = request->reply.result;
     free(request);
@@ -504,6 +616,12 @@ attenuated_bloom_filter_t* quasar_get_neighbor_filter(quasar_t* quasar,
     }
     int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_GET_NEIGHBOR_FILTER,
                                 &request->reply);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The answer is a pointer into the actor's state, so it cannot be
+         * dropped the way a number can. The caller is inside a dispatch:
+         * it gets nothing. */
+        return NULL;
+    }
     if (trip < 0) return NULL;  /* the actor owns the request now */
     attenuated_bloom_filter_t* filter =
         (attenuated_bloom_filter_t*)request->out_filter;
@@ -527,6 +645,12 @@ attenuated_bloom_filter_t* quasar_get_or_create_neighbor_filter(
     }
     int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_GET_OR_CREATE_NEIGHBOR_FILTER,
                                 &request->reply);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The answer is a pointer into the actor's state, so it cannot be
+         * dropped the way a number can. The caller is inside a dispatch:
+         * it gets nothing. */
+        return NULL;
+    }
     if (trip < 0) return NULL;  /* the actor owns the request now */
     attenuated_bloom_filter_t* filter =
         (attenuated_bloom_filter_t*)request->out_filter;
@@ -549,6 +673,11 @@ int quasar_remove_neighbor_filter(quasar_t* quasar, const meridian_node_t* node)
     }
     int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_REMOVE_NEIGHBOR_FILTER,
                                 &request->reply);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued and the answer
+         * is dropped. A dispatch must not wait for another actor. */
+        return 0;
+    }
     if (trip < 0) return -1;  /* the actor owns the request now */
     int result = request->result;
     free(request);
@@ -578,6 +707,11 @@ int quasar_on_gossip(quasar_t* quasar, const uint8_t* data, size_t len,
         return -1;
     }
     int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_ON_GOSSIP, &request->reply);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued and the answer
+         * is dropped. A dispatch must not wait for another actor. */
+        return 0;
+    }
     if (trip < 0) return -1;  /* the actor owns the request now */
     int rc = request->reply.result;
     if (trip == 1) free(request->data);  /* never queued: the actor freed nothing */
@@ -601,6 +735,11 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg,
         return -1;
     }
     int trip = quasar_round_trip(quasar, MERIDIAN_QUASAR_ON_ROUTE_MESSAGE, &request->reply);
+    if (trip == ACTOR_REQUEST_DETACHED) {
+        /* The actor owns the request: the work is queued and the answer
+         * is dropped. A dispatch must not wait for another actor. */
+        return 0;
+    }
     if (trip < 0) return -1;  /* the actor owns the request now */
     int rc = request->reply.result;
     free(request);
@@ -636,32 +775,143 @@ quasar_t* quasar_create(struct meridian_protocol_t* protocol, uint32_t max_hops,
     quasar->on_message = NULL;
     quasar->message_ctx = NULL;
     quasar->pool = pool;
-    actor_init(&quasar->actor, quasar, meridian_quasar_dispatch, pool);
+    quasar->owns_actor = false;
+    if (protocol != NULL) {
+        /* The overlay has no actor of its own. Its state belongs to the
+         * protocol's actor — the network actor — the way upstream keeps
+         * the gossip inside the network actor. One actor for the layer
+         * means no worker waiting on another one. */
+        quasar->actor = &protocol->actor;
+        protocol->quasar = quasar;
+    } else {
+        /* No network under it: the overlay runs on an actor of its own.
+         * A degenerate case — an overlay with no peers to route to — but
+         * the overlay's own logic still has to run somewhere. */
+        quasar->actor = &quasar->own_actor;
+        quasar->owns_actor = true;
+        actor_init(&quasar->own_actor, quasar, quasar_dispatch, pool);
+    }
     refcounter_init((refcounter_t*)quasar);
     return quasar;
+}
+
+/**
+ * Releases the overlay's state.
+ *
+ * The state belongs to the protocol's actor, so the actor releases it —
+ * a destroy on the caller's thread would free filters the actor may
+ * still be walking.
+ */
+static void quasar_release_state(quasar_t* quasar) {
+    if (quasar == NULL) return;
+
+    attenuated_bloom_filter_destroy(quasar->routing);
+    bloom_filter_destroy(quasar->seen);
+
+    // Free all local subscription topic buffers
+    for (int i = 0; i < quasar->local_subs.length; i++) {
+        if (quasar->local_subs.data[i].topic != NULL) {
+            buffer_destroy(quasar->local_subs.data[i].topic);
+        }
+    }
+    vec_deinit(&quasar->local_subs);
+    for (int i = 0; i < quasar->neighbor_filters.length; i++) {
+        attenuated_bloom_filter_destroy(quasar->neighbor_filters.data[i].filter);
+    }
+    vec_deinit(&quasar->neighbor_filters);
+    quasar->routing = NULL;
+    quasar->seen = NULL;
 }
 
 void quasar_destroy(quasar_t* quasar) {
     if (quasar == NULL) return;
     refcounter_dereference((refcounter_t*)quasar);
     if (refcounter_count((refcounter_t*)quasar) == 0) {
-        attenuated_bloom_filter_destroy(quasar->routing);
-        bloom_filter_destroy(quasar->seen);
-
-        // Free all local subscription topic buffers
-        for (int i = 0; i < quasar->local_subs.length; i++) {
-            if (quasar->local_subs.data[i].topic != NULL) {
-                buffer_destroy(quasar->local_subs.data[i].topic);
-            }
+        if (quasar->owns_actor) {
+            /* The overlay's own actor: actor_destroy waits for it to be
+             * idle, so the state is ours to release. */
+            quasar_release_state(quasar);
+            actor_destroy(&quasar->own_actor);
+            free(quasar);
+            return;
         }
-        vec_deinit(&quasar->local_subs);
-        for (int i = 0; i < quasar->neighbor_filters.length; i++) {
-            attenuated_bloom_filter_destroy(quasar->neighbor_filters.data[i].filter);
+        /* The state is the network actor's, and so is the shell: the
+         * actor releases the state and frees the shell. The request goes
+         * out detached — a dispatch must not wait for another actor, and
+         * a destroy that waits is a destroy that can deadlock the layer
+         * it is tearing down. */
+        meridian_quasar_destroy_msg_t* request =
+            (meridian_quasar_destroy_msg_t*)
+            get_clear_memory(sizeof(meridian_quasar_destroy_msg_t));
+        if (request == NULL) {
+            /* The request could not be built, so the actor will not be
+             * told. The state and the shell leak: bounded, teardown-only,
+             * leak-not-UAF. */
+            return;
         }
-        vec_deinit(&quasar->neighbor_filters);
-        actor_destroy(&quasar->actor);
-        free(quasar);
+        if (actor_reply_init(&request->reply) != 0) {
+            free(request);
+            return;
+        }
+        request->quasar = quasar;
+        int trip = actor_request(quasar->actor, MERIDIAN_QUASAR_DESTROY,
+                                 &request->reply, MERIDIAN_QUASAR_TIMEOUT_MS);
+        if (trip == ACTOR_REQUEST_DETACHED) {
+            /* The actor owns the request and the shell. It releases both
+             * when it gets to the request. */
+            return;
+        }
+        if (trip == 0) {
+            /* The actor released the state and the shell. */
+            actor_reply_destroy(&request->reply);
+            free(request);
+            return;
+        }
+        if (trip == 1) {
+            /* Never queued: the actor is gone and it never saw the
+             * request, so the state and the shell are ours to release. */
+            actor_reply_destroy(&request->reply);
+            free(request);
+            quasar_release_state(quasar);
+            free(quasar);
+            return;
+        }
+        /* The caller gave up: the actor owns the request, the state and
+         * the shell, and it may still be walking the state. */
     }
+}
+
+/**
+ * Rebuilds the overlay's state with a new configuration.
+ *
+ * The overlay keeps its identity: the messages already queued for it
+ * stay with it. A fresh overlay would have new filters and no
+ * subscriptions, and so does this one.
+ */
+static int quasar_reconfigure_impl(quasar_t* quasar, uint32_t max_hops,
+                                   uint32_t alpha, size_t seen_size,
+                                   uint32_t seen_hashes) {
+    if (quasar == NULL) return -1;
+
+    quasar_release_state(quasar);
+
+    quasar->max_hops = max_hops;
+    quasar->alpha = alpha;
+    quasar->routing = attenuated_bloom_filter_create(
+        max_hops,
+        QUASAR_DEFAULT_SIZE,
+        QUASAR_DEFAULT_HASH_COUNT,
+        QUASAR_DEFAULT_OMEGA,
+        QUASAR_DEFAULT_FP_BITS
+    );
+    quasar->seen = bloom_filter_create(seen_size, seen_hashes);
+    quasar->seen_size = seen_size;
+    quasar->seen_hashes = seen_hashes;
+    vec_init(&quasar->local_subs);
+    vec_init(&quasar->neighbor_filters);
+
+    if (quasar->routing == NULL || quasar->seen == NULL) return -1;
+    return 0;
 }
 
 static void quasar_set_message_callback_impl(quasar_t* quasar, quasar_message_cb_t cb, void* ctx) {
@@ -809,7 +1059,7 @@ static int quasar_publish_impl(quasar_t* quasar, const uint8_t* topic, size_t to
             meridian_protocol_get_local_node(quasar->protocol, &local_addr, &local_port);
 
             size_t num_peers = 0;
-            meridian_node_t** peers = meridian_protocol_get_connected_peers(quasar->protocol, &num_peers);
+            meridian_node_t** peers = meridian_protocol_peers_on_actor(quasar->protocol, &num_peers);
             for (size_t i = 0; peers != NULL && i < num_peers; i++) {
                 quasar_route_message_t* republish_msg = quasar_route_message_create(
                     topic, topic_len, data, data_len,
@@ -826,7 +1076,7 @@ static int quasar_publish_impl(quasar_t* quasar, const uint8_t* topic, size_t to
                     uint8_t* route_buf = NULL;
                     size_t route_buf_len = 0;
                     if (quasar_route_message_serialize(republish_msg, &route_buf, &route_buf_len) == 0) {
-                        meridian_protocol_send_packet(quasar->protocol, route_buf, route_buf_len, peers[i]);
+                        meridian_protocol_send_on_actor(quasar->protocol, route_buf, route_buf_len, peers[i]);
                         free(route_buf);
                     }
                     quasar_route_message_destroy(republish_msg);
@@ -883,7 +1133,7 @@ static int quasar_publish_impl(quasar_t* quasar, const uint8_t* topic, size_t to
                         uint8_t* route_buf = NULL;
                         size_t route_buf_len = 0;
                         if (quasar_route_message_serialize(fwd, &route_buf, &route_buf_len) == 0) {
-                            meridian_protocol_send_packet(quasar->protocol, route_buf, route_buf_len, target);
+                            meridian_protocol_send_on_actor(quasar->protocol, route_buf, route_buf_len, target);
                             free(route_buf);
                         }
                         quasar_route_message_destroy(fwd);
@@ -923,14 +1173,14 @@ static int quasar_publish_impl(quasar_t* quasar, const uint8_t* topic, size_t to
     int result = 0;
     if (quasar->protocol != NULL) {
         size_t num_peers = 0;
-        meridian_node_t** peers = meridian_protocol_get_connected_peers(quasar->protocol, &num_peers);
+        meridian_node_t** peers = meridian_protocol_peers_on_actor(quasar->protocol, &num_peers);
         uint32_t sent = 0;
         for (size_t i = 0; peers != NULL && i < num_peers && sent < quasar->alpha; i++) {
             if (!quasar_route_message_has_visited(msg, peers[i])) {
                 uint8_t* route_buf = NULL;
                 size_t route_buf_len = 0;
                 if (quasar_route_message_serialize(msg, &route_buf, &route_buf_len) == 0) {
-                    meridian_protocol_send_packet(quasar->protocol, route_buf, route_buf_len, peers[i]);
+                    meridian_protocol_send_on_actor(quasar->protocol, route_buf, route_buf_len, peers[i]);
                     free(route_buf);
                 }
                 quasar_route_message_add_visited(msg, peers[i]);
@@ -994,12 +1244,12 @@ static int quasar_on_route_message_impl(quasar_t* quasar, quasar_route_message_t
         // Re-publish to all overlay neighbors
         if (quasar->protocol != NULL) {
             size_t num_peers = 0;
-            meridian_node_t** peers = meridian_protocol_get_connected_peers(quasar->protocol, &num_peers);
+            meridian_node_t** peers = meridian_protocol_peers_on_actor(quasar->protocol, &num_peers);
             for (size_t i = 0; peers != NULL && i < num_peers; i++) {
                 uint8_t* route_buf = NULL;
                 size_t route_buf_len = 0;
                 if (quasar_route_message_serialize(msg, &route_buf, &route_buf_len) == 0) {
-                    meridian_protocol_send_packet(quasar->protocol, route_buf, route_buf_len, peers[i]);
+                    meridian_protocol_send_on_actor(quasar->protocol, route_buf, route_buf_len, peers[i]);
                     free(route_buf);
                 }
             }
@@ -1049,7 +1299,7 @@ static int quasar_on_route_message_impl(quasar_t* quasar, quasar_route_message_t
                     uint8_t* route_buf = NULL;
                     size_t route_buf_len = 0;
                     if (quasar_route_message_serialize(msg, &route_buf, &route_buf_len) == 0) {
-                        meridian_protocol_send_packet(quasar->protocol, route_buf, route_buf_len, target);
+                        meridian_protocol_send_on_actor(quasar->protocol, route_buf, route_buf_len, target);
                         free(route_buf);
                     }
                     meridian_node_destroy(target);
@@ -1067,14 +1317,14 @@ static int quasar_on_route_message_impl(quasar_t* quasar, quasar_route_message_t
     }
 
     size_t num_peers = 0;
-    meridian_node_t** peers = meridian_protocol_get_connected_peers(quasar->protocol, &num_peers);
+    meridian_node_t** peers = meridian_protocol_peers_on_actor(quasar->protocol, &num_peers);
     uint32_t sent = 0;
     for (size_t i = 0; peers != NULL && i < num_peers && sent < quasar->alpha; i++) {
         if (!quasar_route_message_has_visited(msg, peers[i])) {
             uint8_t* route_buf = NULL;
             size_t route_buf_len = 0;
             if (quasar_route_message_serialize(msg, &route_buf, &route_buf_len) == 0) {
-                meridian_protocol_send_packet(quasar->protocol, route_buf, route_buf_len, peers[i]);
+                meridian_protocol_send_on_actor(quasar->protocol, route_buf, route_buf_len, peers[i]);
                 free(route_buf);
             }
             quasar_route_message_add_visited(msg, peers[i]);
@@ -1225,7 +1475,7 @@ static int quasar_propagate_impl(quasar_t* quasar) {
     }
 
     // Broadcast to all connected peers
-    int rc = meridian_protocol_broadcast(quasar->protocol, buf, buf_size);
+    int rc = meridian_protocol_broadcast_on_actor(quasar->protocol, buf, buf_size);
 
     free(buf);
     cbor_decref(&packet);

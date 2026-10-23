@@ -137,8 +137,8 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
     channel->subtopic_subs = subtopic_table_create(64);
     if (channel->subtopic_subs == NULL) {
         if (created_key_pair) poseidon_key_pair_destroy(key_pair);
-        quasar_destroy(channel->quasar);
         meridian_protocol_destroy(channel->protocol);
+        quasar_destroy(channel->quasar);
         unlink(key_path);
         unlink(cert_path);
         free(channel);
@@ -149,8 +149,8 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
     if (channel->aliases == NULL) {
         if (created_key_pair) poseidon_key_pair_destroy(key_pair);
         subtopic_table_destroy(channel->subtopic_subs);
-        quasar_destroy(channel->quasar);
         meridian_protocol_destroy(channel->protocol);
+        quasar_destroy(channel->quasar);
         unlink(key_path);
         unlink(cert_path);
         free(channel);
@@ -184,8 +184,11 @@ void poseidon_channel_destroy(poseidon_channel_t* channel) {
     if (channel == NULL) return;
     refcounter_dereference((refcounter_t*)channel);
     if (refcounter_count((refcounter_t*)channel) == 0) {
-        if (channel->quasar != NULL) quasar_destroy(channel->quasar);
+        /* The network first: the overlay's state lives in the network
+         * actor, so once the network is gone nobody can be walking that
+         * state and the overlay can release it itself. */
         if (channel->protocol != NULL) meridian_protocol_destroy(channel->protocol);
+        if (channel->quasar != NULL) quasar_destroy(channel->quasar);
         if (channel->key_pair != NULL) poseidon_key_pair_destroy(channel->key_pair);
         if (channel->subtopic_subs != NULL) subtopic_table_destroy(channel->subtopic_subs);
         if (channel->aliases != NULL) topic_alias_registry_destroy(channel->aliases);
@@ -470,17 +473,27 @@ int poseidon_channel_rejoin_with_config(poseidon_channel_t* channel,
 
     channel->config = *new_config;
 
-    // Re-create Quasar with new config
+    // Rebuild the Quasar's state with the new config. The overlay keeps
+    // its identity — it runs on the network actor, and the messages
+    // already queued for it stay with it — so this is a message to the
+    // actor, not a destroy and a create.
     if (channel->quasar != NULL) {
-        quasar_destroy(channel->quasar);
+        if (quasar_reconfigure(channel->quasar,
+                               new_config->quasar_max_hops,
+                               new_config->quasar_alpha,
+                               new_config->quasar_seen_size,
+                               new_config->quasar_seen_hashes) != 0) {
+            return -1;
+        }
+    } else {
+        channel->quasar = quasar_create(channel->protocol,
+                                          new_config->quasar_max_hops,
+                                          new_config->quasar_alpha,
+                                          new_config->quasar_seen_size,
+                                          new_config->quasar_seen_hashes,
+                                          channel->sched);
+        if (channel->quasar == NULL) return -1;
     }
-    channel->quasar = quasar_create(channel->protocol,
-                                      new_config->quasar_max_hops,
-                                      new_config->quasar_alpha,
-                                      new_config->quasar_seen_size,
-                                      new_config->quasar_seen_hashes,
-                                      channel->sched);
-    if (channel->quasar == NULL) return -1;
 
     // Re-subscribe to this channel's topic
     quasar_subscribe(channel->quasar,
