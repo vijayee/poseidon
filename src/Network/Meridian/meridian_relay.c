@@ -3,6 +3,7 @@
 //
 
 #include "meridian_relay.h"
+#include "meridian_relay_messages.h"
 #include "meridian_packet.h"
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
