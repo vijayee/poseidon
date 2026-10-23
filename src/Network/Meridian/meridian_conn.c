@@ -147,7 +147,7 @@ static void meridian_conn_dispatch(void* state, message_t* msg) {
         }
         default:
             /* Unhandled message type: no-op. The message_node_t wrapper is
-             * freed by actor_run after this function returns. */
+             * freed by the drain after this function returns. */
             break;
     }
 }
@@ -182,7 +182,7 @@ int meridian_conn_connect(meridian_conn_t* conn) {
     if (!actor_send(&conn->actor, &msg)) {
         return -1;
     }
-    actor_run(&conn->actor, 32);
+    actor_run_inline(&conn->actor, 32);
     return result;
 }
 
@@ -211,10 +211,13 @@ static void meridian_conn_handle_disconnect(meridian_conn_t* conn) {
 void meridian_conn_disconnect(meridian_conn_t* conn) {
     if (conn == NULL) return;
 
-    /* Post a disconnect message to the actor and drain synchronously. When
-     * a scheduler pool is wired in, scheduler_inject (inside actor_send)
-     * will route this through a worker thread; with pool == NULL the
-     * queue stays IDLE and actor_run drains on the caller's thread. */
+    /* Post a disconnect message to the actor and drain synchronously. The
+     * drain claims the actor for this thread: actor_send injects the
+     * actor into the scheduler pool when the mailbox was empty, so a
+     * pool worker could otherwise pick the very same actor up and run it
+     * while this thread runs it. Two threads popping one mailbox corrupt
+     * it. With pool == NULL the claim is uncontended and the drain
+     * happens on the caller's thread. */
     message_t msg = {
         .type = MERIDIAN_CONN_DISCONNECT,
         .payload = NULL,
@@ -225,7 +228,7 @@ void meridian_conn_disconnect(meridian_conn_t* conn) {
          * do; the connection is on its way out. */
         return;
     }
-    actor_run(&conn->actor, 32);
+    actor_run_inline(&conn->actor, 32);
 }
 
 /**
@@ -276,7 +279,7 @@ int meridian_conn_send(meridian_conn_t* conn, const uint8_t* data, uint32_t len)
          * is on its way out. Return -1 to mirror the pre-2.5 contract. */
         return -1;
     }
-    actor_run(&conn->actor, 32);
+    actor_run_inline(&conn->actor, 32);
     return result;
 }
 
@@ -299,7 +302,7 @@ int meridian_conn_upgrade_to_direct(meridian_conn_t* conn) {
          * is on its way out. Return -1 to mirror the pre-2.7 contract. */
         return -1;
     }
-    actor_run(&conn->actor, 32);
+    actor_run_inline(&conn->actor, 32);
     return result;
 }
 
@@ -335,7 +338,7 @@ void meridian_conn_set_peer_nat_type(meridian_conn_t* conn, meridian_nat_type_t 
         .payload_destroy = NULL,
     };
     if (!actor_send(&conn->actor, &msg)) return;
-    actor_run(&conn->actor, 32);
+    actor_run_inline(&conn->actor, 32);
 }
 
 /**
@@ -361,7 +364,7 @@ void meridian_conn_set_peer_reflexive(meridian_conn_t* conn, uint32_t addr, uint
         .payload_destroy = NULL,
     };
     if (!actor_send(&conn->actor, &msg)) return;
-    actor_run(&conn->actor, 32);
+    actor_run_inline(&conn->actor, 32);
 }
 
 // ============================================================================
@@ -513,7 +516,7 @@ void meridian_conn_test_force_state(meridian_conn_t* conn, meridian_conn_state_t
                       .payload = &payload,
                       .payload_destroy = NULL };
     if (!actor_send(&conn->actor, &msg)) return;
-    actor_run(&conn->actor, 32);
+    actor_run_inline(&conn->actor, 32);
 }
 
 // ============================================================================
