@@ -402,8 +402,20 @@ typedef enum {
    * Payload structs live in
    * src/Network/Meridian/meridian_protocol_messages.h; this enum only
    * carries the type tags. */
-  /* A peer connected. The actor adds it to the connected-peer table. */
+  /* A peer connected. The actor adds it to the peer table. */
   MERIDIAN_PROTOCOL_PEER_ADDED,
+  /* Drop the peer with this address. The actor closes it and takes it out
+   * of the table. */
+  MERIDIAN_PROTOCOL_PEER_REMOVED,
+  /* A snapshot of the peer table. The actor builds the copy. */
+  MERIDIAN_PROTOCOL_PEERS_SNAPSHOT,
+  /* Send a packet to one peer. The actor finds the connection and sends. */
+  MERIDIAN_PROTOCOL_SEND_PACKET,
+  /* Send a measure request to one peer. The actor finds the connection
+   * and puts the PING on a stream. */
+  MERIDIAN_PROTOCOL_SEND_MEASURE,
+  /* Send a packet to every peer. The actor does the fan-out. */
+  MERIDIAN_PROTOCOL_BROADCAST,
 } message_type_e;
 
 /* Base message. The actor's dispatch receives one of these; type selects the
@@ -555,7 +567,7 @@ typedef struct message_t {
  * msquic owns the I/O and delivers the data through the transport's
  * callbacks, so DATA carries the bytes themselves.
  *
- * Phase 2 (commit 2.18) adds the MERIDIAN_PROTOCOL_* family (1 entry)
+ * Phase 2 (commit 2.18) adds the MERIDIAN_PROTOCOL_* family (6 entries)
  * above the local-modifications block. The enum is still the global
  * message_type_e; the payload structs live in the per-subsystem header
  * Network/Meridian/meridian_protocol_messages.h, keeping message.h free

@@ -41,6 +41,12 @@ protocol_bidi_stream_callback(HQUIC Stream, void* Context,
 // ACTOR DISPATCH
 // ============================================================================
 
+/* The stream table helpers live below; the dispatch calls them. */
+static int protocol_add_stream(meridian_protocol_t* protocol,
+                                meridian_stream_entry_t* entry);
+static void protocol_remove_stream(meridian_protocol_t* protocol,
+                                   meridian_stream_entry_t* entry);
+
 /**
  * The protocol's actor owns the peer and stream tables.
  *
@@ -56,16 +62,190 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
 
     switch (msg->type) {
         case MERIDIAN_PROTOCOL_PEER_ADDED: {
-            const meridian_protocol_peer_added_msg_t* p =
-                (const meridian_protocol_peer_added_msg_t*)msg->payload;
-            platform_mutex_lock(protocol->lock);
+            meridian_protocol_peer_added_msg_t* p =
+                (meridian_protocol_peer_added_msg_t*)msg->payload;
             if (protocol->num_connected_peers < 64) {
                 protocol->connected_peers[protocol->num_connected_peers] =
                     (HQUIC)p->connection;
-                protocol->peer_nodes[protocol->num_connected_peers] = NULL;
+                protocol->peer_nodes[protocol->num_connected_peers] =
+                    (meridian_node_t*)p->node;
                 protocol->num_connected_peers++;
             }
-            platform_mutex_unlock(protocol->lock);
+            if (actor_reply_complete(&p->reply)) {
+                /* The caller handed the request over: the actor frees it. */
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_PROTOCOL_PEER_REMOVED: {
+            meridian_protocol_peer_removed_msg_t* p =
+                (meridian_protocol_peer_removed_msg_t*)msg->payload;
+            for (size_t i = 0; i < protocol->num_connected_peers; i++) {
+                meridian_node_t* node = protocol->peer_nodes[i];
+                if (node != NULL && node->addr == p->addr &&
+                    node->port == p->port) {
+                    HQUIC connection = protocol->connected_peers[i];
+                    if (connection != NULL && protocol->msquic != NULL) {
+                        protocol->msquic->ConnectionShutdown(
+                            connection, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
+                        protocol->msquic->ConnectionClose(connection);
+                    }
+                    protocol->connected_peers[i] = NULL;
+                    protocol->peer_nodes[i] = NULL;
+                    if (node != NULL) {
+                        refcounter_dereference(&node->refcounter);
+                        if (refcounter_count(&node->refcounter) == 0) {
+                            free(node);
+                        }
+                    }
+                    break;
+                }
+            }
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_PROTOCOL_PEERS_SNAPSHOT: {
+            meridian_protocol_peers_snapshot_msg_t* p =
+                (meridian_protocol_peers_snapshot_msg_t*)msg->payload;
+            size_t count = protocol->num_connected_peers;
+            /* The snapshot is always an array: an empty table yields an
+             * empty array, as the raw table did before. */
+            void** peers = get_clear_memory((count > 0 ? count : 1) * sizeof(void*));
+            if (peers != NULL) {
+                for (size_t i = 0; i < count; i++) {
+                    peers[i] = protocol->peer_nodes[i];
+                }
+            } else {
+                count = 0;
+            }
+            p->peers = peers;
+            p->num_peers = count;
+            if (actor_reply_complete(&p->reply)) {
+                if (p->peers != NULL) free(p->peers);
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_PROTOCOL_SEND_PACKET: {
+            meridian_protocol_send_packet_msg_t* p =
+                (meridian_protocol_send_packet_msg_t*)msg->payload;
+            int sent = -1;
+            for (size_t i = 0; i < protocol->num_connected_peers; i++) {
+                meridian_node_t* node = protocol->peer_nodes[i];
+                if (node != NULL && node->addr == p->target_addr &&
+                    node->port == p->target_port) {
+                    HQUIC connection = protocol->connected_peers[i];
+                    if (connection != NULL) {
+                        sent = meridian_stream_send_uni(protocol->msquic,
+                                                        connection, p->data,
+                                                        p->len, NULL);
+                    }
+                    break;
+                }
+            }
+            free(p->data);
+            p->data = NULL;
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_PROTOCOL_SEND_MEASURE: {
+            meridian_protocol_send_measure_msg_t* p =
+                (meridian_protocol_send_measure_msg_t*)msg->payload;
+            HQUIC connection = NULL;
+            for (size_t i = 0; i < protocol->num_connected_peers; i++) {
+                meridian_node_t* node = protocol->peer_nodes[i];
+                if (node != NULL && node->addr == p->target_addr &&
+                    node->port == p->target_port) {
+                    connection = protocol->connected_peers[i];
+                    break;
+                }
+            }
+            if (connection != NULL) {
+                /* Build a PING packet with the request's query_id */
+                meridian_packet_t pkt;
+                pkt.type = MERIDIAN_PACKET_TYPE_PING;
+                pkt.query_id = p->query_id;
+                pkt.magic = MERIDIAN_MAGIC_NUMBER;
+                pkt.rendv_addr = 0;
+                pkt.rendv_port = 0;
+
+                cbor_item_t* encoded = meridian_packet_encode(&pkt);
+                if (encoded != NULL) {
+                    size_t buf_len = 0;
+                    uint8_t* buf = NULL;
+                    cbor_serialize_alloc(encoded, &buf, &buf_len);
+                    cbor_decref(&encoded);
+
+                    if (buf != NULL) {
+                        meridian_stream_entry_t* entry =
+                            meridian_stream_entry_create(NULL, true, protocol);
+                        if (entry != NULL) {
+                            HQUIC stream = NULL;
+                            QUIC_STATUS status = protocol->msquic->StreamOpen(
+                                connection, QUIC_STREAM_OPEN_FLAG_NONE,
+                                protocol_bidi_stream_callback, entry, &stream);
+                            if (!QUIC_FAILED(status)) {
+                                entry->stream = stream;
+                                status = protocol->msquic->StreamStart(
+                                    stream, QUIC_STREAM_START_FLAG_NONE);
+                                if (!QUIC_FAILED(status)) {
+                                    uint8_t* send_buf =
+                                        (uint8_t*)get_memory(buf_len);
+                                    if (send_buf != NULL) {
+                                        memcpy(send_buf, buf, buf_len);
+                                        QUIC_BUFFER send_buffer;
+                                        send_buffer.Buffer = send_buf;
+                                        send_buffer.Length = (uint32_t)buf_len;
+                                        status = protocol->msquic->StreamSend(
+                                            stream, &send_buffer, 1,
+                                            QUIC_SEND_FLAG_FIN, send_buf);
+                                        if (!QUIC_FAILED(status)) {
+                                            free(buf);
+                                            protocol_add_stream(protocol, entry);
+                                            goto measure_done;
+                                        }
+                                        free(send_buf);
+                                    }
+                                }
+                                protocol->msquic->StreamClose(stream);
+                            }
+                            meridian_stream_entry_destroy(entry);
+                        }
+                        free(buf);
+                    }
+                }
+            }
+        measure_done:
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_PROTOCOL_BROADCAST: {
+            meridian_protocol_broadcast_msg_t* p =
+                (meridian_protocol_broadcast_msg_t*)msg->payload;
+            for (size_t i = 0; i < protocol->num_connected_peers; i++) {
+                HQUIC connection = protocol->connected_peers[i];
+                if (connection != NULL) {
+                    meridian_stream_send_uni(protocol->msquic, connection,
+                                            p->data, p->len, NULL);
+                }
+            }
+            free(p->data);
+            p->data = NULL;
+            if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         default:
@@ -92,9 +272,6 @@ static bool protocol_post_event(meridian_protocol_t* protocol, uint32_t type,
 // ============================================================================
 // STREAM TRACKING HELPERS
 // ============================================================================
-
-static int protocol_add_stream(meridian_protocol_t* protocol,
-                                meridian_stream_entry_t* entry);
 
 static int protocol_add_stream(meridian_protocol_t* protocol,
                                 meridian_stream_entry_t* entry) {
@@ -747,13 +924,48 @@ int meridian_protocol_connect(meridian_protocol_t* protocol,
         return -1;
     }
 
-    // Add to connected peers
-    platform_mutex_lock(protocol->lock);
-    protocol->connected_peers[protocol->num_connected_peers] = Connection;
-    protocol->peer_nodes[protocol->num_connected_peers] = node;
-    protocol->num_connected_peers++;
-    platform_mutex_unlock(protocol->lock);
+    // The peer table belongs to the actor. The caller waits for the
+    // answer, so the peer is in the table when this returns.
+    meridian_protocol_peer_added_msg_t* request =
+        (meridian_protocol_peer_added_msg_t*)
+        get_clear_memory(sizeof(meridian_protocol_peer_added_msg_t));
+    if (request == NULL) {
+        protocol->msquic->ConnectionClose(Connection);
+        refcounter_dereference(&node->refcounter);
+        if (refcounter_count(&node->refcounter) == 0) {
+            free(node);
+        }
+        return -1;
+    }
+    request->connection = Connection;
+    request->node = node;
 
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        protocol->msquic->ConnectionClose(Connection);
+        refcounter_dereference(&node->refcounter);
+        if (refcounter_count(&node->refcounter) == 0) {
+            free(node);
+        }
+        return -1;
+    }
+
+    int trip = actor_round_trip(&protocol->actor, MERIDIAN_PROTOCOL_PEER_ADDED,
+                                &request->reply, MERIDIAN_PROTOCOL_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        protocol->msquic->ConnectionClose(Connection);
+        refcounter_dereference(&node->refcounter);
+        if (refcounter_count(&node->refcounter) == 0) {
+            free(node);
+        }
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
     return 0;
 }
 
@@ -762,39 +974,32 @@ int meridian_protocol_disconnect(meridian_protocol_t* protocol,
     if (protocol == NULL) return -1;
     if (!ATOMIC_LOAD(&protocol->running)) return -1;
 
-    platform_mutex_lock(protocol->lock);
-    for (size_t i = 0; i < protocol->num_connected_peers; i++) {
-        if (protocol->peer_nodes[i] &&
-            protocol->peer_nodes[i]->addr == addr &&
-            protocol->peer_nodes[i]->port == port) {
+    /* The peer table belongs to the actor: it finds the peer, closes its
+     * connection and drops it. */
+    meridian_protocol_peer_removed_msg_t* request =
+        (meridian_protocol_peer_removed_msg_t*)
+        get_clear_memory(sizeof(meridian_protocol_peer_removed_msg_t));
+    if (request == NULL) return -1;
+    request->addr = addr;
+    request->port = port;
 
-            // Shutdown and close connection
-            if (protocol->connected_peers[i]) {
-                protocol->msquic->ConnectionShutdown(
-                    protocol->connected_peers[i],
-                    QUIC_CONNECTION_SHUTDOWN_FLAG_NONE,
-                    0);
-                protocol->msquic->ConnectionClose(protocol->connected_peers[i]);
-            }
-
-            // Free peer node
-            refcounter_dereference(&protocol->peer_nodes[i]->refcounter);
-            if (refcounter_count(&protocol->peer_nodes[i]->refcounter) == 0) {
-                free(protocol->peer_nodes[i]);
-            }
-
-            // Remove from array
-            for (size_t j = i; j < protocol->num_connected_peers - 1; j++) {
-                protocol->connected_peers[j] = protocol->connected_peers[j + 1];
-                protocol->peer_nodes[j] = protocol->peer_nodes[j + 1];
-            }
-            protocol->num_connected_peers--;
-            platform_mutex_unlock(protocol->lock);
-            return 0;
-        }
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
     }
-    platform_mutex_unlock(protocol->lock);
-    return -1;
+
+    int trip = actor_round_trip(&protocol->actor, MERIDIAN_PROTOCOL_PEER_REMOVED,
+                                &request->reply, MERIDIAN_PROTOCOL_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
+    return 0;
 }
 
 // ============================================================================
@@ -807,38 +1012,82 @@ int meridian_protocol_send_packet(meridian_protocol_t* protocol,
     if (protocol == NULL || data == NULL || target == NULL) return -1;
     if (!ATOMIC_LOAD(&protocol->running)) return -1;
 
-    // Find connection for target
-    HQUIC Connection = NULL;
-    platform_mutex_lock(protocol->lock);
-    for (size_t i = 0; i < protocol->num_connected_peers; i++) {
-        if (protocol->peer_nodes[i] &&
-            protocol->peer_nodes[i]->addr == target->addr &&
-            protocol->peer_nodes[i]->port == target->port) {
-            Connection = protocol->connected_peers[i];
-            break;
-        }
+    /* The peer table belongs to the actor: it finds the connection and
+     * sends. The request carries its own copy of the bytes — the actor
+     * may still be holding it after this call returns. */
+    meridian_protocol_send_packet_msg_t* request =
+        (meridian_protocol_send_packet_msg_t*)
+        get_clear_memory(sizeof(meridian_protocol_send_packet_msg_t));
+    if (request == NULL) return -1;
+    request->data = (uint8_t*)get_memory(len > 0 ? len : 1);
+    if (request->data == NULL) {
+        free(request);
+        return -1;
     }
-    platform_mutex_unlock(protocol->lock);
+    memcpy(request->data, data, len);
+    request->len = len;
+    request->target_addr = target->addr;
+    request->target_port = target->port;
 
-    if (Connection == NULL) return -1;
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->data);
+        free(request);
+        return -1;
+    }
 
-    return meridian_stream_send_uni(protocol->msquic, Connection, data, len, NULL);
+    int trip = actor_round_trip(&protocol->actor, MERIDIAN_PROTOCOL_SEND_PACKET,
+                                &request->reply, MERIDIAN_PROTOCOL_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request->data);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request->data);
+    free(request);
+    return 0;
 }
 
 int meridian_protocol_broadcast(meridian_protocol_t* protocol,
                                  const uint8_t* data, size_t len) {
     if (protocol == NULL || data == NULL) return -1;
 
-    int result = 0;
-    for (size_t i = 0; i < protocol->num_connected_peers; i++) {
-        if (protocol->peer_nodes[i]) {
-            if (meridian_protocol_send_packet(protocol, data, len,
-                                             protocol->peer_nodes[i]) != 0) {
-                result = -1;
-            }
-        }
+    /* The fan-out is the actor's work: it knows the peers. */
+    meridian_protocol_broadcast_msg_t* request =
+        (meridian_protocol_broadcast_msg_t*)
+        get_clear_memory(sizeof(meridian_protocol_broadcast_msg_t));
+    if (request == NULL) return -1;
+    request->data = (uint8_t*)get_memory(len > 0 ? len : 1);
+    if (request->data == NULL) {
+        free(request);
+        return -1;
     }
-    return result;
+    memcpy(request->data, data, len);
+    request->len = len;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request->data);
+        free(request);
+        return -1;
+    }
+
+    int trip = actor_round_trip(&protocol->actor, MERIDIAN_PROTOCOL_BROADCAST,
+                                &request->reply, MERIDIAN_PROTOCOL_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request->data);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request->data);
+    free(request);
+    return 0;
 }
 
 // ============================================================================
@@ -856,8 +1105,35 @@ meridian_node_t** meridian_protocol_get_connected_peers(meridian_protocol_t* pro
                                                       size_t* num_peers) {
     if (protocol == NULL || num_peers == NULL) return NULL;
 
-    *num_peers = protocol->num_connected_peers;
-    return protocol->peer_nodes;
+    /* The peer table belongs to the actor, so the snapshot is the actor's
+     * copy. The caller owns the returned array and frees it; the nodes
+     * themselves stay the table's. */
+    meridian_protocol_peers_snapshot_msg_t* request =
+        (meridian_protocol_peers_snapshot_msg_t*)
+        get_clear_memory(sizeof(meridian_protocol_peers_snapshot_msg_t));
+    if (request == NULL) return NULL;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return NULL;
+    }
+
+    int trip = actor_round_trip(&protocol->actor, MERIDIAN_PROTOCOL_PEERS_SNAPSHOT,
+                                &request->reply, MERIDIAN_PROTOCOL_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return NULL;
+    }
+    if (trip != 0) return NULL;  /* the actor owns the request now */
+
+    void** peers = request->peers;
+    size_t count = request->num_peers;
+    actor_reply_destroy(&request->reply);
+    free(request);
+
+    *num_peers = count;
+    return (meridian_node_t**)peers;
 }
 
 // ============================================================================
@@ -1053,108 +1329,32 @@ int meridian_protocol_send_measure(meridian_protocol_t* protocol,
     // Record send time for RTT computation
     gettimeofday(&req->start_time, NULL);
 
-    // Find connection for target
-    HQUIC Connection = NULL;
-    platform_mutex_lock(protocol->lock);
-    for (size_t i = 0; i < protocol->num_connected_peers; i++) {
-        if (protocol->peer_nodes[i] &&
-            protocol->peer_nodes[i]->addr == req->target->addr &&
-            protocol->peer_nodes[i]->port == req->target->port) {
-            Connection = protocol->connected_peers[i];
-            break;
-        }
-    }
-    platform_mutex_unlock(protocol->lock);
+    /* The peer table belongs to the actor: it finds the connection, builds
+     * the PING and puts it on a stream. */
+    meridian_protocol_send_measure_msg_t* request =
+        (meridian_protocol_send_measure_msg_t*)
+        get_clear_memory(sizeof(meridian_protocol_send_measure_msg_t));
+    if (request == NULL) return -1;
+    request->query_id = req->query_id;
+    request->target_addr = req->target->addr;
+    request->target_port = req->target->port;
 
-    if (Connection == NULL) return -1;
-
-    // Build a PING packet with the request's query_id
-    meridian_packet_t pkt;
-    pkt.type = MERIDIAN_PACKET_TYPE_PING;
-    pkt.query_id = req->query_id;
-    pkt.magic = MERIDIAN_MAGIC_NUMBER;
-    pkt.rendv_addr = 0;
-    pkt.rendv_port = 0;
-
-    cbor_item_t* encoded = meridian_packet_encode(&pkt);
-    if (encoded == NULL) return -1;
-
-    size_t buf_len = 0;
-    uint8_t* buf = NULL;
-    cbor_serialize_alloc(encoded, &buf, &buf_len);
-    cbor_decref(&encoded);
-
-    if (buf == NULL) return -1;
-
-    // Open bidi stream for request/response measure
-    meridian_stream_entry_t* entry = meridian_stream_entry_create(NULL, true, protocol);
-    if (entry == NULL) {
-        free(buf);
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
         return -1;
     }
 
-    HQUIC Stream = NULL;
-    QUIC_STATUS Status = protocol->msquic->StreamOpen(
-        Connection, QUIC_STREAM_OPEN_FLAG_NONE,
-        protocol_bidi_stream_callback, entry, &Stream);
-    if (QUIC_FAILED(Status)) {
-        meridian_stream_entry_destroy(entry);
-        free(buf);
+    int trip = actor_round_trip(&protocol->actor, MERIDIAN_PROTOCOL_SEND_MEASURE,
+                                &request->reply, MERIDIAN_PROTOCOL_TIMEOUT_MS);
+    if (trip == 1) {
+        actor_reply_destroy(&request->reply);
+        free(request);
         return -1;
     }
-    entry->stream = Stream;
+    if (trip != 0) return -1;  /* the actor owns the request now */
 
-    Status = protocol->msquic->StreamStart(Stream, QUIC_STREAM_START_FLAG_NONE);
-    if (QUIC_FAILED(Status)) {
-        protocol->msquic->StreamClose(Stream);
-        meridian_stream_entry_destroy(entry);
-        free(buf);
-        return -1;
-    }
-
-    // Copy data into a send buffer freed in SEND_COMPLETE
-    uint8_t* send_buf = (uint8_t*)get_memory(buf_len);
-    if (send_buf == NULL) {
-        protocol->msquic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
-        free(buf);
-        return -1;
-    }
-    memcpy(send_buf, buf, buf_len);
-
-    QUIC_BUFFER send_buffer;
-    send_buffer.Buffer = send_buf;
-    send_buffer.Length = (uint32_t)buf_len;
-
-    Status = protocol->msquic->StreamSend(Stream, &send_buffer, 1,
-                                           QUIC_SEND_FLAG_FIN, send_buf);
-    if (QUIC_FAILED(Status)) {
-        free(send_buf);
-        protocol->msquic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
-        free(buf);
-        return -1;
-    }
-
-    free(buf);
-
-    protocol_add_stream(protocol, entry);
-
-    // Register the request as pending
-    platform_mutex_lock(protocol->lock);
-    if (protocol->num_pending_measures >= protocol->pending_measures_capacity) {
-        size_t new_cap = protocol->pending_measures_capacity == 0 ? 8 :
-                         protocol->pending_measures_capacity * 2;
-        meridian_measure_request_t** new_arr = (meridian_measure_request_t**)
-            realloc(protocol->pending_measures, new_cap * sizeof(meridian_measure_request_t*));
-        if (new_arr == NULL) {
-            platform_mutex_unlock(protocol->lock);
-            return -1;
-        }
-        protocol->pending_measures = new_arr;
-        protocol->pending_measures_capacity = new_cap;
-    }
-    protocol->pending_measures[protocol->num_pending_measures++] = req;
-    platform_mutex_unlock(protocol->lock);
-
+    actor_reply_destroy(&request->reply);
+    free(request);
     return 0;
 }
 

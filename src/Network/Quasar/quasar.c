@@ -359,7 +359,7 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
 
             size_t num_peers = 0;
             meridian_node_t** peers = meridian_protocol_get_connected_peers(quasar->protocol, &num_peers);
-            for (size_t i = 0; i < num_peers; i++) {
+            for (size_t i = 0; peers != NULL && i < num_peers; i++) {
                 quasar_route_message_t* republish_msg = quasar_route_message_create(
                     topic, topic_len, data, data_len,
                     quasar->max_hops, QUASAR_DEFAULT_NEGATIVE_SIZE, QUASAR_DEFAULT_NEGATIVE_HASHES
@@ -381,6 +381,7 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
                     quasar_route_message_destroy(republish_msg);
                 }
             }
+            if (peers != NULL) free(peers);
         }
         platform_mutex_unlock(quasar->lock);
         return 0;
@@ -480,7 +481,7 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
         size_t num_peers = 0;
         meridian_node_t** peers = meridian_protocol_get_connected_peers(quasar->protocol, &num_peers);
         uint32_t sent = 0;
-        for (size_t i = 0; i < num_peers && sent < quasar->alpha; i++) {
+        for (size_t i = 0; peers != NULL && i < num_peers && sent < quasar->alpha; i++) {
             if (!quasar_route_message_has_visited(msg, peers[i])) {
                 uint8_t* route_buf = NULL;
                 size_t route_buf_len = 0;
@@ -492,6 +493,7 @@ int quasar_publish(quasar_t* quasar, const uint8_t* topic, size_t topic_len,
                 sent++;
             }
         }
+        if (peers != NULL) free(peers);
     }
 
     quasar_route_message_destroy(msg);
@@ -553,7 +555,7 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
         if (quasar->protocol != NULL) {
             size_t num_peers = 0;
             meridian_node_t** peers = meridian_protocol_get_connected_peers(quasar->protocol, &num_peers);
-            for (size_t i = 0; i < num_peers; i++) {
+            for (size_t i = 0; peers != NULL && i < num_peers; i++) {
                 uint8_t* route_buf = NULL;
                 size_t route_buf_len = 0;
                 if (quasar_route_message_serialize(msg, &route_buf, &route_buf_len) == 0) {
@@ -561,6 +563,7 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
                     free(route_buf);
                 }
             }
+            if (peers != NULL) free(peers);
         }
 
         if (local_node != NULL) meridian_node_destroy(local_node);
@@ -634,7 +637,7 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
     size_t num_peers = 0;
     meridian_node_t** peers = meridian_protocol_get_connected_peers(quasar->protocol, &num_peers);
     uint32_t sent = 0;
-    for (size_t i = 0; i < num_peers && sent < quasar->alpha; i++) {
+    for (size_t i = 0; peers != NULL && i < num_peers && sent < quasar->alpha; i++) {
         if (!quasar_route_message_has_visited(msg, peers[i])) {
             uint8_t* route_buf = NULL;
             size_t route_buf_len = 0;
@@ -646,6 +649,7 @@ int quasar_on_route_message(quasar_t* quasar, quasar_route_message_t* msg, const
             sent++;
         }
     }
+    if (peers != NULL) free(peers);
 
     if (local_node != NULL) meridian_node_destroy(local_node);
     return 0;

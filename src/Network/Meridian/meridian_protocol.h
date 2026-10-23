@@ -35,6 +35,15 @@ extern "C" {
 // Forward declaration
 typedef struct meridian_protocol_t meridian_protocol_t;
 
+/**
+ * How long a public call waits for the protocol's actor to answer.
+ *
+ * The call sends a request to the actor and waits on the request's
+ * condition variable — the round trip upstream's peer book uses. The
+ * actor runs on a pool worker, never on the calling thread.
+ */
+#define MERIDIAN_PROTOCOL_TIMEOUT_MS 5000
+
 // ============================================================================
 // PROTOCOL STATES
 // ============================================================================
@@ -298,9 +307,14 @@ meridian_node_t* meridian_protocol_find_closest(meridian_protocol_t* protocol,
 /**
  * Gets the list of currently connected peers.
  *
+ * The peer table belongs to the protocol's actor, so this is a snapshot
+ * the actor builds. The caller owns the returned array and frees it; the
+ * nodes themselves stay the table's.
+ *
  * @param protocol   Protocol to query
  * @param num_peers Output: number of peers returned
- * @return          Array of peer nodes (valid until next API call)
+ * @return          Array of peer nodes, or NULL on failure. The caller
+ *                  frees it.
  */
 meridian_node_t** meridian_protocol_get_connected_peers(meridian_protocol_t* protocol, size_t* num_peers);
 
