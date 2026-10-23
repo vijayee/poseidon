@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include "meridian_rendv.h"
 #include "meridian_stream.h"
+#include "../../Actor/actor.h"
 #include "msquic.h"
 
 #ifdef __cplusplus
@@ -86,6 +87,8 @@ typedef struct meridian_relay_t {
     meridian_stream_entry_t** active_streams;        /**< Tracking array for open streams */
     size_t num_active_streams;                       /**< Number of active streams */
     size_t active_streams_cap;                       /**< Capacity of active_streams array */
+    scheduler_pool_t* pool;                          /**< Scheduler pool owning this actor (NULL = caller-thread dispatch) */
+    actor_t actor;                                   /**< Mailbox / dispatch state (embedded by value) */
     platform_mutex_t* lock;                         /**< Thread-safe access */
 } meridian_relay_t;
 
@@ -102,12 +105,14 @@ typedef struct meridian_relay_t {
  * @param registration msquic registration handle (borrowed from parent protocol)
  * @param server      Relay server rendezvous point (caller retains ownership)
  * @param config      Client configuration parameters
+ * @param pool        Scheduler pool for actor dispatch (NULL = caller-thread dispatch)
  * @return            New relay client with refcount=1, or NULL on failure
  */
 meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
                                         HQUIC registration,
                                         meridian_rendv_t* server,
-                                        const meridian_relay_config_t* config);
+                                        const meridian_relay_config_t* config,
+                                        scheduler_pool_t* pool);
 
 /**
  * Destroys a relay client.

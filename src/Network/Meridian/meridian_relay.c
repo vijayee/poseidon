@@ -28,6 +28,29 @@ static QUIC_STATUS QUIC_API
 relay_bidi_stream_callback(HQUIC Stream, void* Context,
                            QUIC_STREAM_EVENT* Event);
 
+static void meridian_relay_dispatch(void* state, message_t* msg);
+
+// ============================================================================
+// ACTOR DISPATCH
+// ============================================================================
+
+/**
+ * The relay's actor dispatch.
+ *
+ * Every path that touches the relay's mutable state hands its work over
+ * through actor_send: the public API wrappers, which run on the
+ * application thread, and the msquic callbacks, which run on msquic's own
+ * worker threads. This function is the single place where that work
+ * runs, so the actor is the relay's serialization point.
+ *
+ * The arms land with the routing steps. Until the first one lands the
+ * dispatch is a no-op and the relay still runs on its mutex.
+ */
+static void meridian_relay_dispatch(void* state, message_t* msg) {
+    (void)state;
+    (void)msg;
+}
+
 // ============================================================================
 // STREAM TRACKING HELPERS
 // ============================================================================
@@ -75,7 +98,8 @@ static void relay_remove_stream(meridian_relay_t* relay,
 meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
                                         HQUIC registration,
                                         meridian_rendv_t* server,
-                                        const meridian_relay_config_t* config) {
+                                        const meridian_relay_config_t* config,
+                                        scheduler_pool_t* pool) {
     if (msquic == NULL || server == NULL) return NULL;
 
     meridian_relay_t* relay = (meridian_relay_t*)
@@ -93,6 +117,7 @@ meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
     relay->on_datagram_ctx = NULL;
     relay->on_addr_response = NULL;
     relay->on_addr_response_ctx = NULL;
+    relay->pool = pool;
 
     relay->active_streams_cap = 16;
     relay->active_streams = (meridian_stream_entry_t**)
@@ -174,6 +199,11 @@ meridian_relay_t* meridian_relay_create(const struct QUIC_API_TABLE* msquic,
         }
     }
 
+    /* The actor owns the relay's state from here on. The dispatch arms
+     * land with the routing steps; until then no message is sent and the
+     * relay still runs on its mutex. */
+    actor_init(&relay->actor, relay, meridian_relay_dispatch, relay->pool);
+
     return relay;
 }
 
@@ -199,6 +229,7 @@ void meridian_relay_destroy(meridian_relay_t* relay) {
             relay->configuration = NULL;
         }
 
+        actor_destroy(&relay->actor);
         platform_mutex_destroy(relay->lock);;
         free(relay);
     }
