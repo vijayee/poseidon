@@ -244,7 +244,7 @@ TEST_F(RelayTest, ClientConnectsToTheRelayServer) {
         meridian_relay_create(msquic, client_reg, rendv, handle, &client_config, sched);
     ASSERT_NE(nullptr, client);
 
-    ASSERT_EQ(0, meridian_relay_connect(client));
+    EXPECT_EQ(0, meridian_relay_connect(client));
 
     // The connection is msquic's: wait for it.
     bool connected = false;
@@ -252,7 +252,6 @@ TEST_F(RelayTest, ClientConnectsToTheRelayServer) {
         connected = meridian_relay_is_connected(client);
         if (!connected) usleep(50 * 1000);
     }
-    ASSERT_TRUE(connected) << "the client never connected to the relay server";
 
     // The address response is an event to the handle's actor, and the
     // actor records the address the relay saw. The wait is the test's:
@@ -262,15 +261,13 @@ TEST_F(RelayTest, ClientConnectsToTheRelayServer) {
         reflexive_addr = meridian_rendv_get_reflexive_addr(rendv);
         if (reflexive_addr == 0) usleep(25 * 1000);
     }
-
-    ASSERT_NE(0u, reflexive_addr) << "the relay never answered the address request";
-    // The relay saw the client on the loopback, so that is the address
-    // it reports back.
-    EXPECT_EQ(loopback, reflexive_addr);
-    EXPECT_NE(0, meridian_rendv_get_reflexive_port(rendv));
+    uint16_t reflexive_port = meridian_rendv_get_reflexive_port(rendv);
     // The server gave the client an endpoint id, and the client keeps it.
-    EXPECT_NE(0u, meridian_relay_get_endpoint_id(client));
+    uint32_t endpoint_id = meridian_relay_get_endpoint_id(client);
 
+    // The teardown comes before the assertions: an assertion that fails
+    // returns from the test, and the server would keep its port and its
+    // thread for the rest of the run.
     meridian_relay_destroy(client);
     meridian_rendv_handle_destroy(handle);
     meridian_rendv_destroy(rendv);
@@ -281,4 +278,12 @@ TEST_F(RelayTest, ClientConnectsToTheRelayServer) {
     unlink(key_path);
     unlink(cert_path);
     poseidon_msquic_close();
+
+    EXPECT_TRUE(connected) << "the client never connected to the relay server";
+    EXPECT_NE(0u, reflexive_addr) << "the relay never answered the address request";
+    // The relay saw the client on the loopback, so that is the address
+    // it reports back.
+    EXPECT_EQ(loopback, reflexive_addr);
+    EXPECT_NE(0, reflexive_port);
+    EXPECT_NE(0u, endpoint_id);
 }
