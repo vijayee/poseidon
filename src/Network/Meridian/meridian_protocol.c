@@ -1804,7 +1804,18 @@ ListenerCallback(HQUIC Listener, void* Context,
             get_clear_memory(sizeof(meridian_protocol_peer_added_msg_t));
         if (event != NULL) {
             event->connection = Connection;
-            protocol_post_event(protocol, MERIDIAN_PROTOCOL_PEER_ADDED, event, free);
+            /* A fire-and-forget post: nobody waits for the answer, so the
+             * actor owns the request and frees it. The reply block still
+             * has to be initialised and detached — the dispatch reads it,
+             * and an uninitialised reply has no mutex to lock. */
+            if (actor_reply_init(&event->reply) == 0) {
+                actor_reply_detach(&event->reply);
+                /* No payload destructor: the dispatch frees the request
+                 * when the reply completes, the way the round trips do. */
+                protocol_post_event(protocol, MERIDIAN_PROTOCOL_PEER_ADDED, event, NULL);
+            } else {
+                free(event);
+            }
         }
 
         return QUIC_STATUS_SUCCESS;
