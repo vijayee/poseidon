@@ -114,7 +114,7 @@ meridian_relay_server_t* meridian_relay_server_create(
     }
 
     server->pool = pool;
-    server->clients_lock = platform_mutex_create();;
+    server->clients_lock = platform_mutex_create();
     refcounter_init(&server->refcounter);
 
     /* Upstream's relay server has an actor too, and its dispatch is
@@ -129,7 +129,7 @@ meridian_relay_server_t* meridian_relay_server_create(
     // (refcounted against other callers in this process).
     if (!poseidon_msquic_open_registration("meridian_relay",
                                           &server->registration)) {
-        platform_mutex_destroy(server->clients_lock);;
+        platform_mutex_destroy(server->clients_lock);
         free(server);
         return NULL;
     }
@@ -166,7 +166,7 @@ meridian_relay_server_t* meridian_relay_server_create(
 
     if (QUIC_FAILED(Status)) {
         poseidon_msquic_close_registration("meridian_relay");
-        platform_mutex_destroy(server->clients_lock);;
+        platform_mutex_destroy(server->clients_lock);
         free(server);
         return NULL;
     }
@@ -191,7 +191,7 @@ meridian_relay_server_t* meridian_relay_server_create(
     if (QUIC_FAILED(Status)) {
         server->msquic->ConfigurationClose(server->configuration);
         poseidon_msquic_close_registration("meridian_relay");
-        platform_mutex_destroy(server->clients_lock);;
+        platform_mutex_destroy(server->clients_lock);
         free(server);
         return NULL;
     }
@@ -222,7 +222,7 @@ void meridian_relay_server_destroy(meridian_relay_server_t* server) {
         }
 
         actor_destroy(&server->actor);
-        platform_mutex_destroy(server->clients_lock);;
+        platform_mutex_destroy(server->clients_lock);
         free(server);
     }
 }
@@ -463,7 +463,6 @@ static int relay_server_remove_stream(meridian_relay_client_t* client,
  * Wire format: [4 bytes dest_endpoint_id BE] + [4 bytes src_endpoint_id BE] + [payload]
  */
 static void relay_server_process_uni_message(meridian_relay_server_t* server,
-                                             int client_slot,
                                              const uint8_t* data, size_t len) {
     if (server == NULL) return;
 
@@ -743,7 +742,7 @@ static void relay_server_stream_message(void* ctx, meridian_stream_entry_t* entr
     if (entry != NULL && entry->is_bidi) {
         relay_server_process_bidi_message(server, entry, client_slot, data, len);
     } else {
-        relay_server_process_uni_message(server, client_slot, data, len);
+        relay_server_process_uni_message(server, data, len);
     }
 }
 
@@ -938,6 +937,7 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
 static QUIC_STATUS QUIC_API
 RelayServerListenerCallback(HQUIC Listener, void* Context,
                             QUIC_LISTENER_EVENT* Event) {
+    (void)Listener;
     meridian_relay_server_t* server = (meridian_relay_server_t*)Context;
 
     switch (Event->Type) {
@@ -1099,11 +1099,13 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
 
         // Add to client's active streams
         relay_server_add_stream(&server->clients[slot], entry);
-        uint32_t endpoint_id = server->clients[slot].endpoint_id;
+        /* The endpoint id is read here, under the lock: after the unlock
+         * the slot may already belong to another client. */
+        log_debug("Relay: %s stream started on connection (endpoint %u)",
+                  is_bidi ? "bidi" : "uni",
+                  server->clients[slot].endpoint_id);
         platform_mutex_unlock(server->clients_lock);
 
-        log_debug("Relay: %s stream started on connection (endpoint %u)",
-                  is_bidi ? "bidi" : "uni", endpoint_id);
         return QUIC_STATUS_SUCCESS;
     }
 

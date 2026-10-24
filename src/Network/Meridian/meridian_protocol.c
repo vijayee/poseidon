@@ -730,7 +730,7 @@ meridian_protocol_t* meridian_protocol_create(const meridian_protocol_config_t* 
         protocol->active_streams_cap * sizeof(meridian_stream_entry_t*));
     protocol->num_active_streams = 0;
 
-    protocol->lock = platform_mutex_create();;
+    protocol->lock = platform_mutex_create();
     refcounter_init(&protocol->refcounter);
 
     /* The actor owns the peer table. The msquic callbacks hand their
@@ -838,7 +838,7 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol) {
         }
         free(protocol->active_streams);
 
-        platform_mutex_destroy(protocol->lock);;
+        platform_mutex_destroy(protocol->lock);
         free(protocol);
     }
 }
