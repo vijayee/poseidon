@@ -62,6 +62,10 @@ typedef struct meridian_relay_server_t {
     HQUIC configuration;                                   /**< MsQuic listener configuration */
     HQUIC listener;                                        /**< MsQuic listener handle */
     uint16_t listen_port;                                 /**< Port the server is listening on */
+    char alpn[64];                                         /**< The ALPN the listener and the
+                                configuration share. They must be the same string: a
+                                listener that offers one ALPN and a configuration
+                                that offers another never completes a handshake. */
     meridian_relay_client_t clients[MERIDIAN_RELAY_MAX_CLIENTS]; /**< Connected clients array */
     size_t num_clients;                                   /**< Current number of connected clients */
     uint32_t next_endpoint_id;                            /**< Next endpoint ID to assign */

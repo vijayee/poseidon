@@ -1688,3 +1688,52 @@ Poseidon now matches that:
 Verified: with no path the daemon runs and serves its other transports;
 with `--unix-socket /tmp/poseidon-test.sock` it listens there, as an
 ordinary user. The gate is 25/25.
+
+## Phase 2 (2.30) — the relay client, exercised for the first time
+
+The relay *client* had no caller in `src/` — only two negative-path tests
+— so the retry and the address-response event that landed in 2.27 were
+compiled but never run. A test that stands up the relay server and dials
+it with a relay client is now in `tests/meridian_relay_test.cpp`, and it
+found four more bugs on the way.
+
+### The ServerName
+
+MsQuic v2's `ConnectionStart` resolves a **server name**; the relay
+client passed `NULL` and a socket address it had built and never used.
+The connection never started. Upstream dials the same way
+(`liboffs/src/Network/quic_listener.c:1163`): the host as a string and
+`QUIC_ADDRESS_FAMILY_UNSPEC`. The client now formats the rendezvous
+point's address with the platform's own helper and passes it.
+
+### The two ALPNs
+
+The relay server's *configuration* used the config's ALPN and its
+*listener* hard-coded `"meridian_relay"`. A server whose two halves
+disagree never completes a handshake. The server now keeps one ALPN,
+copied at the create, and offers it in both places.
+
+### The client certificate
+
+A client that loads no certificate has to say so: MsQuic v2's TLS layer
+accepts a NONE credential only for a client, and only with
+`QUIC_CREDENTIAL_FLAG_CLIENT` (2.28). The relay client's test shows the
+difference: with the flag the handshake still fails against a server
+that presents a certificate, and the client has to present one too.
+
+### The C++ linkage guard, again
+
+`src/Util/log.h` declares its functions without an `extern "C"` guard, so
+a C++ translation unit that reaches it asks the linker for mangled
+symbols. Same family as the actor, message, scheduler and msquic headers;
+the guard is in.
+
+### What still does not work
+
+The client's bidi stream never reaches the server, so the address request
+never gets its response. The connection is fine; the request is not. The
+test says so where the wait belongs, and the gap is recorded here.
+
+### Build
+
+Green, 25/25 ctest.

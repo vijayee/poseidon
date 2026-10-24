@@ -129,10 +129,15 @@ meridian_relay_server_t* meridian_relay_server_create(
     }
     server->msquic = poseidon_msquic_api();
 
-    // Configure ALPN
+    // One ALPN, for the configuration and the listener alike. They have to
+    // be the same string: the listener offers it during the handshake and
+    // the configuration is what the client is told to offer, so a server
+    // whose two halves disagree never completes a handshake.
+    snprintf(server->alpn, sizeof(server->alpn), "%s",
+             (config->alpn != NULL) ? config->alpn : "meridian_relay");
     QUIC_BUFFER Alpn = {
-        (uint32_t)(config->alpn ? strlen(config->alpn) : sizeof("meridian_relay") - 1),
-        (uint8_t*)(config->alpn ? config->alpn : "meridian_relay")
+        (uint32_t)strlen(server->alpn),
+        (uint8_t*)server->alpn
     };
 
     // Configure settings — stream-based, not datagram
@@ -246,8 +251,11 @@ int meridian_relay_server_start(meridian_relay_server_t* server) {
 #endif
     Address.Ipv4.sin_port = htons(server->listen_port);
 
-    // Start listener
-    QUIC_BUFFER Alpn = { sizeof("meridian_relay") - 1, (uint8_t*)"meridian_relay" };
+    // Start listener, offering the same ALPN the configuration offers.
+    QUIC_BUFFER Alpn = {
+        (uint32_t)strlen(server->alpn),
+        (uint8_t*)server->alpn
+    };
     Status = server->msquic->ListenerStart(
         server->listener,
         &Alpn, 1,
@@ -665,7 +673,6 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
                 query_id = (qid_1 << 32) | qid_2;
             }
             if (req_item != NULL) cbor_decref(&req_item);
-
             // Build ADDR_RESPONSE CBOR array:
             // [type, query_id_hi, query_id_lo, reflexive_addr, reflexive_port, endpoint_id]
             meridian_addr_response_t addr_resp;

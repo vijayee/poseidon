@@ -8,6 +8,7 @@
 #include "meridian_rendv_messages.h"
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
+#include "../../Platform/platform_socket.h"
 #include <stdlib.h>
 #include <string.h>
 #include <netinet/in.h>
@@ -338,12 +339,29 @@ int meridian_relay_connect(meridian_relay_t* relay) {
     // Set connection callback
     relay->msquic->SetCallbackHandler(connection, RelayConnectionCallback, relay);
 
-    // Start connection
+    // Start the connection. MsQuic v2 resolves the server NAME, so the
+    // address has to be a name and not a socket address. Upstream dials
+    // the same way (liboffs/src/Network/quic_listener.c:1163 passes the
+    // host string and QUIC_ADDRESS_FAMILY_UNSPEC).
+    platform_address_t server_address;
+    memset(&server_address, 0, sizeof(server_address));
+    server_address.family = PLATFORM_AF_INET;
+    server_address.inet.addr = relay->server->addr;
+    server_address.inet.port = relay->server->port;
+    char host[64];
+    if (platform_address_to_string(&server_address, host, sizeof(host)) != 0) {
+        platform_mutex_lock(relay->lock);
+        relay->connection = NULL;
+        platform_mutex_unlock(relay->lock);
+        relay->msquic->ConnectionClose(connection);
+        return -1;
+    }
+
     Status = relay->msquic->ConnectionStart(
         connection,
         relay->configuration,
-        AF_INET,
-        NULL,
+        QUIC_ADDRESS_FAMILY_UNSPEC,
+        host,
         relay->server->port);
 
     if (QUIC_FAILED(Status)) {

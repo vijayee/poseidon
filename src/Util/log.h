@@ -13,6 +13,14 @@
 #include <stdbool.h>
 #include <time.h>
 
+/* A C++ translation unit that reaches this header sees C++ linkage
+ * otherwise, and asks the linker for mangled symbols the library does
+ * not define. The same guard the actor, message, scheduler and msquic
+ * headers carry. */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #define LOG_VERSION "0.1.0"
 
 typedef struct {
@@ -78,5 +86,9 @@ int log_add_callback(log_LogFn fn, void *udata, int level);
 int log_add_fp(FILE *fp, int level);
 
 void log_log(int level, const char *file, int line, const char *fmt, ...);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif
