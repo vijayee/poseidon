@@ -23,7 +23,6 @@
 #include <signal.h>
 #include <getopt.h>
 
-#define DEFAULT_UNIX_SOCKET "/var/run/poseidond.sock"
 #define DEFAULT_TCP_PORT 9090
 #define DEFAULT_WS_PORT 9091
 #define DEFAULT_QUIC_PORT 9092
@@ -87,7 +86,9 @@ static void print_usage(const char* program) {
     printf("Usage: %s [OPTIONS]\n\n", program);
     printf("Poseidon daemon - decentralized pub/sub overlay network\n\n");
     printf("Options:\n");
-    printf("  --enable-unix          Enable Unix domain socket transport (default)\n");
+    printf("  --unix-socket PATH     Unix socket path. The transport is off\n");
+    printf("                        unless a path is given (upstream's rule:\n");
+    printf("                        liboffs/examples/off_server/main.c)\n");
     printf("  --enable-tcp           Enable TCP transport\n");
     printf("  --enable-ws            Enable WebSocket transport\n");
     printf("  --enable-quic          Enable QUIC transport\n");
@@ -95,7 +96,6 @@ static void print_usage(const char* program) {
     printf("  --dial-port PORT       Dial channel port (default: %d)\n", DEFAULT_DIAL_PORT);
     printf("  --port-range-start PORT  Start of data channel port range (default: %d)\n", DEFAULT_PORT_RANGE_START);
     printf("  --port-range-end PORT    End of data channel port range (default: %d)\n", DEFAULT_PORT_RANGE_END);
-    printf("  --unix-socket PATH     Unix socket path (default: %s)\n", DEFAULT_UNIX_SOCKET);
     printf("  --tcp-port PORT        TCP listen port (default: %d)\n", DEFAULT_TCP_PORT);
     printf("  --ws-port PORT          WebSocket listen port (default: %d)\n", DEFAULT_WS_PORT);
     printf("  --quic-port PORT       QUIC listen port (default: %d)\n", DEFAULT_QUIC_PORT);
@@ -248,7 +248,10 @@ int main(int argc, char* argv[]) {
     poseidon_transport_t* g_quic_transport = NULL;
     poseidon_transport_t* g_wt_transport = NULL;
 
-    if (config.enable_unix) {
+    /* The Unix transport exists when a path was named. That is upstream's
+     * rule: the transport is created from the path the command line
+     * carries, and there is no default path to fall back on. */
+    if (config.unix_socket_path != NULL) {
         g_unix_transport = poseidon_transport_unix_create(config.unix_socket_path,
                                                           mgr,
                                                           unix_on_message,
@@ -264,6 +267,8 @@ int main(int argc, char* argv[]) {
         } else {
             log_error("poseidond: failed to create Unix transport");
         }
+    } else if (config.enable_unix) {
+        log_error("poseidond: the Unix transport needs --unix-socket PATH");
     }
 
     if (config.enable_tcp) {

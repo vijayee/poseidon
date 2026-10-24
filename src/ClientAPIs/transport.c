@@ -36,8 +36,16 @@
 poseidon_transport_config_t poseidon_transport_config_defaults(void) {
     poseidon_transport_config_t config;
     memset(&config, 0, sizeof(config));
-    config.enable_unix = true;
-    config.unix_socket_path = "/var/run/poseidond.sock";
+    /* The Unix transport is opt-in, and its path has no default.
+     *
+     * Upstream keeps the same rule: the transport exists only when a path
+     * was named on the command line (liboffs/examples/off_server/main.c
+     * parses "--unix <path>" and creates the transport only when that
+     * argument is present). A hard-coded default under /var/run needs
+     * root to bind and root to remove, so a daemon started by an
+     * ordinary user cannot listen on it at all. */
+    config.enable_unix = false;
+    config.unix_socket_path = NULL;
     config.tcp_port = 9090;
     config.ws_port = 9091;
     config.quic_port = 9092;

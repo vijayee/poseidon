@@ -1637,3 +1637,44 @@ The relay daemon starts and listens; the main daemon starts and runs.
 The gate is 25/25, and `tests/meridian_relay_test.cpp` has a server
 lifecycle test again — it starts the server on an ephemeral port, stops
 it and destroys it, which is the path the stop rewrite changed.
+
+## Phase 2 (2.29) — the socket path comes from the command line
+
+The daemon's Unix transport was hard-coded to
+`/var/run/poseidond.sock`. That path needs root to bind and root to
+remove, so an ordinary user could not listen on it at all: the daemon
+logged `failed to listen on /var/run/poseidond.sock (errno=13)` and
+carried on without its primary local transport.
+
+Upstream solved this the same way, and the answer is in its example
+server (`liboffs/examples/off_server/main.c`):
+
+```c
+} else if (strcmp(argv[i], "--unix") == 0 && i + 1 < argc) {
+  unix_path = argv[++i];
+}
+...
+if (unix_path != NULL) {
+  unix_transport = unix_transport_create(pool, bc, ofd_cache, tc, unix_path, ...);
+}
+```
+
+**The path is a command-line argument, and the transport exists only
+when a path was named.** There is no default to fall back on, so there
+is no privileged path to fail on.
+
+Poseidon now matches that:
+
+- `poseidon_transport_config_defaults()` leaves `unix_socket_path` NULL
+  and `enable_unix` false. The default configuration names no path.
+- The daemon creates the Unix transport when a path was given —
+  `--unix-socket PATH`, which it already had. `--enable-unix` without a
+  path now says so, instead of listening somewhere the user cannot
+  reach.
+- The client library needed no change: it takes the path from the
+  transport URL (`unix:///tmp/poseidon.sock`), which is upstream's shape
+  already.
+
+Verified: with no path the daemon runs and serves its other transports;
+with `--unix-socket /tmp/poseidon-test.sock` it listens there, as an
+ordinary user. The gate is 25/25.
