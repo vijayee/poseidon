@@ -25,7 +25,7 @@ extern "C" {
 /* ============================================================================
  * MESSAGE TABLE
  * ----------------------------------------------------------------------------
- * The 11 MERIDIAN_CONN_* values defined in message.h map to the following
+ * The 10 MERIDIAN_CONN_* values defined in message.h map to the following
  * payload layouts. The two lifetime rules are uniform across the family:
  *
  *   - Borrowed payloads: the sender's buffer must outlive the actor's
@@ -77,7 +77,11 @@ extern "C" {
  *                                       test-only override that forces
  *                                       conn->state; 2.9 routes this through
  *                                       the actor)
- *   MERIDIAN_CONN_DESTROY            -> NULL
+ *   MERIDIAN_CONN_DIRECT_CONNECTED   -> NULL (the direct path came up; the
+ *                                       state moves on the actor's thread)
+ *   MERIDIAN_CONN_RELAY_CONNECTED    -> NULL (the relay path came up)
+ *   MERIDIAN_CONN_PATH_FAILED        -> NULL (a path failed; the connection
+ *                                       falls back to the relay)
  *
  * No payload-destroy functions are defined here. Every message in the
  * MERIDIAN_CONN_* family is either NULL-payload or borrowed-by-value,

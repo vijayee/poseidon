@@ -76,8 +76,6 @@ typedef enum {
   /* Test-only: force conn->state. Bypasses state-machine validation; test
    * fixture helper. (was: direct field assignment in tests). */
   MERIDIAN_CONN_TEST_FORCE_STATE,
-  /* Tear down the connection and free the actor. Refcount==0 path only. */
-  MERIDIAN_CONN_DESTROY,
 
   /* --- poseidon_channel_manager actor (subsystem actor) ---
    *
@@ -601,7 +599,7 @@ typedef struct message_t {
  * per-subsystem header Channel/channel_manager_messages.h, keeping
  * message.h free of Channel / network / notice / tombstone dependencies.
  * The change is purely additive to the enum; the 11 existing TIMER_*
- * and 11 MERIDIAN_CONN_* families are unchanged. As with the Meridian
+ * and 10 MERIDIAN_CONN_* families are unchanged. As with the Meridian
  * connection migration, all 11 channel-manager mutators route through
  * actor_send + actor_run synchronous drain so caller-side return values
  * (poseidon_channel_t* / int) remain available to the wrappers through
@@ -613,7 +611,7 @@ typedef struct message_t {
  * the per-subsystem header ClientAPIs/unix_connection_messages.h, keeping
  * message.h free of poll-dancer / platform-socket / client-session
  * dependencies. The change is purely additive to the enum; the 4 TIMER_*,
- * 11 MERIDIAN_CONN_*, and 11 POSEIDON_CHANNEL_MANAGER_* families are
+ * 10 MERIDIAN_CONN_*, and 11 POSEIDON_CHANNEL_MANAGER_* families are
  * unchanged. As with the prior two migrations, every connection-level
  * mutator (write, close, watcher-update, watcher-stop) routes through
  * actor_send on the per-connection actor or the listener actor, with
@@ -627,7 +625,7 @@ typedef struct message_t {
  * per-subsystem header ClientAPIs/tcp_connection_messages.h, keeping
  * message.h free of poll-dancer / platform-socket / client-session
  * dependencies. The change is purely additive to the enum; the 4 TIMER_*,
- * 11 MERIDIAN_CONN_*, 11 POSEIDON_CHANNEL_MANAGER_* and 8 POSEIDON_UNIX_*
+ * 10 MERIDIAN_CONN_*, 11 POSEIDON_CHANNEL_MANAGER_* and 8 POSEIDON_UNIX_*
  * families are unchanged. The TCP family mirrors the Unix one, with one
  * deliberate difference: READ replaces DATA, because a TLS connection's
  * SSL object may only be used from a single thread, so the connection
@@ -643,7 +641,7 @@ typedef struct message_t {
  * per-subsystem header ClientAPIs/ws_connection_messages.h, keeping
  * message.h free of poll-dancer / platform-socket / client-session
  * dependencies. The change is purely additive to the enum; the 4 TIMER_*,
- * 11 MERIDIAN_CONN_*, 11 POSEIDON_CHANNEL_MANAGER_*, 8 POSEIDON_UNIX_*
+ * 10 MERIDIAN_CONN_*, 11 POSEIDON_CHANNEL_MANAGER_*, 8 POSEIDON_UNIX_*
  * and 6 POSEIDON_TCP_* families are unchanged. The WebSocket family
  * mirrors the TCP one: READ replaces DATA because the connection actor
  * pulls the bytes off the socket itself, and every connection-level
@@ -657,7 +655,7 @@ typedef struct message_t {
  * per-subsystem header ClientAPIs/wt_connection_messages.h, keeping
  * message.h free of poll-dancer / platform-socket / client-session
  * dependencies. The change is purely additive to the enum; the 4
- * TIMER_*, 11 MERIDIAN_CONN_*, 11 POSEIDON_CHANNEL_MANAGER_*, 8
+ * TIMER_*, 10 MERIDIAN_CONN_*, 11 POSEIDON_CHANNEL_MANAGER_*, 8
  * POSEIDON_UNIX_*, 6 POSEIDON_TCP_* and 6 POSEIDON_WS_* families are
  * unchanged. The WebTransport family mirrors the TCP one, with one
  * deliberate difference: libwtf owns the I/O and hands the received
@@ -670,7 +668,7 @@ typedef struct message_t {
  * per-subsystem header ClientAPIs/quic_connection_messages.h, keeping
  * message.h free of poll-dancer / platform-socket / client-session
  * dependencies. The change is purely additive to the enum; the 4
- * TIMER_*, 11 MERIDIAN_CONN_*, 11 POSEIDON_CHANNEL_MANAGER_*, 8
+ * TIMER_*, 10 MERIDIAN_CONN_*, 11 POSEIDON_CHANNEL_MANAGER_*, 8
  * POSEIDON_UNIX_*, 6 POSEIDON_TCP_*, 6 POSEIDON_WS_* and 5 POSEIDON_WT_*
  * families are unchanged. The QUIC family mirrors the WebTransport one:
  * msquic owns the I/O and delivers the data through the transport's
@@ -693,7 +691,7 @@ typedef struct message_t {
  * Phase 2 (commit 2.16) adds the MERIDIAN_RELAY_* family (1 entry) above
  * the local-modifications block. The enum is still the global
  * message_type_e; the change is purely additive to the enum; the 4
- * TIMER_*, 11 MERIDIAN_CONN_*, 11 POSEIDON_CHANNEL_MANAGER_*, 8
+ * TIMER_*, 10 MERIDIAN_CONN_*, 11 POSEIDON_CHANNEL_MANAGER_*, 8
  * POSEIDON_UNIX_*, 6 POSEIDON_TCP_*, 6 POSEIDON_WS_*, 5 POSEIDON_WT_* and
  * 5 POSEIDON_QUIC_* families are unchanged. The relay family carries the
  * one piece of work the relay must not build on msquic's callback thread:
