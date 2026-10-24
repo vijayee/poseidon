@@ -720,12 +720,16 @@ rendv_uni_stream_callback(HQUIC Stream, void* Context,
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
         // The entry's actor hands the message to the owner.
         meridian_stream_entry_complete(entry);
+        /* The arm ends here. The next arm reads the send context, and
+         * this event never wrote one: msquic leaves the union as it
+         * found it, so the read would hand a stray pointer to free(). */
+        break;
     }
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
-        if (Event->SEND_COMPLETE.ClientContext != NULL) {
-            free(Event->SEND_COMPLETE.ClientContext);
-        }
+        // The send context holds the bytes and the buffer that pointed
+        // at them; both go back here.
+        meridian_stream_send_complete(Event->SEND_COMPLETE.ClientContext);
         break;
 
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
@@ -791,12 +795,16 @@ rendv_bidi_stream_callback(HQUIC Stream, void* Context,
             handle->msquic->StreamShutdown(
                 Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
         }
+        /* The arm ends here. The next arm reads the send context, and
+         * this event never wrote one: msquic leaves the union as it
+         * found it, so the read would hand a stray pointer to free(). */
+        break;
     }
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
-        if (Event->SEND_COMPLETE.ClientContext != NULL) {
-            free(Event->SEND_COMPLETE.ClientContext);
-        }
+        // The send context holds the bytes and the buffer that pointed
+        // at them; both go back here.
+        meridian_stream_send_complete(Event->SEND_COMPLETE.ClientContext);
         break;
 
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
