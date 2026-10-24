@@ -35,14 +35,20 @@ typedef struct relay_stream_context_t {
     int client_slot;                  /**< Index into server->clients[] */
 } relay_stream_context_t;
 
+/**
+ * Creates the context of one stream.
+ *
+ * The context is created before the entry and is the entry's owner
+ * context, so the handler that runs on the entry's actor knows the
+ * server and the client the stream belongs to.
+ */
 static relay_stream_context_t* relay_stream_context_create(
-    meridian_stream_entry_t* entry,
     meridian_relay_server_t* server,
     int client_slot) {
     relay_stream_context_t* ctx = (relay_stream_context_t*)
         get_clear_memory(sizeof(relay_stream_context_t));
     if (ctx == NULL) return NULL;
-    ctx->entry = entry;
+    ctx->entry = NULL;
     ctx->server = server;
     ctx->client_slot = client_slot;
     return ctx;
@@ -443,6 +449,305 @@ static int relay_server_remove_stream(meridian_relay_client_t* client,
 }
 
 // ============================================================================
+// STREAM MESSAGE HANDLING
+// ============================================================================
+//
+// The message is decoded on the stream entry's actor, not on the msquic
+// thread. The receive buffer belongs to the actor, so the bytes are
+// handed over to it and the whole message is read there. The relay
+// client answers its request the same way.
+
+/**
+ * Forwards a message that arrived on a unidirectional stream.
+ *
+ * Wire format: [4 bytes dest_endpoint_id BE] + [4 bytes src_endpoint_id BE] + [payload]
+ */
+static void relay_server_process_uni_message(meridian_relay_server_t* server,
+                                             int client_slot,
+                                             const uint8_t* data, size_t len) {
+    if (server == NULL) return;
+
+    // Need at least 8 bytes: 4 dest + 4 src
+    if (len < 8) {
+        log_warn("Relay: uni stream too short (%zu bytes), dropping", len);
+        platform_mutex_lock(server->clients_lock);
+        server->stats.datagrams_dropped++;
+        platform_mutex_unlock(server->clients_lock);
+        return;
+    }
+
+    // Parse header — network byte order to host
+    uint32_t dest_endpoint_id;
+    uint32_t src_endpoint_id;
+    memcpy(&dest_endpoint_id, data, sizeof(uint32_t));
+    memcpy(&src_endpoint_id, data + sizeof(uint32_t), sizeof(uint32_t));
+    dest_endpoint_id = ntohl(dest_endpoint_id);
+    src_endpoint_id = ntohl(src_endpoint_id);
+
+    // Look up the destination client. The connection is taken out from
+    // under the lock: an msquic call must never run while the lock is
+    // held, because msquic may answer it with a callback on this same
+    // thread, and that callback takes the lock. Upstream states the rule
+    // at liboffs/src/Network/quic_listener.c:225.
+    platform_mutex_lock(server->clients_lock);
+    int dest_slot = relay_server_find_client_by_endpoint(server, dest_endpoint_id);
+    HQUIC dest_connection =
+        (dest_slot >= 0) ? server->clients[dest_slot].connection : NULL;
+    platform_mutex_unlock(server->clients_lock);
+
+    bool forwarded = false;
+    if (dest_connection == NULL) {
+        log_debug("Relay: no client for endpoint %u, dropping forwarded message",
+                  dest_endpoint_id);
+    } else {
+        // Forward the full message (header + payload) via uni stream
+        forwarded = (meridian_stream_send_uni(server->msquic, dest_connection,
+                                              data, len, NULL) == 0);
+    }
+
+    platform_mutex_lock(server->clients_lock);
+    if (forwarded) {
+        server->stats.datagrams_forwarded++;
+        log_debug("Relay: forwarded uni stream to endpoint %u (from %u, %zu bytes)",
+                  dest_endpoint_id, src_endpoint_id, len);
+    } else {
+        server->stats.datagrams_dropped++;
+        log_warn("Relay: failed to forward uni stream to endpoint %u",
+                 dest_endpoint_id);
+    }
+    platform_mutex_unlock(server->clients_lock);
+}
+
+/**
+ * Answers the address request, or forwards the message to its
+ * destination.
+ *
+ * Wire format: [4 bytes dest_endpoint_id BE] + [CBOR payload]
+ *
+ * A dest of zero is the address request: the answer goes back on the
+ * same stream, with the address the relay saw the client at.
+ */
+static void relay_server_process_bidi_message(meridian_relay_server_t* server,
+                                               meridian_stream_entry_t* entry,
+                                               int client_slot,
+                                               const uint8_t* data, size_t len) {
+    if (server == NULL || entry == NULL) return;
+
+    // Need at least 4 bytes for dest_endpoint_id header
+    if (len < sizeof(uint32_t)) {
+        log_warn("Relay: bidi stream too short (%zu bytes), dropping", len);
+        platform_mutex_lock(server->clients_lock);
+        server->stats.datagrams_dropped++;
+        platform_mutex_unlock(server->clients_lock);
+        return;
+    }
+
+    // Parse dest_endpoint_id from header
+    uint32_t dest_endpoint_id;
+    memcpy(&dest_endpoint_id, data, sizeof(uint32_t));
+    dest_endpoint_id = ntohl(dest_endpoint_id);
+
+    if (dest_endpoint_id == 0) {
+        // ADDR_REQUEST: the client wants to discover its reflexive address.
+        platform_mutex_lock(server->clients_lock);
+        HQUIC connection = NULL;
+        uint32_t endpoint_id = 0;
+        if ((size_t)client_slot < MERIDIAN_RELAY_MAX_CLIENTS) {
+            connection = server->clients[client_slot].connection;
+            endpoint_id = server->clients[client_slot].endpoint_id;
+        }
+        platform_mutex_unlock(server->clients_lock);
+
+        if (connection == NULL) {
+            log_warn("Relay: ADDR_REQUEST from invalid client slot %d", client_slot);
+            platform_mutex_lock(server->clients_lock);
+            server->stats.datagrams_dropped++;
+            platform_mutex_unlock(server->clients_lock);
+            return;
+        }
+
+        // The address the relay sees the client at.
+        QUIC_ADDR remote_addr;
+        uint32_t addr_size = sizeof(remote_addr);
+        QUIC_STATUS addr_status = server->msquic->GetParam(
+            connection,
+            QUIC_PARAM_CONN_REMOTE_ADDRESS,
+            &addr_size,
+            &remote_addr);
+
+        if (QUIC_FAILED(addr_status)) {
+            log_warn("Relay: failed to get remote address for ADDR_RESPONSE");
+            platform_mutex_lock(server->clients_lock);
+            server->stats.datagrams_dropped++;
+            platform_mutex_unlock(server->clients_lock);
+            return;
+        }
+
+        // Parse the ADDR_REQUEST CBOR payload to extract query_id
+        const uint8_t* cbor_payload = data + sizeof(uint32_t);
+        size_t cbor_payload_len = len - sizeof(uint32_t);
+        uint64_t query_id = 0;
+
+        struct cbor_load_result cbor_result;
+        cbor_item_t* req_item = cbor_load(cbor_payload, cbor_payload_len, &cbor_result);
+        if (req_item != NULL && cbor_array_is_definite(req_item) &&
+            cbor_array_size(req_item) >= 3) {
+            cbor_item_t** items = cbor_array_handle(req_item);
+            uint64_t qid_1 = cbor_get_uint64(items[1]);
+            uint64_t qid_2 = cbor_get_uint64(items[2]);
+            query_id = (qid_1 << 32) | qid_2;
+        }
+        if (req_item != NULL) cbor_decref(&req_item);
+
+        // Build ADDR_RESPONSE CBOR array:
+        // [type, query_id_hi, query_id_lo, reflexive_addr, reflexive_port, endpoint_id]
+        meridian_addr_response_t addr_resp;
+        memset(&addr_resp, 0, sizeof(addr_resp));
+        addr_resp.type = MERIDIAN_PACKET_TYPE_ADDR_RESPONSE;
+        addr_resp.query_id = query_id;
+        addr_resp.reflexive_addr = remote_addr.Ipv4.sin_addr.s_addr;
+        addr_resp.reflexive_port = ntohs(remote_addr.Ipv4.sin_port);
+        addr_resp.endpoint_id = endpoint_id;
+
+        cbor_item_t* resp_cbor = meridian_addr_response_encode(&addr_resp);
+        if (resp_cbor == NULL) {
+            log_warn("Relay: failed to encode ADDR_RESPONSE");
+            platform_mutex_lock(server->clients_lock);
+            server->stats.datagrams_dropped++;
+            platform_mutex_unlock(server->clients_lock);
+            return;
+        }
+
+        unsigned char* cbor_buf = NULL;
+        size_t cbor_buf_sz = 0;
+        size_t cbor_len = cbor_serialize_alloc(resp_cbor, &cbor_buf, &cbor_buf_sz);
+        cbor_decref(&resp_cbor);
+
+        if (cbor_len == 0 || cbor_buf == NULL) {
+            log_warn("Relay: failed to serialize ADDR_RESPONSE");
+            platform_mutex_lock(server->clients_lock);
+            server->stats.datagrams_dropped++;
+            platform_mutex_unlock(server->clients_lock);
+            return;
+        }
+
+        // Wire format: [4 bytes dest=0 BE] + [CBOR ADDR_RESPONSE]
+        size_t response_len = 4 + cbor_len;
+        uint8_t* send_buf = (uint8_t*)get_memory(response_len);
+        if (send_buf == NULL) {
+            log_warn("Relay: failed to allocate ADDR_RESPONSE send buffer");
+            free(cbor_buf);
+            platform_mutex_lock(server->clients_lock);
+            server->stats.datagrams_dropped++;
+            platform_mutex_unlock(server->clients_lock);
+            return;
+        }
+
+        // dest_endpoint_id = 0 in big-endian
+        memset(send_buf, 0, sizeof(uint32_t));
+        memcpy(send_buf + 4, cbor_buf, cbor_len);
+        free(cbor_buf);
+
+        /* The send context keeps the bytes and the buffer that points at
+         * them alive until the SEND_COMPLETE event. */
+        bool sent = (meridian_stream_send(server->msquic, entry->stream,
+                                           send_buf, response_len,
+                                           QUIC_SEND_FLAG_FIN) == 0);
+        free(send_buf);
+
+        platform_mutex_lock(server->clients_lock);
+        if (!sent) {
+            log_warn("Relay: failed to send ADDR_RESPONSE");
+            server->stats.datagrams_dropped++;
+        } else {
+            server->stats.addr_requests_served++;
+            log_debug("Relay: sent ADDR_RESPONSE to endpoint %u", endpoint_id);
+        }
+        platform_mutex_unlock(server->clients_lock);
+    } else {
+        // Forward to destination client via uni stream.
+        // Bidi wire format: [4B dest BE] + [payload]
+        // Uni wire format: [4B dest BE] + [4B src BE] + [payload]
+        // Need to insert the source endpoint_id before forwarding.
+        platform_mutex_lock(server->clients_lock);
+        int dest_slot = relay_server_find_client_by_endpoint(server, dest_endpoint_id);
+        HQUIC dest_connection =
+            (dest_slot >= 0) ? server->clients[dest_slot].connection : NULL;
+        uint32_t src_endpoint_id = 0;
+        if ((size_t)client_slot < MERIDIAN_RELAY_MAX_CLIENTS) {
+            src_endpoint_id = server->clients[client_slot].endpoint_id;
+        }
+        platform_mutex_unlock(server->clients_lock);
+
+        if (dest_connection == NULL) {
+            log_debug("Relay: no client for endpoint %u, dropping bidi forward",
+                      dest_endpoint_id);
+            platform_mutex_lock(server->clients_lock);
+            server->stats.datagrams_dropped++;
+            platform_mutex_unlock(server->clients_lock);
+            return;
+        }
+
+        // Rebuild with 8-byte header: [4B dest BE] + [4B src BE] + [payload]
+        size_t fwd_len = 8 + (len - 4);
+        uint8_t* fwd_buf = (uint8_t*)get_memory(fwd_len);
+        if (fwd_buf == NULL) {
+            platform_mutex_lock(server->clients_lock);
+            server->stats.datagrams_dropped++;
+            platform_mutex_unlock(server->clients_lock);
+            return;
+        }
+
+        // Copy dest header (first 4 bytes)
+        memcpy(fwd_buf, data, 4);
+        // Insert src endpoint_id in big-endian
+        uint32_t src_be = htonl(src_endpoint_id);
+        memcpy(fwd_buf + 4, &src_be, sizeof(uint32_t));
+        // Copy payload after original 4-byte header
+        memcpy(fwd_buf + 8, data + 4, len - 4);
+
+        int result = meridian_stream_send_uni(server->msquic, dest_connection,
+                                               fwd_buf, fwd_len, NULL);
+        free(fwd_buf);
+
+        platform_mutex_lock(server->clients_lock);
+        if (result == 0) {
+            server->stats.datagrams_forwarded++;
+            log_debug("Relay: forwarded bidi stream to endpoint %u (from %u, %zu bytes)",
+                      dest_endpoint_id, src_endpoint_id, fwd_len);
+        } else {
+            server->stats.datagrams_dropped++;
+            log_warn("Relay: failed to forward bidi stream to endpoint %u",
+                     dest_endpoint_id);
+        }
+        platform_mutex_unlock(server->clients_lock);
+    }
+}
+
+/**
+ * The owner handler for a completed stream message.
+ *
+ * It runs on the stream entry's actor: the receive buffer is the
+ * actor's, and the message is decoded there rather than on msquic's
+ * worker.
+ */
+static void relay_server_stream_message(void* ctx, meridian_stream_entry_t* entry,
+                                         const uint8_t* data, size_t len) {
+    relay_stream_context_t* stream_ctx = (relay_stream_context_t*)ctx;
+    if (stream_ctx == NULL) return;
+
+    meridian_relay_server_t* server = stream_ctx->server;
+    int client_slot = stream_ctx->client_slot;
+    if (server == NULL || client_slot < 0) return;
+
+    if (entry != NULL && entry->is_bidi) {
+        relay_server_process_bidi_message(server, entry, client_slot, data, len);
+    } else {
+        relay_server_process_uni_message(server, client_slot, data, len);
+    }
+}
+
+// ============================================================================
 // STREAM CALLBACKS
 // ============================================================================
 
@@ -488,53 +793,10 @@ RelayServerUniStreamCallback(HQUIC Stream, void* Context,
     }
 
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
-        if (entry == NULL || server == NULL) break;
-
-        // Need at least 8 bytes: 4 dest + 4 src
-        if (entry->recv_len < 8) {
-            log_warn("Relay: uni stream too short (%zu bytes), dropping",
-                     entry->recv_len);
-            server->stats.datagrams_dropped++;
-            break;
-        }
-
-        // Parse header — network byte order to host
-        uint32_t dest_endpoint_id;
-        uint32_t src_endpoint_id;
-        memcpy(&dest_endpoint_id, entry->recv_buf, sizeof(uint32_t));
-        memcpy(&src_endpoint_id, entry->recv_buf + sizeof(uint32_t), sizeof(uint32_t));
-        dest_endpoint_id = ntohl(dest_endpoint_id);
-        src_endpoint_id = ntohl(src_endpoint_id);
-
-        // Look up destination client
-        platform_mutex_lock(server->clients_lock);
-        int dest_slot = relay_server_find_client_by_endpoint(server, dest_endpoint_id);
-
-        if (dest_slot < 0 || server->clients[dest_slot].connection == NULL) {
-            log_debug("Relay: no client for endpoint %u, dropping forwarded message",
-                      dest_endpoint_id);
-            server->stats.datagrams_dropped++;
-            platform_mutex_unlock(server->clients_lock);
-            break;
-        }
-
-        HQUIC dest_connection = server->clients[dest_slot].connection;
-
-        // Forward the full message (header + payload) via uni stream
-        int result = meridian_stream_send_uni(server->msquic, dest_connection,
-                                               entry->recv_buf, entry->recv_len,
-                                               NULL);
-        if (result == 0) {
-            server->stats.datagrams_forwarded++;
-            log_debug("Relay: forwarded uni stream to endpoint %u (from %u, %zu bytes)",
-                      dest_endpoint_id, src_endpoint_id, entry->recv_len);
-        } else {
-            server->stats.datagrams_dropped++;
-            log_warn("Relay: failed to forward uni stream to endpoint %u",
-                     dest_endpoint_id);
-        }
-
-        platform_mutex_unlock(server->clients_lock);
+        /* The receive buffer belongs to the entry's actor: the message
+         * is handed over there and decoded on that thread, not read
+         * here. The relay client answers its request the same way. */
+        meridian_stream_entry_complete(entry);
         break;
     }
 
@@ -623,178 +885,10 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
     }
 
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN: {
-        if (entry == NULL || server == NULL || client_slot < 0) break;
-
-        // Need at least 4 bytes for dest_endpoint_id header
-        if (entry->recv_len < sizeof(uint32_t)) {
-            log_warn("Relay: bidi stream too short (%zu bytes), dropping",
-                     entry->recv_len);
-            server->stats.datagrams_dropped++;
-            break;
-        }
-
-        // Parse dest_endpoint_id from header
-        uint32_t dest_endpoint_id;
-        memcpy(&dest_endpoint_id, entry->recv_buf, sizeof(uint32_t));
-        dest_endpoint_id = ntohl(dest_endpoint_id);
-
-        if (dest_endpoint_id == 0) {
-            // ADDR_REQUEST: Client wants to discover its reflexive address.
-            platform_mutex_lock(server->clients_lock);
-
-            if ((size_t)client_slot >= MERIDIAN_RELAY_MAX_CLIENTS ||
-                server->clients[client_slot].connection == NULL) {
-                log_warn("Relay: ADDR_REQUEST from invalid client slot %d", client_slot);
-                server->stats.datagrams_dropped++;
-                platform_mutex_unlock(server->clients_lock);
-                break;
-            }
-
-            // Get the source client's reflexive address from their connection
-            QUIC_ADDR remote_addr;
-            uint32_t addr_size = sizeof(remote_addr);
-            QUIC_STATUS addr_status = server->msquic->GetParam(
-                server->clients[client_slot].connection,
-                QUIC_PARAM_CONN_REMOTE_ADDRESS,
-                &addr_size,
-                &remote_addr);
-
-            if (QUIC_FAILED(addr_status)) {
-                log_warn("Relay: failed to get remote address for ADDR_RESPONSE");
-                server->stats.datagrams_dropped++;
-                platform_mutex_unlock(server->clients_lock);
-                break;
-            }
-
-            // Parse the ADDR_REQUEST CBOR payload to extract query_id
-            const uint8_t* cbor_payload = entry->recv_buf + sizeof(uint32_t);
-            size_t cbor_payload_len = entry->recv_len - sizeof(uint32_t);
-            uint64_t query_id = 0;
-
-            struct cbor_load_result cbor_result;
-            cbor_item_t* req_item = cbor_load(cbor_payload, cbor_payload_len, &cbor_result);
-            if (req_item != NULL && cbor_array_is_definite(req_item) &&
-                cbor_array_size(req_item) >= 3) {
-                cbor_item_t** items = cbor_array_handle(req_item);
-                uint64_t qid_1 = cbor_get_uint64(items[1]);
-                uint64_t qid_2 = cbor_get_uint64(items[2]);
-                query_id = (qid_1 << 32) | qid_2;
-            }
-            if (req_item != NULL) cbor_decref(&req_item);
-            // Build ADDR_RESPONSE CBOR array:
-            // [type, query_id_hi, query_id_lo, reflexive_addr, reflexive_port, endpoint_id]
-            meridian_addr_response_t addr_resp;
-            addr_resp.type = MERIDIAN_PACKET_TYPE_ADDR_RESPONSE;
-            addr_resp.query_id = query_id;
-            addr_resp.reflexive_addr = remote_addr.Ipv4.sin_addr.s_addr;
-            addr_resp.reflexive_port = ntohs(remote_addr.Ipv4.sin_port);
-            addr_resp.endpoint_id = server->clients[client_slot].endpoint_id;
-
-            cbor_item_t* resp_cbor = meridian_addr_response_encode(&addr_resp);
-            if (resp_cbor == NULL) {
-                log_warn("Relay: failed to encode ADDR_RESPONSE");
-                server->stats.datagrams_dropped++;
-                platform_mutex_unlock(server->clients_lock);
-                break;
-            }
-
-            unsigned char* cbor_buf = NULL;
-            size_t cbor_buf_sz = 0;
-            size_t cbor_len = cbor_serialize_alloc(resp_cbor, &cbor_buf, &cbor_buf_sz);
-            cbor_decref(&resp_cbor);
-
-            if (cbor_len == 0 || cbor_buf == NULL) {
-                log_warn("Relay: failed to serialize ADDR_RESPONSE");
-                server->stats.datagrams_dropped++;
-                platform_mutex_unlock(server->clients_lock);
-                break;
-            }
-
-            // Wire format: [4 bytes dest=0 BE] + [CBOR ADDR_RESPONSE]
-            size_t response_len = 4 + cbor_len;
-            uint8_t* send_buf = (uint8_t*)get_memory(response_len);
-            if (send_buf == NULL) {
-                log_warn("Relay: failed to allocate ADDR_RESPONSE send buffer");
-                free(cbor_buf);
-                server->stats.datagrams_dropped++;
-                platform_mutex_unlock(server->clients_lock);
-                break;
-            }
-
-            // dest_endpoint_id = 0 in big-endian
-            memset(send_buf, 0, sizeof(uint32_t));
-            memcpy(send_buf + 4, cbor_buf, cbor_len);
-            free(cbor_buf);
-
-            /* The send context keeps the bytes and the buffer that points at
-             * them alive until the SEND_COMPLETE event. */
-            bool sent = (meridian_stream_send(server->msquic, entry->stream,
-                                               send_buf, response_len,
-                                               QUIC_SEND_FLAG_FIN) == 0);
-            free(send_buf);
-
-            if (!sent) {
-                log_warn("Relay: failed to send ADDR_RESPONSE");
-                server->stats.datagrams_dropped++;
-            } else {
-                server->stats.addr_requests_served++;
-                log_debug("Relay: sent ADDR_RESPONSE to endpoint %u",
-                          server->clients[client_slot].endpoint_id);
-            }
-
-            platform_mutex_unlock(server->clients_lock);
-        } else {
-            // Forward to destination client via uni stream.
-            // Bidi wire format: [4B dest BE] + [payload]
-            // Uni wire format: [4B dest BE] + [4B src BE] + [payload]
-            // Need to insert the source endpoint_id before forwarding.
-            platform_mutex_lock(server->clients_lock);
-            int dest_slot = relay_server_find_client_by_endpoint(server, dest_endpoint_id);
-
-            if (dest_slot < 0 || server->clients[dest_slot].connection == NULL) {
-                log_debug("Relay: no client for endpoint %u, dropping bidi forward",
-                          dest_endpoint_id);
-                server->stats.datagrams_dropped++;
-                platform_mutex_unlock(server->clients_lock);
-                break;
-            }
-
-            HQUIC dest_connection = server->clients[dest_slot].connection;
-            uint32_t src_endpoint_id = server->clients[client_slot].endpoint_id;
-
-            // Rebuild with 8-byte header: [4B dest BE] + [4B src BE] + [payload]
-            size_t fwd_len = 8 + (entry->recv_len - 4);
-            uint8_t* fwd_buf = (uint8_t*)get_memory(fwd_len);
-            if (fwd_buf == NULL) {
-                server->stats.datagrams_dropped++;
-                platform_mutex_unlock(server->clients_lock);
-                break;
-            }
-
-            // Copy dest header (first 4 bytes)
-            memcpy(fwd_buf, entry->recv_buf, 4);
-            // Insert src endpoint_id in big-endian
-            uint32_t src_be = htonl(src_endpoint_id);
-            memcpy(fwd_buf + 4, &src_be, sizeof(uint32_t));
-            // Copy payload after original 4-byte header
-            memcpy(fwd_buf + 8, entry->recv_buf + 4, entry->recv_len - 4);
-
-            int result = meridian_stream_send_uni(server->msquic, dest_connection,
-                                                   fwd_buf, fwd_len, NULL);
-            free(fwd_buf);
-
-            if (result == 0) {
-                server->stats.datagrams_forwarded++;
-                log_debug("Relay: forwarded bidi stream to endpoint %u (from %u, %zu bytes)",
-                          dest_endpoint_id, src_endpoint_id, fwd_len);
-            } else {
-                server->stats.datagrams_dropped++;
-                log_warn("Relay: failed to forward bidi stream to endpoint %u",
-                         dest_endpoint_id);
-            }
-
-            platform_mutex_unlock(server->clients_lock);
-        }
+        /* The receive buffer belongs to the entry's actor: the message
+         * is handed over there and decoded on that thread, not read
+         * here. The relay client answers its request the same way. */
+        meridian_stream_entry_complete(entry);
         break;
     }
 
@@ -960,26 +1054,29 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
             return QUIC_STATUS_SUCCESS;
         }
 
-        // Create stream entry to accumulate received data
-        meridian_stream_entry_t* entry = meridian_stream_entry_create(
-            Stream, is_bidi, NULL, server->pool);
+        /* The context comes first: it is the entry's owner context, so
+         * the handler that runs on the entry's actor knows the server
+         * and the client the stream belongs to. The slot must not move
+         * while the stream is registered on it, so the registration
+         * happens under the lock. */
+        relay_stream_context_t* stream_ctx = relay_stream_context_create(server, slot);
+        meridian_stream_entry_t* entry = (stream_ctx != NULL)
+            ? meridian_stream_entry_create(Stream, is_bidi, stream_ctx, server->pool)
+            : NULL;
         if (entry == NULL) {
+            if (stream_ctx != NULL) {
+                relay_stream_context_destroy(stream_ctx);
+            }
             platform_mutex_unlock(server->clients_lock);
             log_warn("Relay: failed to create stream entry, rejecting stream");
             server->msquic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0);
             return QUIC_STATUS_SUCCESS;
         }
+        stream_ctx->entry = entry;
 
-        // Create relay stream context with server pointer and client slot
-        relay_stream_context_t* stream_ctx = relay_stream_context_create(
-            entry, server, slot);
-        if (stream_ctx == NULL) {
-            meridian_stream_entry_destroy(entry);
-            platform_mutex_unlock(server->clients_lock);
-            log_warn("Relay: failed to create stream context, rejecting stream");
-            server->msquic->StreamShutdown(Stream, QUIC_STREAM_SHUTDOWN_FLAG_ABORT, 0);
-            return QUIC_STATUS_SUCCESS;
-        }
+        /* The entry owns the receive buffer, and its actor decodes the
+         * message when the peer is done sending. */
+        meridian_stream_entry_on_message(entry, relay_server_stream_message);
 
         // Set appropriate callback with stream context
         if (is_bidi) {
@@ -992,11 +1089,11 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
 
         // Add to client's active streams
         relay_server_add_stream(&server->clients[slot], entry);
+        uint32_t endpoint_id = server->clients[slot].endpoint_id;
         platform_mutex_unlock(server->clients_lock);
 
         log_debug("Relay: %s stream started on connection (endpoint %u)",
-                  is_bidi ? "bidi" : "uni",
-                  server->clients[slot].endpoint_id);
+                  is_bidi ? "bidi" : "uni", endpoint_id);
         return QUIC_STATUS_SUCCESS;
     }
 
