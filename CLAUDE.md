@@ -2058,3 +2058,58 @@ the classification.
 ### Build
 
 Green, 25/25 ctest.
+
+## Phase 2 (2.34) — the conn actor's dispatch has no gap left
+
+The Meridian connection's actor declared eleven message types and
+handled seven: `MERIDIAN_CONN_DIRECT_CONNECTED`,
+`MERIDIAN_CONN_RELAY_CONNECTED`, `MERIDIAN_CONN_PATH_FAILED` and
+`MERIDIAN_CONN_DESTROY` fell to `default: no-op`. The last list of
+unfinished actor work.
+
+### The three path events
+
+They are the msquic-callback wiring — the callback that opens the
+direct path, the one that brings the relay path up, the one that reports
+a failed path — and the state moves on the actor's thread, the rule
+upstream keeps in `conn_state.c`. Upstream declares the same three
+events (`CONN_STATE_DIRECT_CONNECTED`, `CONN_STATE_DIRECT_FAILED`,
+`CONN_STATE_TRY_DIRECT`) and handles them in its dispatch, so the
+vocabulary is upstream's; only the producers are missing, and they come
+with the direct path.
+
+The transitions are upstream's, rule for rule
+(`liboffs/src/Network/conn_state.c`):
+
+- the direct path came up → the state is `DIRECT` and the direct path
+  is active (`conn_state_on_direct_connected`);
+- the relay path came up → the relay path is active, and the state does
+  not move: the relay is the fallback while the direct attempt is still
+  the preferred path;
+- a path failed → a relay-only connection does not change (it never had
+  a direct path to lose) and every other connection falls back to the
+  relay, with the direct path no longer active
+  (`conn_state_on_direct_failed`).
+
+### The destroy event goes
+
+`MERIDIAN_CONN_DESTROY` was declared as "tear down the connection and
+free the actor, refcount==0 path only". An actor **embedded by value**
+in the object it serves cannot be freed from its own dispatch: the
+worker returns from `actor_run` into memory the dispatch would have
+freed. Upstream has no destroy event either — its vocabulary is the
+*close* event, which poseidon has as `MERIDIAN_CONN_DISCONNECT` — and
+every other actor in poseidon is destroyed by a direct call.
+
+So the type is gone, and the family is ten types.
+
+### Tests
+
+`tests/meridian_conn_test.cpp` drives the three events through the
+actor's mailbox and asserts the transitions: the direct path up, the
+relay path up, a failure falling back to the relay, and a failure
+leaving a relay-only connection alone.
+
+### Build
+
+Green, 25/25 ctest.
