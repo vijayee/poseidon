@@ -1,6 +1,10 @@
 #include <gtest/gtest.h>
 #include "Network/Meridian/meridian_rendv.h"
 
+extern "C" {
+#include "Scheduler/scheduler.h"
+}
+
 class NatDetectTest : public ::testing::Test {
 protected:
     void SetUp() override {}
@@ -123,6 +127,40 @@ TEST_F(NatDetectTest, ClassifyTwoRelaysDisagreeIsSymmetric) {
     // destination — also a symmetric NAT.
     EXPECT_EQ(MERIDIAN_NAT_TYPE_SYMMETRIC,
               meridian_rendv_classify_nat(LOCAL, RELAY_A, 1234, true, RELAY_A, 5678, true));
+}
+
+// The node's own NAT type starts as a cone NAT, the way upstream starts
+// it before the detection has answered
+// (liboffs/src/Network/network.c:359): only a symmetric NAT forbids a
+// direct attempt. A peer point keeps the unknown default — the peer's
+// type is not known until the peer says so
+// (liboffs/src/Network/peer_connection.c:33).
+TEST_F(NatDetectTest, TheLocalPointDefaultsToAConeNat) {
+    scheduler_pool_t* sched = scheduler_pool_create(1);
+    ASSERT_NE(nullptr, sched);
+    scheduler_pool_start(sched);
+
+    meridian_rendv_handle_t* handle = meridian_rendv_handle_create(sched);
+    ASSERT_NE(nullptr, handle);
+
+    meridian_rendv_t* local = meridian_rendv_create(0xC0A80001, 8080);
+    ASSERT_NE(nullptr, local);
+    ASSERT_EQ(0, meridian_rendv_handle_set_local(handle, local));
+
+    EXPECT_EQ(MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE,
+              meridian_rendv_get_nat_type(local));
+    EXPECT_TRUE(meridian_rendv_can_direct_connect(local));
+
+    meridian_rendv_t* peer = meridian_rendv_create(0x0A000001, 9090);
+    ASSERT_NE(nullptr, peer);
+    EXPECT_EQ(MERIDIAN_NAT_TYPE_UNKNOWN, meridian_rendv_get_nat_type(peer));
+    EXPECT_FALSE(meridian_rendv_can_direct_connect(peer));
+
+    meridian_rendv_destroy(peer);
+    meridian_rendv_handle_destroy(handle);
+    meridian_rendv_destroy(local);
+    scheduler_pool_stop(sched);
+    scheduler_pool_destroy(sched);
 }
 
 int main(int argc, char** argv) {
