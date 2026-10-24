@@ -254,11 +254,22 @@ TEST_F(RelayTest, ClientConnectsToTheRelayServer) {
     }
     ASSERT_TRUE(connected) << "the client never connected to the relay server";
 
-    // TODO: the address response is an event to the handle's actor, and
-    // this is where the test waits for it. The client's bidi stream never
-    // reaches the server, so the response never comes back: the
-    // connection works, the request does not. The wait goes here when
-    // the stream does.
+    // The address response is an event to the handle's actor, and the
+    // actor records the address the relay saw. The wait is the test's:
+    // the answer comes back on the relay's own thread.
+    uint32_t reflexive_addr = 0;
+    for (int i = 0; i < 200 && reflexive_addr == 0; i++) {
+        reflexive_addr = meridian_rendv_get_reflexive_addr(rendv);
+        if (reflexive_addr == 0) usleep(25 * 1000);
+    }
+
+    ASSERT_NE(0u, reflexive_addr) << "the relay never answered the address request";
+    // The relay saw the client on the loopback, so that is the address
+    // it reports back.
+    EXPECT_EQ(loopback, reflexive_addr);
+    EXPECT_NE(0, meridian_rendv_get_reflexive_port(rendv));
+    // The server gave the client an endpoint id, and the client keeps it.
+    EXPECT_NE(0u, meridian_relay_get_endpoint_id(client));
 
     meridian_relay_destroy(client);
     meridian_rendv_handle_destroy(handle);
