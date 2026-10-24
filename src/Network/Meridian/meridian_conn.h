@@ -12,6 +12,7 @@
 #include "../../RefCounter/refcounter.h"
 #include "../../Platform/platform_thread.h"
 #include "../../Actor/actor.h"
+#include "../../Util/atomic_compat.h"
 #include "msquic.h"
 #include "meridian_stream.h"
 
@@ -80,7 +81,11 @@ typedef struct meridian_conn_t {
     HQUIC direct_connection;             /**< Direct QUIC connection (NULL if relay-only) */
     struct meridian_relay_t* relay;      /**< Relay client (NULL if direct-only) */
     uint32_t relay_endpoint_id;          /**< Peer's relay endpoint ID (0 if unknown) */
-    meridian_conn_state_t state;         /**< Current connection state */
+    /* The state is written by the conn's actor and read by the
+     * application through the accessors below, so it is atomic: a plain
+     * field would be a data race, and the compiler may hoist a plain
+     * load out of a polling loop. */
+    ATOMIC(meridian_conn_state_t) state; /**< Current connection state */
     meridian_conn_path_t direct_path;    /**< Direct path info */
     meridian_conn_path_t relay_path;     /**< Relay path info */
     meridian_nat_type_t local_nat_type;  /**< Our NAT type */
@@ -205,7 +210,7 @@ void meridian_conn_set_peer_reflexive(meridian_conn_t* conn, uint32_t addr, uint
  * @param conn  Connection to query
  * @return      Current state enum value
  */
-meridian_conn_state_t meridian_conn_get_state(const meridian_conn_t* conn);
+meridian_conn_state_t meridian_conn_get_state(meridian_conn_t* conn);
 
 /**
  * Checks if using a direct path.
@@ -213,7 +218,7 @@ meridian_conn_state_t meridian_conn_get_state(const meridian_conn_t* conn);
  * @param conn  Connection to check
  * @return      True if direct path is active
  */
-bool meridian_conn_is_direct(const meridian_conn_t* conn);
+bool meridian_conn_is_direct(meridian_conn_t* conn);
 
 /**
  * Checks if using a relay path.
@@ -221,7 +226,7 @@ bool meridian_conn_is_direct(const meridian_conn_t* conn);
  * @param conn  Connection to check
  * @return      True if relay path is active
  */
-bool meridian_conn_is_relay(const meridian_conn_t* conn);
+bool meridian_conn_is_relay(meridian_conn_t* conn);
 
 // ============================================================================
 // TEST HELPERS

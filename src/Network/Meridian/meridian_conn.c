@@ -52,7 +52,7 @@ meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_rel
     conn->direct_connection = NULL;
     conn->relay = relay;
     conn->relay_endpoint_id = MERIDIAN_RELAY_ENDPOINT_ID_NONE;
-    conn->state = MERIDIAN_CONN_STATE_RELAY;
+    ATOMIC_STORE(&conn->state, MERIDIAN_CONN_STATE_RELAY);
     conn->local_nat_type = local_nat_type;
     conn->peer_nat_type = MERIDIAN_NAT_TYPE_UNKNOWN;
     conn->direct_attempts = 0;
@@ -72,12 +72,12 @@ meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_rel
 
     // Determine initial state based on local NAT type
     if (local_nat_type == MERIDIAN_NAT_TYPE_SYMMETRIC) {
-        conn->state = MERIDIAN_CONN_STATE_RELAY_ONLY;
+        ATOMIC_STORE(&conn->state, MERIDIAN_CONN_STATE_RELAY_ONLY);
     } else if (peer->addr != 0 && peer->port != 0) {
         // We know the peer's address — try direct first
-        conn->state = MERIDIAN_CONN_STATE_TRYING_DIRECT;
+        ATOMIC_STORE(&conn->state, MERIDIAN_CONN_STATE_TRYING_DIRECT);
     } else {
-        conn->state = MERIDIAN_CONN_STATE_RELAY;
+        ATOMIC_STORE(&conn->state, MERIDIAN_CONN_STATE_RELAY);
     }
 
     // Wire the actor mailbox. NULL pool = caller-thread dispatch (registry skipped).
@@ -263,7 +263,7 @@ static void meridian_conn_handle_disconnect(meridian_conn_t* conn) {
 
     conn->direct_path.active = false;
     conn->relay_path.active = false;
-    conn->state = MERIDIAN_CONN_STATE_RELAY;
+    ATOMIC_STORE(&conn->state, MERIDIAN_CONN_STATE_RELAY);
 }
 
 void meridian_conn_disconnect(meridian_conn_t* conn) {
@@ -407,7 +407,7 @@ static void meridian_conn_handle_set_peer_nat_type(meridian_conn_t* conn,
     // If peer has symmetric NAT, downgrade to relay-only
     if (type == MERIDIAN_NAT_TYPE_SYMMETRIC) {
         conn->direct_path.active = false;
-        conn->state = MERIDIAN_CONN_STATE_RELAY_ONLY;
+        ATOMIC_STORE(&conn->state, MERIDIAN_CONN_STATE_RELAY_ONLY);
     }
 }
 
@@ -505,8 +505,8 @@ static void meridian_conn_handle_upgrade_to_direct(meridian_conn_t* conn,
     assert(result != NULL);
 
     /* Only upgrade from RELAY state. */
-    if (conn->state != MERIDIAN_CONN_STATE_RELAY) {
-        *result = (conn->state == MERIDIAN_CONN_STATE_DIRECT) ? 0 : -1;
+    if (ATOMIC_LOAD(&conn->state) != MERIDIAN_CONN_STATE_RELAY) {
+        *result = (ATOMIC_LOAD(&conn->state) == MERIDIAN_CONN_STATE_DIRECT) ? 0 : -1;
         return;
     }
 
@@ -523,7 +523,7 @@ static void meridian_conn_handle_upgrade_to_direct(meridian_conn_t* conn,
         return;
     }
 
-    conn->state = MERIDIAN_CONN_STATE_TRYING_DIRECT;
+    ATOMIC_STORE(&conn->state, MERIDIAN_CONN_STATE_TRYING_DIRECT);
     conn->direct_attempts++;
     conn->last_direct_attempt_ms = 0;
     *result = 0;
@@ -550,7 +550,7 @@ static void meridian_conn_handle_connect(meridian_conn_t* conn, int* result) {
     assert(conn != NULL);
     assert(result != NULL);
 
-    switch (conn->state) {
+    switch (ATOMIC_LOAD(&conn->state)) {
         case MERIDIAN_CONN_STATE_RELAY_ONLY:
             // Symmetric NAT — only use relay
             if (conn->relay != NULL) {
@@ -571,7 +571,7 @@ static void meridian_conn_handle_connect(meridian_conn_t* conn, int* result) {
                 }
             } else {
                 // No address — fall back to relay
-                conn->state = MERIDIAN_CONN_STATE_RELAY;
+                ATOMIC_STORE(&conn->state, MERIDIAN_CONN_STATE_RELAY);
                 if (conn->relay != NULL) {
                     conn->relay_path.active = true;
                 }
@@ -604,7 +604,7 @@ static void meridian_conn_handle_connect(meridian_conn_t* conn, int* result) {
 static void meridian_conn_handle_test_force_state(meridian_conn_t* conn,
                                                   meridian_conn_state_t force_state) {
     assert(conn != NULL);
-    conn->state = force_state;
+    ATOMIC_STORE(&conn->state, force_state);
 }
 
 // ============================================================================
@@ -654,18 +654,19 @@ void meridian_conn_test_force_state(meridian_conn_t* conn, meridian_conn_state_t
 // STATE QUERIES
 // ============================================================================
 
-meridian_conn_state_t meridian_conn_get_state(const meridian_conn_t* conn) {
+meridian_conn_state_t meridian_conn_get_state(meridian_conn_t* conn) {
     if (conn == NULL) return MERIDIAN_CONN_STATE_RELAY;
-    return conn->state;
+    return ATOMIC_LOAD(&conn->state);
 }
 
-bool meridian_conn_is_direct(const meridian_conn_t* conn) {
+bool meridian_conn_is_direct(meridian_conn_t* conn) {
     if (conn == NULL) return false;
-    return conn->state == MERIDIAN_CONN_STATE_DIRECT;
+    return ATOMIC_LOAD(&conn->state) == MERIDIAN_CONN_STATE_DIRECT;
 }
 
-bool meridian_conn_is_relay(const meridian_conn_t* conn) {
+bool meridian_conn_is_relay(meridian_conn_t* conn) {
     if (conn == NULL) return false;
-    return conn->state == MERIDIAN_CONN_STATE_RELAY ||
-           conn->state == MERIDIAN_CONN_STATE_RELAY_ONLY;
+    meridian_conn_state_t state = ATOMIC_LOAD(&conn->state);
+    return state == MERIDIAN_CONN_STATE_RELAY ||
+           state == MERIDIAN_CONN_STATE_RELAY_ONLY;
 }

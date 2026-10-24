@@ -37,7 +37,7 @@ meridian_rendv_t* meridian_rendv_create(uint32_t addr, uint16_t port) {
 
     rendv->addr = addr;
     rendv->port = port;
-    rendv->nat_type = MERIDIAN_NAT_TYPE_UNKNOWN;
+    ATOMIC_STORE(&rendv->nat_type, MERIDIAN_NAT_TYPE_UNKNOWN);
     rendv->is_active = false;
 
     refcounter_init(&rendv->refcounter);
@@ -67,7 +67,7 @@ void meridian_rendv_destroy(meridian_rendv_t* rendv) {
  */
 int meridian_rendv_set_nat_type(meridian_rendv_t* rendv, meridian_nat_type_t type) {
     if (rendv == NULL) return -1;
-    rendv->nat_type = type;
+    ATOMIC_STORE(&rendv->nat_type, type);
     return 0;
 }
 
@@ -77,28 +77,28 @@ int meridian_rendv_set_nat_type(meridian_rendv_t* rendv, meridian_nat_type_t typ
  * @param rendv  Rendezvous to query
  * @return       NAT type, or UNKNOWN if rendv is NULL
  */
-meridian_nat_type_t meridian_rendv_get_nat_type(const meridian_rendv_t* rendv) {
-    return rendv ? rendv->nat_type : MERIDIAN_NAT_TYPE_UNKNOWN;
+meridian_nat_type_t meridian_rendv_get_nat_type(meridian_rendv_t* rendv) {
+    return rendv ? ATOMIC_LOAD(&rendv->nat_type) : MERIDIAN_NAT_TYPE_UNKNOWN;
 }
 
-uint32_t meridian_rendv_get_reflexive_addr(const meridian_rendv_t* rendv) {
-    return rendv ? rendv->reflexive_addr : 0;
+uint32_t meridian_rendv_get_reflexive_addr(meridian_rendv_t* rendv) {
+    return rendv ? ATOMIC_LOAD(&rendv->reflexive_addr) : 0;
 }
 
-uint16_t meridian_rendv_get_reflexive_port(const meridian_rendv_t* rendv) {
-    return rendv ? rendv->reflexive_port : 0;
+uint16_t meridian_rendv_get_reflexive_port(meridian_rendv_t* rendv) {
+    return rendv ? ATOMIC_LOAD(&rendv->reflexive_port) : 0;
 }
 
 int meridian_rendv_set_reflexive_addr(meridian_rendv_t* rendv, uint32_t addr, uint16_t port) {
     if (rendv == NULL) return -1;
-    rendv->reflexive_addr = addr;
-    rendv->reflexive_port = port;
+    ATOMIC_STORE(&rendv->reflexive_addr, addr);
+    ATOMIC_STORE(&rendv->reflexive_port, port);
     return 0;
 }
 
-bool meridian_rendv_can_direct_connect(const meridian_rendv_t* rendv) {
+bool meridian_rendv_can_direct_connect(meridian_rendv_t* rendv) {
     if (rendv == NULL) return false;
-    switch (rendv->nat_type) {
+    switch (ATOMIC_LOAD(&rendv->nat_type)) {
         case MERIDIAN_NAT_TYPE_OPEN:
         case MERIDIAN_NAT_TYPE_FULL_CONE:
         case MERIDIAN_NAT_TYPE_RESTRICTED_CONE:
@@ -464,8 +464,9 @@ static void meridian_rendv_dispatch(void* state, message_t* msg) {
              * known until the peer says so
              * (liboffs/src/Network/peer_connection.c:33). A caller that
              * already set the type keeps it. */
-            if (handle->local_rendv->nat_type == MERIDIAN_NAT_TYPE_UNKNOWN) {
-                handle->local_rendv->nat_type = MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE;
+            if (ATOMIC_LOAD(&handle->local_rendv->nat_type) == MERIDIAN_NAT_TYPE_UNKNOWN) {
+                ATOMIC_STORE(&handle->local_rendv->nat_type,
+                             MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE);
             }
             if (actor_reply_complete(&p->reply)) {
                 actor_reply_destroy(&p->reply);
@@ -754,7 +755,7 @@ static void rendv_finish_detection(meridian_rendv_handle_t* handle) {
     handle->detection_complete = true;
 
     if (handle->local_rendv != NULL) {
-        handle->local_rendv->nat_type = nat_type;
+        ATOMIC_STORE(&handle->local_rendv->nat_type, nat_type);
     }
 
     meridian_rendv_detect_nat_msg_t* pending = handle->pending_detect;

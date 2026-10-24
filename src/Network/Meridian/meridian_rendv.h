@@ -11,6 +11,7 @@
 #include <sys/socket.h>
 #include "../../Platform/platform_thread.h"
 #include "../../Actor/actor.h"
+#include "../../Util/atomic_compat.h"
 #include "../../Scheduler/scheduler.h"
 #include "meridian.h"
 #include "msquic.h"
@@ -70,14 +71,20 @@ typedef struct meridian_rendv_t {
     refcounter_t refcounter;   /**< Reference counting for lifetime */
     uint32_t addr;             /**< Rendezvous server IPv4 address */
     uint16_t port;             /**< Rendezvous server port */
-    uint32_t reflexive_addr;   /**< Discovered public address (0 if unknown) */
-    uint16_t reflexive_port;   /**< Discovered public port (0 if unknown) */
-    meridian_nat_type_t nat_type; /**< NAT type of this rendezvous. The local
-                                point is this node's own type and starts as a
-                                cone NAT (upstream: liboffs/src/Network/
-                                network.c:359); a peer point starts unknown,
-                                because the peer's type is not known until the
-                                peer says so. */
+    /* The three fields below are written by the handle's actor and read by
+     * the application thread, so they are atomic: a plain field would be a
+     * data race, and the compiler may hoist a plain load out of the
+     * polling loop that waits for the answer. Upstream keeps the same
+     * state inside the network actor and never reads it from another
+     * thread (liboffs/docs/nat-detect-local-address.md). */
+    ATOMIC(uint32_t) reflexive_addr;   /**< Discovered public address (0 if unknown) */
+    ATOMIC(uint16_t) reflexive_port;   /**< Discovered public port (0 if unknown) */
+    ATOMIC(meridian_nat_type_t) nat_type; /**< NAT type of this rendezvous. The
+                                local point is this node's own type and
+                                starts as a cone NAT (upstream:
+                                liboffs/src/Network/network.c:359); a peer
+                                point starts unknown, because the peer's type
+                                is not known until the peer says so. */
     bool is_active;            /**< Whether this rendezvous is currently active */
 } meridian_rendv_t;
 
@@ -197,7 +204,7 @@ int meridian_rendv_set_nat_type(meridian_rendv_t* rendv, meridian_nat_type_t typ
  * @param rendv  Rendezvous to query (NULL returns UNKNOWN)
  * @return       NAT type enum value
  */
-meridian_nat_type_t meridian_rendv_get_nat_type(const meridian_rendv_t* rendv);
+meridian_nat_type_t meridian_rendv_get_nat_type(meridian_rendv_t* rendv);
 
 /**
  * Gets the reflexive (public) address discovered via NAT detection.
@@ -205,7 +212,7 @@ meridian_nat_type_t meridian_rendv_get_nat_type(const meridian_rendv_t* rendv);
  * @param rendv  Rendezvous to query
  * @return      Reflexive IPv4 address, or 0 if not yet discovered
  */
-uint32_t meridian_rendv_get_reflexive_addr(const meridian_rendv_t* rendv);
+uint32_t meridian_rendv_get_reflexive_addr(meridian_rendv_t* rendv);
 
 /**
  * Gets the reflexive (public) port discovered via NAT detection.
@@ -213,7 +220,7 @@ uint32_t meridian_rendv_get_reflexive_addr(const meridian_rendv_t* rendv);
  * @param rendv  Rendezvous to query
  * @return      Reflexive port, or 0 if not yet discovered
  */
-uint16_t meridian_rendv_get_reflexive_port(const meridian_rendv_t* rendv);
+uint16_t meridian_rendv_get_reflexive_port(meridian_rendv_t* rendv);
 
 /**
  * Sets the reflexive address and port.
@@ -233,7 +240,7 @@ int meridian_rendv_set_reflexive_addr(meridian_rendv_t* rendv, uint32_t addr, ui
  * @param rendv  Rendezvous to check
  * @return      True if direct connections may succeed
  */
-bool meridian_rendv_can_direct_connect(const meridian_rendv_t* rendv);
+bool meridian_rendv_can_direct_connect(meridian_rendv_t* rendv);
 
 // ============================================================================
 // HANDLE LIFECYCLE
