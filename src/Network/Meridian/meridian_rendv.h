@@ -72,7 +72,12 @@ typedef struct meridian_rendv_t {
     uint16_t port;             /**< Rendezvous server port */
     uint32_t reflexive_addr;   /**< Discovered public address (0 if unknown) */
     uint16_t reflexive_port;   /**< Discovered public port (0 if unknown) */
-    meridian_nat_type_t nat_type; /**< NAT type of this rendezvous */
+    meridian_nat_type_t nat_type; /**< NAT type of this rendezvous. The local
+                                point is this node's own type and starts as a
+                                cone NAT (upstream: liboffs/src/Network/
+                                network.c:359); a peer point starts unknown,
+                                because the peer's type is not known until the
+                                peer says so. */
     bool is_active;            /**< Whether this rendezvous is currently active */
 } meridian_rendv_t;
 
