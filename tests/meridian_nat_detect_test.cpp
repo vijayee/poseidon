@@ -71,6 +71,60 @@ TEST_F(NatDetectTest, NatTypeStringConversion) {
     EXPECT_STREQ("symmetric", meridian_nat_type_to_string(MERIDIAN_NAT_TYPE_SYMMETRIC));
 }
 
+// The classification is upstream's, rule for rule
+// (liboffs/src/Network/nat_detect.c, nat_detect_classify). The
+// two-relay comparison is the point: one relay cannot tell a full cone
+// from a symmetric NAT.
+namespace {
+constexpr uint32_t LOCAL = 0x0A000001;    // the node's own address
+constexpr uint32_t RELAY_A = 0xC0A80001;  // what relay A reported
+constexpr uint32_t RELAY_B = 0xC0A80002;  // what relay B reported
+}  // namespace
+
+TEST_F(NatDetectTest, ClassifyNoReportIsUnknown) {
+    EXPECT_EQ(MERIDIAN_NAT_TYPE_UNKNOWN,
+              meridian_rendv_classify_nat(LOCAL, 0, 0, false, 0, 0, false));
+}
+
+TEST_F(NatDetectTest, ClassifyOneRelayOpen) {
+    // The one relay saw the node at its own address: no NAT.
+    EXPECT_EQ(MERIDIAN_NAT_TYPE_OPEN,
+              meridian_rendv_classify_nat(LOCAL, LOCAL, 1234, true, 0, 0, false));
+    EXPECT_EQ(MERIDIAN_NAT_TYPE_OPEN,
+              meridian_rendv_classify_nat(LOCAL, 0, 0, false, LOCAL, 1234, true));
+}
+
+TEST_F(NatDetectTest, ClassifyOneRelayIsPortRestrictedCone) {
+    // One relay, and it saw the node at another address: a NAT is in
+    // the way, and one relay cannot say more than that.
+    EXPECT_EQ(MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE,
+              meridian_rendv_classify_nat(LOCAL, RELAY_A, 1234, true, 0, 0, false));
+    EXPECT_EQ(MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE,
+              meridian_rendv_classify_nat(LOCAL, 0, 0, false, RELAY_B, 1234, true));
+}
+
+TEST_F(NatDetectTest, ClassifyTwoRelaysOpen) {
+    EXPECT_EQ(MERIDIAN_NAT_TYPE_OPEN,
+              meridian_rendv_classify_nat(LOCAL, LOCAL, 1234, true, RELAY_B, 1234, true));
+}
+
+TEST_F(NatDetectTest, ClassifyTwoRelaysAgreeIsFullCone) {
+    // The same mapping for two different relays: the NAT maps every
+    // destination the same way.
+    EXPECT_EQ(MERIDIAN_NAT_TYPE_FULL_CONE,
+              meridian_rendv_classify_nat(LOCAL, RELAY_A, 1234, true, RELAY_A, 1234, true));
+}
+
+TEST_F(NatDetectTest, ClassifyTwoRelaysDisagreeIsSymmetric) {
+    // Different addresses: the mapping depends on the destination.
+    EXPECT_EQ(MERIDIAN_NAT_TYPE_SYMMETRIC,
+              meridian_rendv_classify_nat(LOCAL, RELAY_A, 1234, true, RELAY_B, 1234, true));
+    // The same address with a different port: the port depends on the
+    // destination — also a symmetric NAT.
+    EXPECT_EQ(MERIDIAN_NAT_TYPE_SYMMETRIC,
+              meridian_rendv_classify_nat(LOCAL, RELAY_A, 1234, true, RELAY_A, 5678, true));
+}
+
 int main(int argc, char** argv) {
     ::testing::InitGoogleTest(&argc, argv);
     return RUN_ALL_TESTS();

@@ -19,6 +19,24 @@ protected:
     void TearDown() override {}
 };
 
+/* What the NAT detection answers with. */
+struct nat_result_t {
+    bool called;
+    uint32_t addr;
+    uint16_t port;
+    meridian_nat_type_t type;
+};
+
+static void nat_result_cb(void* ctx, uint32_t addr, uint16_t port,
+                          meridian_nat_type_t type) {
+    nat_result_t* result = static_cast<nat_result_t*>(ctx);
+    if (result == nullptr) return;
+    result->called = true;
+    result->addr = addr;
+    result->port = port;
+    result->type = type;
+}
+
 TEST_F(RelayTest, CreateDestroyClientWithoutMsquic) {
     // Without msquic, create returns NULL — verify the null check works
     meridian_rendv_t* server = meridian_rendv_create(0x01020304, 8080);
@@ -265,6 +283,14 @@ TEST_F(RelayTest, ClientConnectsToTheRelayServer) {
     // The server gave the client an endpoint id, and the client keeps it.
     uint32_t endpoint_id = meridian_relay_get_endpoint_id(client);
 
+    // The NAT detection: the request goes out to the relay and the
+    // answer comes when the relay has reported, so the call waits for
+    // it. With one relay the classification is the one-relay rule: a
+    // NAT is in the way, and one relay cannot say more than that.
+    nat_result_t nat = {};
+    int detect_rc = meridian_rendv_handle_detect_nat(handle, client, NULL,
+                                                     nat_result_cb, &nat);
+
     // The teardown comes before the assertions: an assertion that fails
     // returns from the test, and the server would keep its port and its
     // thread for the rest of the run.
@@ -286,4 +312,10 @@ TEST_F(RelayTest, ClientConnectsToTheRelayServer) {
     EXPECT_EQ(loopback, reflexive_addr);
     EXPECT_NE(0, reflexive_port);
     EXPECT_NE(0u, endpoint_id);
+
+    EXPECT_EQ(0, detect_rc);
+    EXPECT_TRUE(nat.called) << "the detection never answered";
+    EXPECT_EQ(loopback, nat.addr);
+    EXPECT_NE(0, nat.port);
+    EXPECT_EQ(MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE, nat.type);
 }
