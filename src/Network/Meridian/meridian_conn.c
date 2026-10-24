@@ -100,8 +100,15 @@ meridian_conn_t* meridian_conn_create(meridian_node_t* peer, struct meridian_rel
  * two peer-info mutators (MERIDIAN_CONN_SET_PEER_NAT_TYPE and
  * MERIDIAN_CONN_SET_PEER_REFLEXIVE). 2.7 adds MERIDIAN_CONN_UPGRADE_TO_DIRECT
  * (with an out-param result slot). 2.8 adds MERIDIAN_CONN_CONNECT (also with
- * an out-param result slot). Unhandled message types fall through to a
- * no-op; payload_destroy is NULL for all 11 MERIDIAN_CONN_* types so no
+ * an out-param result slot).
+ *
+ * The three path events (MERIDIAN_CONN_DIRECT_CONNECTED,
+ * MERIDIAN_CONN_RELAY_CONNECTED, MERIDIAN_CONN_PATH_FAILED) are the
+ * msquic-callback wiring: the callback that opens the direct path, the
+ * one that brings the relay path up, and the one that reports a failed
+ * path post them, and the state moves on the actor's thread — the rule
+ * upstream keeps in conn_state.c. Unhandled message types fall through to
+ * a no-op; payload_destroy is NULL for all 10 MERIDIAN_CONN_* types so no
  * payload cleanup is required.
  */
 static void meridian_conn_dispatch(void* state, message_t* msg) {
@@ -173,6 +180,37 @@ static void meridian_conn_dispatch(void* state, message_t* msg) {
             if (actor_reply_complete(&p->reply)) {
                 actor_reply_destroy(&p->reply);
                 free(p);
+            }
+            break;
+        }
+        case MERIDIAN_CONN_DIRECT_CONNECTED: {
+            /* The direct path came up. Upstream's rule: the state moves
+             * to DIRECT and the direct path is marked active
+             * (liboffs/src/Network/conn_state.c,
+             * conn_state_on_direct_connected). */
+            assert(msg->payload == NULL);
+            ATOMIC_STORE(&conn->state, MERIDIAN_CONN_STATE_DIRECT);
+            conn->direct_path.active = true;
+            break;
+        }
+        case MERIDIAN_CONN_RELAY_CONNECTED: {
+            /* The relay path is up: the peer is reachable through the
+             * relay. The relay path is the fallback, so it becomes
+             * active without disturbing the state. */
+            assert(msg->payload == NULL);
+            conn->relay_path.active = true;
+            break;
+        }
+        case MERIDIAN_CONN_PATH_FAILED: {
+            /* A path failed. Upstream's rule: a relay-only connection
+             * does not change — it never had a direct path to lose —
+             * and any other connection falls back to the relay
+             * (liboffs/src/Network/conn_state.c,
+             * conn_state_on_direct_failed). */
+            assert(msg->payload == NULL);
+            if (ATOMIC_LOAD(&conn->state) != MERIDIAN_CONN_STATE_RELAY_ONLY) {
+                ATOMIC_STORE(&conn->state, MERIDIAN_CONN_STATE_RELAY);
+                conn->direct_path.active = false;
             }
             break;
         }
