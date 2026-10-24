@@ -279,22 +279,23 @@ void meridian_relay_destroy(meridian_relay_t* relay) {
             meridian_relay_disconnect(relay);
         }
 
-        /* The stream entries are taken out from under the lock and
-         * destroyed outside it: destroying an entry waits for its actor,
-         * and the actor's dispatch takes this lock to read the datagram
-         * callback. Upstream's rule: take the state out under the lock,
-         * then release it before the call that can wait
-         * (liboffs/src/Network/quic_listener.c:225). */
+        /* The stream entries belong to their streams: the stream's
+         * shutdown-complete destroys the entry, the way the protocol's
+         * and the rendezvous's streams do. The sweep only takes the list
+         * out — destroying the entries here as well would give each one
+         * two owners, and whichever ran second would free it twice.
+         *
+         * The disconnect above closed the connection, so the streams are
+         * shut down and their entries are on their way to their owners.
+         * Upstream's relay server has the same shape: the connection's
+         * shutdown closes the stream, and the stream's own shutdown
+         * completes frees what belongs to the stream
+         * (liboffs/src/Network/Relay/relay_server.c). */
         platform_mutex_lock(relay->lock);
         meridian_stream_entry_t** entries = relay->active_streams;
-        size_t num_entries = relay->num_active_streams;
         relay->active_streams = NULL;
         relay->num_active_streams = 0;
         platform_mutex_unlock(relay->lock);
-
-        for (size_t i = 0; i < num_entries; i++) {
-            meridian_stream_entry_destroy(entries[i]);
-        }
         free(entries);
 
         // Close configuration if owned

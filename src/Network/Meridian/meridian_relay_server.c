@@ -1008,14 +1008,17 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
         return QUIC_STATUS_SUCCESS;
 
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
-        /* The stream entries are taken out from under the lock and
-         * destroyed outside it: destroying an entry waits for its actor,
-         * and the actor's handler takes this lock to read the client
-         * table. Upstream's rule: take the state out under the lock, then
-         * release it before the call that can wait
-         * (liboffs/src/Network/quic_listener.c:225). */
+        /* The stream entries belong to their streams: the stream's
+         * shutdown-complete destroys the entry, the way the protocol's
+         * and the rendezvous's streams do. The sweep only takes the list
+         * out — destroying the entries here as well would give each one
+         * two owners, and whichever ran second would free it twice.
+         *
+         * Upstream's relay server has the same shape: the connection's
+         * shutdown closes the stream, and the stream's own shutdown
+         * completes frees what belongs to the stream
+         * (liboffs/src/Network/Relay/relay_server.c). */
         meridian_stream_entry_t** entries = NULL;
-        size_t num_entries = 0;
 
         platform_mutex_lock(server->clients_lock);
         int slot = relay_server_find_client_by_connection(server, Connection);
@@ -1024,7 +1027,6 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
                      server->clients[slot].endpoint_id);
 
             entries = server->clients[slot].active_streams;
-            num_entries = server->clients[slot].num_active_streams;
             server->clients[slot].active_streams = NULL;
             server->clients[slot].num_active_streams = 0;
             server->clients[slot].active_streams_cap = 0;
@@ -1036,9 +1038,6 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
         }
         platform_mutex_unlock(server->clients_lock);
 
-        for (size_t i = 0; i < num_entries; i++) {
-            meridian_stream_entry_destroy(entries[i]);
-        }
         free(entries);
 
         // The handle is released outside the lock: the close may answer
