@@ -228,6 +228,15 @@ void meridian_rendv_handle_destroy(meridian_rendv_handle_t* handle) {
         // Do NOT close configuration/registration here — they are borrowed from
         // the protocol. The protocol owns and closes them in stop/destroy.
 
+        /* A detection that is still waiting for the relays' answers
+         * holds its request here: nobody will answer it now. */
+        if (handle->pending_detect != NULL) {
+            meridian_rendv_detect_nat_msg_t* pending = handle->pending_detect;
+            handle->pending_detect = NULL;
+            actor_reply_destroy(&pending->reply);
+            free(pending);
+        }
+
         actor_destroy(&handle->actor);
         free(handle);
     }
@@ -421,7 +430,7 @@ meridian_rendv_t* meridian_rendv_handle_find_peer(meridian_rendv_handle_t* handl
 
 /* Classifies the local NAT type from the reflexive address the relay
  * reported. Defined below the dispatch that uses it. */
-static meridian_nat_type_t rendv_classify_nat(meridian_rendv_handle_t* handle);
+static void rendv_finish_detection(meridian_rendv_handle_t* handle);
 
 /**
  * The rendezvous handle's actor owns the handle's state.
@@ -546,34 +555,48 @@ static void meridian_rendv_dispatch(void* state, message_t* msg) {
         case MERIDIAN_RENDV_DETECT_NAT: {
             meridian_rendv_detect_nat_msg_t* p =
                 (meridian_rendv_detect_nat_msg_t*)msg->payload;
-            p->reflexive_addr = 0;
-            p->reflexive_port = 0;
-            p->nat_type = MERIDIAN_NAT_TYPE_UNKNOWN;
 
-            if (handle->local_rendv != NULL) {
-                if (p->relay_a != NULL) {
-                    meridian_relay_send_addr_request(
-                        (struct meridian_relay_t*)p->relay_a);
+            /* A detection that is still running is superseded: its
+             * request is answered and released. */
+            if (handle->pending_detect != NULL) {
+                meridian_rendv_detect_nat_msg_t* old = handle->pending_detect;
+                handle->pending_detect = NULL;
+                if (actor_reply_complete(&old->reply)) {
+                    actor_reply_destroy(&old->reply);
+                    free(old);
                 }
-                if (p->relay_b != NULL) {
-                    meridian_relay_send_addr_request(
-                        (struct meridian_relay_t*)p->relay_b);
-                }
-
-                uint32_t reflexive_addr =
-                    meridian_rendv_get_reflexive_addr(handle->local_rendv);
-                uint16_t reflexive_port =
-                    meridian_rendv_get_reflexive_port(handle->local_rendv);
-
-                p->reflexive_addr = reflexive_addr;
-                p->reflexive_port = reflexive_port;
-                p->nat_type = (int)rendv_classify_nat(handle);
             }
 
-            if (actor_reply_complete(&p->reply)) {
-                actor_reply_destroy(&p->reply);
-                free(p);
+            /* The detector's state is the actor's: which relays are
+             * asked, and what they reported. A new round starts empty. */
+            handle->relay_a = (struct meridian_relay_t*)p->relay_a;
+            handle->relay_b = (struct meridian_relay_t*)p->relay_b;
+            handle->reflexive_addr_a = 0;
+            handle->reflexive_port_a = 0;
+            handle->got_response_a = false;
+            handle->reflexive_addr_b = 0;
+            handle->reflexive_port_b = 0;
+            handle->got_response_b = false;
+            handle->detection_complete = false;
+
+            if (handle->relay_a != NULL) {
+                meridian_relay_send_addr_request(handle->relay_a);
             }
+            if (handle->relay_b != NULL) {
+                meridian_relay_send_addr_request(handle->relay_b);
+            }
+
+            if (handle->relay_a == NULL && handle->relay_b == NULL) {
+                /* No relay to ask: there is nothing to wait for. */
+                handle->pending_detect = p;
+                rendv_finish_detection(handle);
+                break;
+            }
+
+            /* The answer comes when the relays have reported. The
+             * request waits in the actor's state — the dispatch does
+             * not wait, the caller does. */
+            handle->pending_detect = p;
             break;
         }
         case MERIDIAN_RENDV_ADDR_RESPONSE: {
@@ -588,9 +611,50 @@ static void meridian_rendv_dispatch(void* state, message_t* msg) {
                 meridian_rendv_set_reflexive_addr(handle->local_rendv,
                                                   p->reflexive_addr,
                                                   p->reflexive_port);
-                (void)rendv_classify_nat(handle);
             }
+
+            /* Which relay answered? Upstream's detector matches the
+             * response's source client against its two relay clients and
+             * falls back to the first free slot, so a single-relay
+             * deployment still records a report
+             * (liboffs/src/Network/nat_detect.c). A slot that is
+             * already filled is never overwritten: a slow duplicate
+             * response is ignored. */
+            int slot = -1;
+            if (p->relay != NULL) {
+                if (p->relay == (void*)handle->relay_a) {
+                    slot = 0;
+                } else if (p->relay == (void*)handle->relay_b) {
+                    slot = 1;
+                }
+            }
+            if (slot < 0) {
+                if (!handle->got_response_a) {
+                    slot = 0;
+                } else if (!handle->got_response_b) {
+                    slot = 1;
+                }
+            }
+
+            if (slot == 0 && !handle->got_response_a) {
+                handle->reflexive_addr_a = p->reflexive_addr;
+                handle->reflexive_port_a = p->reflexive_port;
+                handle->got_response_a = true;
+            } else if (slot == 1 && !handle->got_response_b) {
+                handle->reflexive_addr_b = p->reflexive_addr;
+                handle->reflexive_port_b = p->reflexive_port;
+                handle->got_response_b = true;
+            }
+
             free(p);
+
+            /* The classification needs every configured relay's report:
+             * with two relays both must answer, with one the one that
+             * is configured. */
+            if (!handle->detection_complete && handle->got_response_a &&
+                (handle->relay_b == NULL || handle->got_response_b)) {
+                rendv_finish_detection(handle);
+            }
             break;
         }
         default:
@@ -603,29 +667,94 @@ static void meridian_rendv_dispatch(void* state, message_t* msg) {
 // ============================================================================
 
 /**
- * Classifies the local NAT type from the reflexive address the relay
- * reported, and records it on the local rendezvous point.
+ * Classifies the NAT type from what the two relays reported.
  *
- * The classification runs on the handle's actor: the reflexive address
- * is the handle's state.
+ * The rules are upstream's, unchanged
+ * (liboffs/src/Network/nat_detect.c, `nat_detect_classify`). The
+ * two-relay comparison is the point: one relay cannot tell a full cone
+ * from a symmetric NAT, and a symmetric NAT is the one a hole punch
+ * cannot cross.
  */
-static meridian_nat_type_t rendv_classify_nat(meridian_rendv_handle_t* handle) {
-    if (handle == NULL || handle->local_rendv == NULL) {
+meridian_nat_type_t meridian_rendv_classify_nat(uint32_t local_addr,
+                                                uint32_t addr_a, uint16_t port_a, bool got_a,
+                                                uint32_t addr_b, uint16_t port_b, bool got_b) {
+    /* No report at all. */
+    if (!got_a && !got_b) {
         return MERIDIAN_NAT_TYPE_UNKNOWN;
     }
 
-    uint32_t reflexive_addr =
-        meridian_rendv_get_reflexive_addr(handle->local_rendv);
-    uint32_t local_addr = handle->local_rendv->addr;
-
-    meridian_nat_type_t nat_type = MERIDIAN_NAT_TYPE_UNKNOWN;
-    if (local_addr != 0 && local_addr == reflexive_addr) {
-        nat_type = MERIDIAN_NAT_TYPE_OPEN;
-    } else if (reflexive_addr != 0) {
-        nat_type = MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE;
+    /* Only one relay answered. */
+    if (got_a && !got_b) {
+        if (local_addr != 0 && local_addr == addr_a) {
+            return MERIDIAN_NAT_TYPE_OPEN;
+        }
+        return MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE;
     }
-    handle->local_rendv->nat_type = nat_type;
-    return nat_type;
+    if (!got_a && got_b) {
+        if (local_addr != 0 && local_addr == addr_b) {
+            return MERIDIAN_NAT_TYPE_OPEN;
+        }
+        return MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE;
+    }
+
+    /* Both answered. */
+    if (local_addr != 0 && local_addr == addr_a) {
+        return MERIDIAN_NAT_TYPE_OPEN;
+    }
+    if (addr_a == addr_b && port_a == port_b) {
+        /* The same mapping for two different relays: the NAT maps every
+         * destination the same way. */
+        return MERIDIAN_NAT_TYPE_FULL_CONE;
+    }
+    /* Different addresses, or the same address with a different port:
+     * the mapping depends on the destination — a symmetric NAT. */
+    return MERIDIAN_NAT_TYPE_SYMMETRIC;
+}
+
+/**
+ * Records the classification on the local rendezvous point and answers
+ * the detection that is waiting for it.
+ *
+ * The classification runs on the handle's actor: the two reports are
+ * the handle's state.
+ */
+static void rendv_finish_detection(meridian_rendv_handle_t* handle) {
+    if (handle == NULL) return;
+
+    /* The node's own address is not known to this layer, so the OPEN
+     * case — which compares the two — is not reached. Upstream's
+     * detector has the same gap: its local address is never set
+     * (liboffs/src/Network/nat_detect.c). */
+    meridian_nat_type_t nat_type = meridian_rendv_classify_nat(
+        0,
+        handle->reflexive_addr_a, handle->reflexive_port_a, handle->got_response_a,
+        handle->reflexive_addr_b, handle->reflexive_port_b, handle->got_response_b);
+
+    handle->detection_complete = true;
+
+    if (handle->local_rendv != NULL) {
+        handle->local_rendv->nat_type = nat_type;
+    }
+
+    meridian_rendv_detect_nat_msg_t* pending = handle->pending_detect;
+    if (pending == NULL) return;
+    handle->pending_detect = NULL;
+
+    /* The address the relays reported: this node's public address. */
+    if (handle->got_response_a) {
+        pending->reflexive_addr = handle->reflexive_addr_a;
+        pending->reflexive_port = handle->reflexive_port_a;
+    } else {
+        pending->reflexive_addr = handle->reflexive_addr_b;
+        pending->reflexive_port = handle->reflexive_port_b;
+    }
+    pending->nat_type = (int)nat_type;
+
+    if (actor_reply_complete(&pending->reply)) {
+        /* The caller gave up waiting: the actor owns the request. */
+        actor_reply_destroy(&pending->reply);
+        free(pending);
+    }
 }
 
 /**

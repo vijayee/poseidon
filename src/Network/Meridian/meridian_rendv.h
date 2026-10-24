@@ -123,6 +123,11 @@ typedef struct meridian_rendv_config_t {
  */
 #define MERIDIAN_RENDV_TIMEOUT_MS 5000
 
+/* Forward declarations: the handle's state names the relay clients it
+ * asks, and holds the detection request until the relays answer. */
+struct meridian_relay_t;
+struct meridian_rendv_detect_nat_msg_t;
+
 typedef struct meridian_rendv_handle_t {
     refcounter_t refcounter;                    /**< Reference counting for lifetime */
     meridian_rendv_t* local_rendv;               /**< Local rendezvous point (if any) */
@@ -134,6 +139,21 @@ typedef struct meridian_rendv_handle_t {
     meridian_rendv_stream_data_cb_t on_stream_data;  /**< Stream data received callback */
     void* on_stream_data_ctx;                       /**< User context for stream data callback */
     scheduler_pool_t* pool;                     /**< Scheduler pool that runs the handle's actor */
+    /* The NAT detector's state, the way upstream's detector keeps it
+     * (liboffs/src/Network/nat_detect.h): the two relay clients and
+     * what each of them reported. The classification compares the two
+     * reports — that is the only view of the NAT the node has. */
+    struct meridian_relay_t* relay_a;           /**< The first relay (borrowed) */
+    struct meridian_relay_t* relay_b;           /**< The second relay (borrowed) */
+    uint32_t reflexive_addr_a;                 /**< What relay A reported */
+    uint16_t reflexive_port_a;
+    bool got_response_a;                       /**< Relay A has answered */
+    uint32_t reflexive_addr_b;                 /**< What relay B reported */
+    uint16_t reflexive_port_b;
+    bool got_response_b;                       /**< Relay B has answered */
+    bool detection_complete;                   /**< The classification is in */
+    struct meridian_rendv_detect_nat_msg_t* pending_detect; /**< The detection
+                                waiting for the relays' answers */
     actor_t actor;                              /**< Owns the handle's state */
 } meridian_rendv_handle_t;
 
@@ -333,21 +353,59 @@ int meridian_rendv_handle_close_tunnel(meridian_rendv_handle_t* handle, HQUIC co
 // NAT DETECTION
 // ============================================================================
 
-/** Forward declaration for relay client */
-struct meridian_relay_t;
-
 /** Callback type for NAT detection results */
 typedef void (*meridian_nat_callback_t)(void* ctx, uint32_t addr, uint16_t port,
                                          meridian_nat_type_t type);
 
 /**
- * Detects NAT type by comparing reflexive addresses from two relay servers.
- * Sends ADDR_REQUEST to each relay, compares the observed public addresses,
- * and classifies the NAT type:
- *   - OPEN: local address matches reflexive address
- *   - PORT_RESTRICTED_CONE: same reflexive address from both relays (EIM)
- *   - SYMMETRIC: different reflexive addresses from relays (EDM)
- *   - UNKNOWN: insufficient relay connections
+ * Classifies the NAT type from what the relays reported.
+ *
+ * The rules are upstream's, unchanged
+ * (liboffs/src/Network/nat_detect.c, `nat_detect_classify`):
+ *
+ *   - neither relay answered: UNKNOWN
+ *   - one relay answered: OPEN when the local address is the address it
+ *     reported, PORT_RESTRICTED_CONE otherwise
+ *   - both answered: OPEN when the local address is the address relay A
+ *     reported, FULL_CONE when the two relays report the same address
+ *     and port (the NAT maps every destination the same way — an
+ *     endpoint-independent mapping), SYMMETRIC otherwise (the mapping
+ *     depends on the destination, so a hole punch cannot be predicted)
+ *
+ * The two-relay comparison is the whole point: with one relay the node
+ * cannot tell a full cone from a symmetric NAT, and a symmetric NAT is
+ * the one a hole punch cannot cross.
+ *
+ * @param local_addr  The node's own address, for the OPEN case. The
+ *                     layer does not know it (upstream's detector does
+ *                     not set it either), so the detection passes 0 and
+ *                     the OPEN case is not reached in production — the
+ *                     rule is exposed here so it can be tested.
+ * @param addr_a      The address relay A reported
+ * @param port_a      The port relay A reported
+ * @param got_a       Whether relay A answered
+ * @param addr_b      The address relay B reported
+ * @param port_b      The port relay B reported
+ * @param got_b       Whether relay B answered
+ * @return            The NAT type
+ */
+meridian_nat_type_t meridian_rendv_classify_nat(uint32_t local_addr,
+                                                uint32_t addr_a, uint16_t port_a, bool got_a,
+                                                uint32_t addr_b, uint16_t port_b, bool got_b);
+
+/**
+ * Detects the NAT type by comparing what the two relays report.
+ *
+ * Sends an ADDR_REQUEST to each relay; each relay answers with the
+ * address it sees this node at, and the two answers are what the
+ * classification is made of (upstream's detector,
+ * liboffs/src/Network/nat_detect.c). The call waits for the answers:
+ * the request stays in the handle's actor until every configured relay
+ * has reported, and the callback fires with the classification.
+ *
+ * The wait is a network round trip, so the call must not be made from
+ * inside a dispatch — a worker that waits is a worker that runs no
+ * actor.
  *
  * @param handle    Handle to detect NAT for
  * @param relay_a   First relay client (may be NULL)
