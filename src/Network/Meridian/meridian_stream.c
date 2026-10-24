@@ -4,6 +4,7 @@
 
 #include "meridian_stream.h"
 #include "../../Actor/actor_reply.h"
+#include "../../Platform/poseidon_msquic.h"
 #include "../../Util/allocator.h"
 #include "../../Util/log.h"
 #include <stdlib.h>
@@ -408,7 +409,6 @@ meridian_stream_entry_t* meridian_stream_open_bidi_entry(
 
 QUIC_STATUS QUIC_API meridian_uni_stream_callback(HQUIC stream, void* context,
                                                     QUIC_STREAM_EVENT* event) {
-    (void)stream;
     meridian_stream_entry_t* entry = (meridian_stream_entry_t*)context;
 
     switch (event->Type) {
@@ -439,12 +439,9 @@ QUIC_STATUS QUIC_API meridian_uni_stream_callback(HQUIC stream, void* context,
     }
 
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
-        // For inbound streams, the peer has finished sending.
-        // Protocol-specific handlers inspect recv_buf via user_context.
-        if (entry != NULL && entry->user_context != NULL) {
-            // The component that owns this stream will process the accumulated data
-            // via its own callback set through SetCallbackHandler.
-        }
+        /* The peer finished sending. The owner of the stream reads the
+         * accumulated bytes: the handler runs on the entry's actor, not
+         * here. */
         break;
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
@@ -456,6 +453,17 @@ QUIC_STATUS QUIC_API meridian_uni_stream_callback(HQUIC stream, void* context,
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
         if (entry != NULL) {
             meridian_stream_entry_destroy(entry);
+        }
+        /* The stream is done and nobody else holds its handle: msquic
+         * wants it released. A uni stream the app opened is send-only,
+         * so the shutdown completes as soon as the peer has the FIN —
+         * without the close the handle is held until the connection goes
+         * away, and the relay opens one stream per message. */
+        {
+            const struct QUIC_API_TABLE* api = poseidon_msquic_api();
+            if (api != NULL && stream != NULL) {
+                api->StreamClose(stream);
+            }
         }
         break;
 
@@ -472,7 +480,6 @@ QUIC_STATUS QUIC_API meridian_uni_stream_callback(HQUIC stream, void* context,
 
 QUIC_STATUS QUIC_API meridian_bidi_stream_callback(HQUIC stream, void* context,
                                                      QUIC_STREAM_EVENT* event) {
-    (void)stream;
     meridian_stream_entry_t* entry = (meridian_stream_entry_t*)context;
 
     switch (event->Type) {
@@ -505,11 +512,9 @@ QUIC_STATUS QUIC_API meridian_bidi_stream_callback(HQUIC stream, void* context,
     }
 
     case QUIC_STREAM_EVENT_PEER_SEND_SHUTDOWN:
-        // Peer finished sending. The bidi stream remains open for our response.
-        if (entry != NULL && entry->user_context != NULL) {
-            // Protocol-specific handlers process recv_buf and send a response
-            // via their own callback set through SetCallbackHandler.
-        }
+        /* The peer finished sending. The bidi stream stays open for our
+         * response; the owner of the stream reads the accumulated bytes
+         * on the entry's actor. */
         break;
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
@@ -521,6 +526,14 @@ QUIC_STATUS QUIC_API meridian_bidi_stream_callback(HQUIC stream, void* context,
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
         if (entry != NULL) {
             meridian_stream_entry_destroy(entry);
+        }
+        /* The stream is done and nobody else holds its handle: msquic
+         * wants it released. */
+        {
+            const struct QUIC_API_TABLE* api = poseidon_msquic_api();
+            if (api != NULL && stream != NULL) {
+                api->StreamClose(stream);
+            }
         }
         break;
 
