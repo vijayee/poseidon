@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 extern "C" {
+#include "Actor/actor.h"
+#include "Actor/message.h"
 #include "Network/Meridian/meridian_conn.h"
 #include "Network/Meridian/meridian.h"
 #include "Scheduler/scheduler.h"
@@ -138,6 +140,96 @@ TEST_F(ConnTest, SendNoPath) {
     EXPECT_EQ(MERIDIAN_CONN_STATE_TRYING_DIRECT, meridian_conn_get_state(conn));
     EXPECT_FALSE(meridian_conn_is_direct(conn));
     EXPECT_FALSE(meridian_conn_is_relay(conn));
+
+    meridian_conn_destroy(conn);
+    meridian_node_destroy(peer);
+}
+
+// The three path events are the msquic-callback wiring: the callback
+// that opens the direct path, the one that brings the relay path up, and
+// the one that reports a failed path. The state moves on the actor's
+// thread — the rule upstream keeps in conn_state.c.
+static void post_path_event(meridian_conn_t* conn, uint32_t type) {
+    message_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.type = type;
+    msg.payload = NULL;
+    msg.payload_destroy = NULL;
+    actor_send(&conn->actor, &msg);
+}
+
+TEST_F(ConnTest, TheDirectPathComingUpMovesTheStateToDirect) {
+    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080, NULL);
+    meridian_conn_t* conn = meridian_conn_create(peer, NULL, MERIDIAN_NAT_TYPE_OPEN, NULL, pool_);
+    ASSERT_NE(nullptr, conn);
+    ASSERT_EQ(MERIDIAN_CONN_STATE_TRYING_DIRECT, meridian_conn_get_state(conn));
+
+    post_path_event(conn, MERIDIAN_CONN_DIRECT_CONNECTED);
+    scheduler_pool_wait_for_idle(pool_);
+
+    // Upstream's rule: the direct path came up, so the state is DIRECT
+    // and the direct path is active.
+    EXPECT_EQ(MERIDIAN_CONN_STATE_DIRECT, meridian_conn_get_state(conn));
+    EXPECT_TRUE(meridian_conn_is_direct(conn));
+    EXPECT_TRUE(conn->direct_path.active);
+
+    meridian_conn_destroy(conn);
+    meridian_node_destroy(peer);
+}
+
+TEST_F(ConnTest, TheRelayPathComingUpActivatesTheRelayPath) {
+    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080, NULL);
+    meridian_conn_t* conn = meridian_conn_create(peer, NULL, MERIDIAN_NAT_TYPE_OPEN, NULL, pool_);
+    ASSERT_NE(nullptr, conn);
+
+    post_path_event(conn, MERIDIAN_CONN_RELAY_CONNECTED);
+    scheduler_pool_wait_for_idle(pool_);
+
+    // The relay is the fallback: the path becomes active, the state does
+    // not move.
+    EXPECT_TRUE(conn->relay_path.active);
+    EXPECT_EQ(MERIDIAN_CONN_STATE_TRYING_DIRECT, meridian_conn_get_state(conn));
+
+    meridian_conn_destroy(conn);
+    meridian_node_destroy(peer);
+}
+
+TEST_F(ConnTest, AFailedPathFallsBackToTheRelay) {
+    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080, NULL);
+    meridian_conn_t* conn = meridian_conn_create(peer, NULL, MERIDIAN_NAT_TYPE_OPEN, NULL, pool_);
+    ASSERT_NE(nullptr, conn);
+
+    post_path_event(conn, MERIDIAN_CONN_DIRECT_CONNECTED);
+    scheduler_pool_wait_for_idle(pool_);
+    ASSERT_EQ(MERIDIAN_CONN_STATE_DIRECT, meridian_conn_get_state(conn));
+
+    post_path_event(conn, MERIDIAN_CONN_PATH_FAILED);
+    scheduler_pool_wait_for_idle(pool_);
+
+    // Upstream's rule: the direct path failed, so the state falls back to
+    // the relay and the direct path is no longer active.
+    EXPECT_EQ(MERIDIAN_CONN_STATE_RELAY, meridian_conn_get_state(conn));
+    EXPECT_FALSE(conn->direct_path.active);
+    EXPECT_TRUE(meridian_conn_is_relay(conn));
+
+    meridian_conn_destroy(conn);
+    meridian_node_destroy(peer);
+}
+
+TEST_F(ConnTest, AFailedPathLeavesARelayOnlyConnectionAlone) {
+    // A symmetric-NAT connection never had a direct path to lose, so a
+    // failure does not move it (upstream's rule).
+    meridian_node_t* peer = meridian_node_create(0xC0A80001, 8080, NULL);
+    meridian_conn_t* conn = meridian_conn_create(peer, NULL, MERIDIAN_NAT_TYPE_SYMMETRIC, NULL, pool_);
+    ASSERT_NE(nullptr, conn);
+    ASSERT_EQ(MERIDIAN_CONN_STATE_RELAY_ONLY, meridian_conn_get_state(conn));
+
+    post_path_event(conn, MERIDIAN_CONN_PATH_FAILED);
+    scheduler_pool_wait_for_idle(pool_);
+
+    EXPECT_EQ(MERIDIAN_CONN_STATE_RELAY_ONLY, meridian_conn_get_state(conn));
+    EXPECT_TRUE(meridian_conn_is_relay(conn));
+    EXPECT_FALSE(meridian_conn_is_direct(conn));
 
     meridian_conn_destroy(conn);
     meridian_node_destroy(peer);
