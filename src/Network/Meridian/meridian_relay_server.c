@@ -1008,18 +1008,23 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
         return QUIC_STATUS_SUCCESS;
 
     case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
-        // Find and clean up client slot
+        /* The stream entries are taken out from under the lock and
+         * destroyed outside it: destroying an entry waits for its actor,
+         * and the actor's handler takes this lock to read the client
+         * table. Upstream's rule: take the state out under the lock, then
+         * release it before the call that can wait
+         * (liboffs/src/Network/quic_listener.c:225). */
+        meridian_stream_entry_t** entries = NULL;
+        size_t num_entries = 0;
+
         platform_mutex_lock(server->clients_lock);
         int slot = relay_server_find_client_by_connection(server, Connection);
         if (slot >= 0) {
             log_info("Relay: Client disconnected, endpoint_id=%u",
                      server->clients[slot].endpoint_id);
 
-            // Clean up active streams
-            for (size_t i = 0; i < server->clients[slot].num_active_streams; i++) {
-                meridian_stream_entry_destroy(server->clients[slot].active_streams[i]);
-            }
-            free(server->clients[slot].active_streams);
+            entries = server->clients[slot].active_streams;
+            num_entries = server->clients[slot].num_active_streams;
             server->clients[slot].active_streams = NULL;
             server->clients[slot].num_active_streams = 0;
             server->clients[slot].active_streams_cap = 0;
@@ -1030,6 +1035,11 @@ RelayServerConnectionCallback(HQUIC Connection, void* Context,
             server->num_clients--;
         }
         platform_mutex_unlock(server->clients_lock);
+
+        for (size_t i = 0; i < num_entries; i++) {
+            meridian_stream_entry_destroy(entries[i]);
+        }
+        free(entries);
 
         // The handle is released outside the lock: the close may answer
         // with a callback, and that callback takes clients_lock. Upstream
