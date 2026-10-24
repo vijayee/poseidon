@@ -721,12 +721,22 @@ meridian_nat_type_t meridian_rendv_classify_nat(uint32_t local_addr,
 static void rendv_finish_detection(meridian_rendv_handle_t* handle) {
     if (handle == NULL) return;
 
-    /* The node's own address is not known to this layer, so the OPEN
-     * case — which compares the two — is not reached. Upstream's
-     * detector has the same gap: its local address is never set
-     * (liboffs/src/Network/nat_detect.c). */
+    /* The node's own address: the source of the packets the relay
+     * received. When the relay reports the same address, no NAT
+     * rewrote it — the OPEN case.
+     *
+     * Upstream's detector has the same field and never fills it
+     * (liboffs/src/Network/nat_detect.c), so its OPEN case is not
+     * reached either; here the relay connection knows the address. */
+    uint32_t local_addr = 0;
+    if (handle->relay_a != NULL) {
+        local_addr = meridian_relay_get_local_addr(handle->relay_a);
+    } else if (handle->relay_b != NULL) {
+        local_addr = meridian_relay_get_local_addr(handle->relay_b);
+    }
+
     meridian_nat_type_t nat_type = meridian_rendv_classify_nat(
-        0,
+        local_addr,
         handle->reflexive_addr_a, handle->reflexive_port_a, handle->got_response_a,
         handle->reflexive_addr_b, handle->reflexive_port_b, handle->got_response_b);
 

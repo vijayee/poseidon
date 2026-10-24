@@ -562,6 +562,11 @@ void meridian_relay_on_datagram(meridian_relay_t* relay,
 // RELAY STATE QUERY
 // ============================================================================
 
+uint32_t meridian_relay_get_local_addr(meridian_relay_t* relay) {
+    if (relay == NULL) return 0;
+    return ATOMIC_LOAD(&relay->local_addr);
+}
+
 uint32_t meridian_relay_get_endpoint_id(meridian_relay_t* relay) {
     if (relay == NULL) return 0;
     return ATOMIC_LOAD(&relay->local_endpoint_id);
@@ -974,6 +979,26 @@ RelayConnectionCallback(HQUIC Connection, void* Context,
         ATOMIC_STORE(&relay->connected, 1);
         /* The connection came up: the retry budget starts over. */
         relay->retry_count = 0;
+
+        /* The address this node's packets come from. The relay's report
+         * is the address the relay saw; when the two are the same, no
+         * NAT rewrote it — that is the OPEN case of the NAT
+         * classification. MsQuic knows it: the connection's local
+         * address is the source of the packets the relay received.
+         *
+         * It is read here, while the connection is live, and kept: the
+         * detector asks for it later, and a connection that is closed
+         * by then cannot be asked. */
+        QUIC_ADDR local_addr;
+        uint32_t local_addr_len = sizeof(local_addr);
+        memset(&local_addr, 0, sizeof(local_addr));
+        if (QUIC_SUCCEEDED(relay->msquic->GetParam(Connection,
+                                                    QUIC_PARAM_CONN_LOCAL_ADDRESS,
+                                                    &local_addr_len,
+                                                    &local_addr)) &&
+            local_addr.Ipv4.sin_family == QUIC_ADDRESS_FAMILY_INET) {
+            ATOMIC_STORE(&relay->local_addr, local_addr.Ipv4.sin_addr.s_addr);
+        }
 
         // Ask the relay server for our reflexive address. The request is
         // handed to the relay's actor so it is not built on msquic's

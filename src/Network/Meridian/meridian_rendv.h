@@ -376,11 +376,14 @@ typedef void (*meridian_nat_callback_t)(void* ctx, uint32_t addr, uint16_t port,
  * cannot tell a full cone from a symmetric NAT, and a symmetric NAT is
  * the one a hole punch cannot cross.
  *
- * @param local_addr  The node's own address, for the OPEN case. The
- *                     layer does not know it (upstream's detector does
- *                     not set it either), so the detection passes 0 and
- *                     the OPEN case is not reached in production — the
- *                     rule is exposed here so it can be tested.
+ * @param local_addr  The node's own address, for the OPEN case: the
+ *                     source of the packets the relay received. The
+ *                     detection fills it with the relay connection's
+ *                     local address, so the relay reporting the same
+ *                     address means no NAT rewrote it. Upstream's
+ *                     detector has the same field and never fills it
+ *                     (liboffs/src/Network/nat_detect.c), so its OPEN
+ *                     case is not reached either.
  * @param addr_a      The address relay A reported
  * @param port_a      The port relay A reported
  * @param got_a       Whether relay A answered

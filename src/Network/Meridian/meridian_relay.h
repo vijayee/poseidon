@@ -86,6 +86,11 @@ typedef struct meridian_relay_t {
                                 client hands it to the NAT detector's actor. */
     meridian_relay_config_t config;                /**< Client configuration */
     ATOMIC(uint32_t) local_endpoint_id;             /**< Assigned endpoint ID from relay */
+    ATOMIC(uint32_t) local_addr;                    /**< This node's own address as
+                                the source of the relay connection's packets (network
+                                byte order). The relay's report is the address it
+                                saw; the two being the same means no NAT rewrote
+                                it. Read while the connection is live. */
     ATOMIC(uint8_t) connected;                      /**< Connection state to relay */
     ATOMIC(uint8_t) running;                        /**< True while the client is up. The
                                 retry never fires once this is clear — upstream
@@ -227,6 +232,18 @@ void meridian_relay_on_datagram(meridian_relay_t* relay,
 // ============================================================================
 // RELAY STATE QUERY
 // ============================================================================
+
+/**
+ * Gets this node's own address, the source of the packets the relay
+ * connection sends.
+ *
+ * The relay reports the address it saw; the two being the same is the
+ * OPEN case of the NAT classification — no NAT rewrote the address.
+ *
+ * @param relay  Relay client
+ * @return      The address in network byte order, or 0 if unknown
+ */
+uint32_t meridian_relay_get_local_addr(meridian_relay_t* relay);
 
 /**
  * Gets the endpoint ID assigned to this client by the relay server.
