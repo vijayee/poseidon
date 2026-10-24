@@ -428,8 +428,8 @@ meridian_rendv_t* meridian_rendv_handle_find_peer(meridian_rendv_handle_t* handl
 // ACTOR DISPATCH
 // ============================================================================
 
-/* Classifies the local NAT type from the reflexive address the relay
- * reported. Defined below the dispatch that uses it. */
+/* Records the classification and answers the detection that is waiting
+ * for it. Defined below the dispatch that uses it. */
 static void rendv_finish_detection(meridian_rendv_handle_t* handle);
 
 /**
