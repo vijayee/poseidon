@@ -1936,3 +1936,60 @@ half-done.
 
 Green, 25/25 ctest. Every commit in the series builds and passes on
 its own.
+
+## Phase 2 (2.33) — the NAT detection compares what the two relays report
+
+The rendezvous's NAT detection classified the node from **one** relay
+report, compared against the local rendezvous point's address — and that
+address is the *rendezvous server's*, not the node's own. So the
+classification was wrong twice over: it compared the wrong pair of
+addresses, and it could never tell a full cone from a symmetric NAT —
+the one case a hole punch cannot cross.
+
+Upstream's detector (`liboffs/src/Network/nat_detect.c`) keeps **two**
+relay clients and classifies from what the two of them report:
+
+- neither answered: UNKNOWN
+- one answered: OPEN when the local address is the address it reported,
+  PORT_RESTRICTED_CONE otherwise
+- both answered: OPEN when the local address is relay A's address,
+  **FULL_CONE** when the two relays report the same address and port
+  (the NAT maps every destination the same way), **SYMMETRIC** otherwise
+  (the mapping depends on the destination)
+
+Poseidon now matches that, rule for rule:
+
+- The handle's actor owns the detector's state: the two relay clients
+  and what each reported — the same two slots upstream's detector has
+  (`liboffs/src/Network/nat_detect.h`).
+- The address response says **which** relay answered, so the report
+  goes into that relay's slot; a report from an unknown relay takes the
+  first free slot, and a slot that is already filled is never
+  overwritten (upstream's rule, `liboffs/src/Network/nat_detect.c`).
+- The classification happens when every **configured** relay has
+  reported — with two relays both must answer, with one the one that is
+  configured — and it is written on the handle's actor, the state it
+  belongs to.
+- The detection's request stays in the actor until the relays have
+  answered, so the answer is the relays' answer and not the state the
+  node happened to have. The dispatch does not wait; the caller does.
+
+### The OPEN case
+
+Upstream's `nat_detect_classify` takes the node's own address for the
+OPEN case, and upstream's detector never sets it — the same gap is here,
+so the detection passes 0 and the OPEN case is not reached in
+production. The rule is exposed as `meridian_rendv_classify_nat()` so it
+can be tested, the way upstream exposes `nat_detect_classify()` "for
+unit testing".
+
+### Tests
+
+`tests/meridian_nat_detect_test.cpp` covers the classifier rule for
+rule, and the relay test now runs a detection end to end: the request
+goes to the relay, the relay's answer comes back, and the call returns
+the classification.
+
+### Build
+
+Green, 25/25 ctest.
