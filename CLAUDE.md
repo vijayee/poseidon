@@ -73,6 +73,16 @@ Always read and follow the coding conventions in [STYLEGUIDE.md](./STYLEGUIDE.md
 ## Standing rule: prefer the upstream canonical pattern (per boss directive)
 
 - **"Always refer back to the upstream codebase if the problem you face is likely already solved there."** The first move on a design problem is to read the upstream reference (`liboffs/`) and mirror the existing solution. Do not invent new patterns when the upstream already encodes one.
+- **The rule covers issues, not only design questions (per boss directive, 2026-10-22).** Whenever an issue comes up — a bug, a crash, a hang, a design question — check the upstream for a pattern that already solves it, and mirror it rather than inventing one. The references are:
+  - **liboffs**: `/home/victor/Workspace/src/github.com/vijayee/liboffs` — the upstream this project mirrors.
+  - **ponyc**: `/home/victor/Workspace/src/github.com/vijayee/ponyc` — the runtime whose actor semantics liboffs follows. Consult it when the question is about scheduling, blocking, or what a thread may do while an actor waits.
+  Grep the upstream tree for the subsystem, then **read the file** rather than the summary. When upstream's answer is found, mirror its shape — the field names, the lock discipline, the event pattern — and cite the upstream file. If upstream genuinely has no answer, say so explicitly rather than silently inventing one.
+
+  What the rule has already caught in this migration, for the record:
+  - the re-entrancy question — upstream's peer-book round trip is legal only off the pool, and upstream's `reply_to` (`liboffs/src/OFFStreams/representation_actor.h`) is how a dispatch gets an answer; Pony's behaviour calls are fire-and-forget, which said the same from the other side;
+  - the relay — upstream's relay server has an actor with an **empty** dispatch, `clients_lock` and a quiesce wait; upstream's relay client has the bounded retry with a backoff;
+  - the relay daemon's segfault — upstream's lock discipline (`liboffs/src/Network/quic_listener.c:225`: "snapshot the connection list under the lock, then release it before calling ConnectionShutdown") and its credential shape were both already written down there;
+  - the daemon's socket path — upstream takes it from the command line (`--unix <path>`, `liboffs/examples/off_server/main.c`) and creates the transport only when a path was named.
 - **In-tree equivalent when a design problem touches an already-existing subsystem**: look at the closest in-tree precedent before writing anything new. For actor+pd_loop+thread problems in poseidon, the canonical in-tree reference is `src/Timer/timer_actor.c` (its own `actor_t`, its own `pd_loop_t* loop`, its own `platform_thread_t* thread`, `atomic` running flag, `_dispatch` registered at create time, the same `pd_loop_async_send` wakeup + `platform_thread_join` shutdown used in upstream).
 
 ## Phase 5 (next) — transport migration study (in progress, no code yet)
