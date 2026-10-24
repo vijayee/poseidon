@@ -71,6 +71,15 @@ static bool read_frame_header(const uint8_t* buf, uint32_t* len) {
     return *len > 0 && *len <= CLIENT_READ_BUF_SIZE;
 }
 
+/* The QUIC_BUFFER and the bytes it points at travel in one allocation:
+ * msquic keeps a pointer to the buffer and reads it on its worker
+ * thread, so a buffer on the caller's stack would be read after the
+ * call returned. The SEND_COMPLETE event frees the whole block. */
+typedef struct quic_send_block_t {
+    QUIC_BUFFER buffer;
+    uint8_t data[];
+} quic_send_block_t;
+
 static int send_frame(poseidon_client_t* client, const uint8_t* data, size_t len) {
     if (client->is_quic) {
         if (!client->quic_stream_ready || client->quic_stream == NULL) return -1;
@@ -82,17 +91,24 @@ static int send_frame(poseidon_client_t* client, const uint8_t* data, size_t len
         write_frame_header(send_buf, (uint32_t)len);
         memcpy(send_buf + FRAME_HEADER_SIZE, data, len);
 
-        QUIC_BUFFER buf;
-        buf.Buffer = send_buf;
-        buf.Length = total_len;
-
-        QUIC_STATUS status = client->quic_api->StreamSend(
-            client->quic_stream, &buf, 1, QUIC_SEND_FLAG_NONE, send_buf);
-        if (QUIC_FAILED(status)) {
+        quic_send_block_t* block = (quic_send_block_t*)
+            get_memory(sizeof(quic_send_block_t) + total_len);
+        if (block == NULL) {
             free(send_buf);
             return -1;
         }
-        // send_buf is freed in QUIC_STREAM_EVENT_SEND_COMPLETE callback
+        memcpy(block->data, send_buf, total_len);
+        free(send_buf);
+        block->buffer.Buffer = block->data;
+        block->buffer.Length = (uint32_t)total_len;
+
+        QUIC_STATUS status = client->quic_api->StreamSend(
+            client->quic_stream, &block->buffer, 1, QUIC_SEND_FLAG_NONE, block);
+        if (QUIC_FAILED(status)) {
+            free(block);
+            return -1;
+        }
+        // The block is freed in the QUIC_STREAM_EVENT_SEND_COMPLETE callback
         return 0;
     }
 

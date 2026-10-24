@@ -178,6 +178,15 @@ static void _connection_decode_frames(poseidon_quic_connection_t* connection) {
 // Hands the pending bytes to msquic. The buffer is handed over to
 // msquic, which frees it when the send completes.
 
+/* The QUIC_BUFFER and the bytes it points at travel in one allocation:
+ * msquic keeps a pointer to the buffer and reads it on its worker
+ * thread, so a buffer on this stack would be read after the call
+ * returned. The SEND_COMPLETE event frees the whole block. */
+typedef struct quic_send_block_t {
+    QUIC_BUFFER buffer;
+    uint8_t data[];
+} quic_send_block_t;
+
 static void _connection_send(poseidon_quic_connection_t* connection,
                              uint8_t* data, size_t len) {
   if (connection->stream == NULL || data == NULL) {
@@ -190,16 +199,24 @@ static void _connection_send(poseidon_quic_connection_t* connection,
     return;
   }
 
-  QUIC_BUFFER buf;
-  buf.Buffer = data;
-  buf.Length = (uint32_t)len;
-
-  // msquic keeps the buffer until the send completes and frees it in
-  // the SEND_COMPLETE event, so the buffer must not be touched here.
-  QUIC_STATUS status = api->StreamSend(connection->stream, &buf, 1,
-                                        QUIC_SEND_FLAG_NONE, data);
-  if (QUIC_FAILED(status)) {
+  quic_send_block_t* block = (quic_send_block_t*)
+      get_memory(sizeof(quic_send_block_t) + len);
+  if (block == NULL) {
     free(data);
+    return;
+  }
+  memcpy(block->data, data, len);
+  free(data);
+  block->buffer.Buffer = block->data;
+  block->buffer.Length = (uint32_t)len;
+
+  // msquic keeps the buffer until the send completes and frees the
+  // block in the SEND_COMPLETE event, so the buffer must not be touched
+  // here.
+  QUIC_STATUS status = api->StreamSend(connection->stream, &block->buffer, 1,
+                                        QUIC_SEND_FLAG_NONE, block);
+  if (QUIC_FAILED(status)) {
+    free(block);
   }
 }
 
