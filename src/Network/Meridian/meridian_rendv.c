@@ -456,6 +456,17 @@ static void meridian_rendv_dispatch(void* state, message_t* msg) {
             }
             handle->local_rendv = (meridian_rendv_t*)
                 refcounter_reference(&((meridian_rendv_t*)p->rendv)->refcounter);
+            /* The local point is this node's own NAT type, and upstream
+             * starts it as a cone NAT before the detection has answered
+             * (liboffs/src/Network/network.c:359) — a direct attempt is
+             * allowed, because only a symmetric NAT forbids it. A peer
+             * point keeps the unknown default: the peer's type is not
+             * known until the peer says so
+             * (liboffs/src/Network/peer_connection.c:33). A caller that
+             * already set the type keeps it. */
+            if (handle->local_rendv->nat_type == MERIDIAN_NAT_TYPE_UNKNOWN) {
+                handle->local_rendv->nat_type = MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE;
+            }
             if (actor_reply_complete(&p->reply)) {
                 actor_reply_destroy(&p->reply);
                 free(p);
