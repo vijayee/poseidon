@@ -2001,6 +2001,25 @@ What it changes is the **label**, not a path: in both layers only
 (`meridian_conn_handle_upgrade_to_direct`) both let every cone type
 through.
 
+### The default, matched to upstream
+
+Upstream starts the **node's own** NAT type as a cone NAT before the
+detection has answered (`network->local_nat_type = NAT_TYPE_PORT_RESTRICTED_CONE`,
+`liboffs/src/Network/network.c:359`) — only a symmetric NAT forbids a
+direct attempt, so a node that has not been classified yet may still
+try one. A **peer's** type starts as unknown
+(`peer->peer_nat_type = NAT_TYPE_UNKNOWN`,
+`liboffs/src/Network/peer_connection.c:33`): the peer's NAT is not
+known until the peer says so.
+
+Poseidon now keeps the two defaults apart: the local rendezvous point
+becomes a cone NAT when the handle takes it (a caller that already set
+the type keeps it), and a peer point stays unknown.
+
+The discovery is written up in the upstream repository, where the field
+that upstream declares and never fills lives:
+`liboffs/docs/nat-detect-local-address.md`.
+
 The rule is exposed as `meridian_rendv_classify_nat()` so it can be
 tested, the way upstream exposes `nat_detect_classify()` "for unit
 testing".
