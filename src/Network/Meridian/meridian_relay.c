@@ -828,6 +828,10 @@ relay_uni_stream_callback(HQUIC Stream, void* Context,
             relay_ctx->msquic->StreamShutdown(
                 Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
         }
+        /* The arm ends here. The next arm reads the send context, and
+         * this event never wrote one: msquic leaves the union as it
+         * found it, so the read would hand a stray pointer to free(). */
+        break;
     }
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
@@ -905,6 +909,10 @@ relay_bidi_stream_callback(HQUIC Stream, void* Context,
             relay_ctx->msquic->StreamShutdown(
                 Stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
         }
+        /* The arm ends here. The next arm reads the send context, and
+         * this event never wrote one: msquic leaves the union as it
+         * found it, so the read would hand a stray pointer to free(). */
+        break;
     }
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
