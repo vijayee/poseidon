@@ -478,8 +478,12 @@ RelayServerUniStreamCallback(HQUIC Stream, void* Context,
             }
         }
 
-        // Acknowledge all received bytes
-        Event->RECEIVE.TotalBufferLength = 0;
+        /* The bytes are copied into the entry's buffer, so all of them
+         * are consumed. msquic reads the length on the way out, and a
+         * zero would say that nothing was taken: the data would never
+         * be acknowledged and the peer's FIN would never arrive. Left
+         * unchanged it says "all of it"
+         * (deps/msquic/docs/Streams.md). */
         break;
     }
 
@@ -609,8 +613,12 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
             }
         }
 
-        // Acknowledge all received bytes
-        Event->RECEIVE.TotalBufferLength = 0;
+        /* The bytes are copied into the entry's buffer, so all of them
+         * are consumed. msquic reads the length on the way out, and a
+         * zero would say that nothing was taken: the data would never
+         * be acknowledged and the peer's FIN would never arrive. Left
+         * unchanged it says "all of it"
+         * (deps/msquic/docs/Streams.md). */
         break;
     }
 
