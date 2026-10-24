@@ -1845,3 +1845,94 @@ before it is dispatched first.
 Green, 25/25 ctest. The relay test now asserts the address: the
 relay's view of the client comes back to the rendezvous point, and the
 client keeps the endpoint id the server gave it.
+
+## Phase 2 (2.32) — the de-wonk pass
+
+The relay round trip (2.31) was implemented, so it got the de-wonk
+audit: *"is anything unimplemented, stubbed, disabled, broken, or
+weird?"* The answer was: some of it, in eight places.
+
+### The close pulled the request from under the actor
+
+`meridian_stream_entry_destroy()` posts a close request to the entry's
+actor and waits for its answer, so the "the peer finished sending"
+message is dispatched before the entry's buffer dies. But the wait was
+skipped whenever `actor_send` returned false — and that return is a
+scheduling hint, not a delivery receipt (`src/Actor/actor_reply.c`).
+The entry was therefore destroyed with the message still queued, and
+`actor_run`'s destroy check dropped it.
+
+Worse, on a timeout the caller freed the request while the actor could
+still dispatch it. `actor_reply_wait` now hands the request over on a
+timeout — the same hand-over `actor_round_trip` makes — and the close
+message's dispatch frees it when the reply says the caller gave up.
+`actor_reply_wait`'s contract is written down, and the actor test
+follows it.
+
+### The append leaked the bytes
+
+`meridian_stream_entry_append()` copies the received bytes into a
+request and hands it to the actor. On the "the actor is gone" path it
+returned without freeing the request: nobody owned the bytes any more.
+
+### The rendezvous had the fall-through the relay client had
+
+The relay client's `PEER_SEND_SHUTDOWN` arm fell into the
+`SEND_COMPLETE` arm and freed a pointer out of a union member the event
+never wrote. **The rendezvous's two stream callbacks had the same
+arm.** The compiler said so (`-Wimplicit-fallthrough`) and the warning
+was in the build log of the file I had just edited.
+
+### A uni stream's handle was never released
+
+`meridian_stream_send_uni()` opens a stream per message, and nobody
+closed it: the handle was held until the connection went away, and the
+relay opens one stream per forwarded datagram. The stream callbacks now
+close the handle in `SHUTDOWN_COMPLETE`, the way the relay's and the
+protocol's own callbacks already did.
+
+### The teardown waited for an actor under the lock
+
+The relay client's destroy and the relay server's connection shutdown
+destroyed the stream entries **while holding the lock**. Destroying an
+entry waits for its actor, and the actor's dispatch takes that same
+lock — a deadlock, bounded by the five-second timeout, on every client
+disconnect that had a message in flight. Both now take the entries out
+under the lock and destroy them outside it, the way the server's stop
+path already did.
+
+### The rest
+
+- The stray `;;` in the relay server and the protocol (7 sites).
+- An unused parameter, and a build warning for an unused callback
+  parameter.
+- The endpoint id the peer-stream log prints is now read under the lock
+  (after the unlock the slot may already belong to another client).
+- The relay test tore down *after* its assertions, so a failed
+  assertion left the server holding its port and its thread. The
+  teardown comes first now.
+- The QUIC transport's and the client library's send paths had the same
+  stack `QUIC_BUFFER` the Meridian layer had. Both now send from a heap
+  block that holds the buffer and the bytes together.
+
+### One finding left open
+
+**The stream entry has two owners at teardown.** The relay client's
+destroy and the relay server's connection shutdown destroy the entries,
+and the stream's own `SHUTDOWN_COMPLETE` destroys the entry too. The
+order msquic uses (the stream's shutdown completes before the
+connection's) keeps them apart in practice — the relay test ran 70
+times without a fault — but the ownership is not stated anywhere, and
+the wrong order is a double free.
+
+Upstream has one owner per object: the connection's shutdown closes
+the *stream*, and the stream's own shutdown completes frees the stream's
+context (`liboffs/src/Network/Relay/relay_server.c`). Poseidon's entry
+plays both parts. Making that one owner is a design change across the
+Meridian layer, not a patch, so it is recorded here rather than
+half-done.
+
+### Build
+
+Green, 25/25 ctest. Every commit in the series builds and passes on
+its own.
