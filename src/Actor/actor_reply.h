@@ -211,7 +211,12 @@ int actor_request(actor_t* actor, uint32_t type, actor_reply_t* reply,
  * the stream entry's close does that, so the message that says the peer
  * finished sending is delivered before the entry goes away.
  *
- * @return 0 when the answer arrived, -1 on a timeout.
+ * On a timeout the request is handed to the actor: it frees the request
+ * when it gets to the message, and the caller must not free it or touch
+ * its reply any more. The same hand-over actor_round_trip makes.
+ *
+ * @return 0 when the answer arrived, -1 on a timeout (the request is the
+ *         actor's from now on).
  */
 int actor_reply_wait(actor_reply_t* reply, uint32_t timeout_ms);
 

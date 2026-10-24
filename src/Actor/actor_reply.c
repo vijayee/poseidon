@@ -158,6 +158,13 @@ int actor_reply_wait(actor_reply_t* reply, uint32_t timeout_ms) {
         if (reply->done) break;
         if (platform_condvar_timed_wait(reply->cv, reply->mutex, timeout_ms) != 0) {
             if (!reply->done) {
+                /* The caller gave up: the request is the actor's to free
+                 * now, the same hand-over actor_round_trip does. The
+                 * actor frees it when it gets to the message, so the
+                 * caller must not touch the request or its reply any
+                 * more — a free here would pull the request out from
+                 * under the actor. */
+                reply->orphaned = 1;
                 platform_mutex_unlock(reply->mutex);
                 return -1;
             }

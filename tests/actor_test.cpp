@@ -223,8 +223,13 @@ TEST_F(ActorTest, ADispatchDoesNotWaitForAnotherActor) {
     scheduler_pool_wait_for_idle(pool);
     EXPECT_EQ(1, worker_state.pings);
 
-    actor_reply_destroy(&request->reply);
-    free(request);
+    /* A wait that timed out handed the request to the actor: it frees
+     * the request when it gets to the message, so the test must not
+     * free it here. */
+    if (waited == 0) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+    }
     actor_destroy(&caller);
     actor_destroy(&worker);
     scheduler_pool_stop(pool);
@@ -398,8 +403,13 @@ TEST_F(ActorTest, AnActorCanHaveAnAnswerWithoutAWorkerWaiting) {
      * events do. */
     EXPECT_EQ(7 + 7, waiting_state.last_payload);
 
-    actor_reply_destroy(&request->reply);
-    free(request);
+    /* A wait that timed out handed the request to the actor: it frees
+     * the request when it gets to the message, so the test must not
+     * free it here. */
+    if (waited == 0) {
+        actor_reply_destroy(&request->reply);
+        free(request);
+    }
     actor_destroy(&waiting);
     actor_destroy(&worker);
     scheduler_pool_stop(pool);
