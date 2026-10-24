@@ -2001,6 +2001,30 @@ What it changes is the **label**, not a path: in both layers only
 (`meridian_conn_handle_upgrade_to_direct`) both let every cone type
 through.
 
+### The state, read across threads
+
+The NAT type and the connection state are written by their actor and
+read by the application through a plain accessor — the same object on
+both sides, no synchronisation. That is a data race, and not only a
+stale-value one: the compiler may hoist a plain load out of the loop
+that waits for the answer, so the wait may never see the update.
+
+Both are **atomic** now: `meridian_rendv_t.nat_type`,
+`reflexive_addr` and `reflexive_port`, and `meridian_conn_t.state`.
+The accessors that read them load atomically, and the actor's writers
+store atomically.
+
+Upstream does not have this shape: it keeps the NAT type inside the
+network actor's state and never reads it from another thread — every
+read of `network->local_nat_type` is inside the network actor's own
+dispatch, `peer->peer_nat_type` is written but never read, and
+`conn_state_get()` has no callers at all. The finding is written up in
+the upstream repository, next to the field it is about:
+`liboffs/docs/nat-detect-local-address.md`.
+
+A port that keeps a piece of an actor's state on an object the
+application holds a pointer to has to make that field atomic.
+
 ### The default, matched to upstream
 
 Upstream starts the **node's own** NAT type as a cone NAT before the
