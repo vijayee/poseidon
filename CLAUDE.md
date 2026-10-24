@@ -2154,3 +2154,58 @@ something.
 ### Build
 
 Green, 25/25 ctest.
+
+## Phase 2 (2.36) — the protocol's teardown runs on its actor
+
+`meridian_protocol_stop()` tore the protocol down **on the calling
+thread**: it walked the peer table, released the peer nodes, closed
+every connection, the listener, the configuration and the registration —
+all while the protocol's actor was live and using the same tables. The
+actor owns the peer table (2.18), so the teardown was a second thread
+mutating it, and the peer nodes were freed while the actor could still
+be dispatching with them.
+
+Upstream keeps that teardown on the network actor, and says why:
+
+> We're on the network actor — the **sole owner** of conn_mgr + the HQUIC
+> lifecycle. ConnectionShutdown is safe here because
+> connection_manager_remove + ConnectionClose also run on this actor.
+> (liboffs/src/Network/network.c:5637)
+
+Poseidon now does the same. `MERIDIAN_PROTOCOL_STOP` is a new message:
+the teardown runs in the actor's dispatch, and the caller waits for the
+answer. The peer nodes are not released there — the destroy does that,
+after the actor is gone.
+
+### A close must not wait from inside a dispatch
+
+Moving the teardown onto the actor exposed the project's own rule: the
+stream entry's close waits for its actor to drain the queue, and the
+teardown closes the connections, whose shutdown-completes destroy the
+entries — so the close ran **inside a dispatch** and waited for another
+actor. A worker that waits is a worker that runs no actor.
+
+The close now hands the request over (`actor_reply_detach`) when the
+caller is inside a dispatch, and waits only from a thread that may
+block. The messages still queued are dropped with the entry, which is
+what a teardown means.
+
+### Two findings left open
+
+Both are in the protocol's peer table, and both are the same shape as
+the teardown that was just fixed:
+
+- **The public API still touches the table from the calling thread.**
+  `meridian_protocol_connect()` walks `peer_nodes[]` to see whether the
+  peer is already connected, and `meridian_protocol_send_packet()` and
+  `meridian_protocol_broadcast()` read it to find a connection — all on
+  the caller's thread, while the actor mutates it. The fix is upstream's:
+  the wrapper posts to the actor and the actor does the work.
+- **A peer whose connection dies stays in the table.** The protocol's
+  connection callback does nothing on `SHUTDOWN_COMPLETE`, so only an
+  explicit `meridian_protocol_disconnect()` removes a peer; upstream
+  removes it when the connection goes down.
+
+### Build
+
+Green, 25/25 ctest.
