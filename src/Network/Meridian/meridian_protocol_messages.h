@@ -58,6 +58,24 @@ typedef struct meridian_protocol_stop_msg_t {
     actor_reply_t reply;   /**< Must stay first. */
 } meridian_protocol_stop_msg_t;
 
+/* Open a connection to a peer. The actor checks the table, opens the
+ * connection and adds the peer, and writes the outcome here. */
+typedef struct meridian_protocol_connect_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
+    uint32_t addr;         /**< The peer's address. */
+    uint16_t port;         /**< The peer's port. */
+    int result;            /**< The actor writes the outcome here:
+                                   0 on success (or when the peer was
+                                   already connected), -1 on failure. */
+} meridian_protocol_connect_msg_t;
+
+/* A connection died. The actor takes the peer out of the table and
+ * releases the node. */
+typedef struct meridian_protocol_peer_disconnected_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
+    void* connection;      /**< The msquic connection handle that died. */
+} meridian_protocol_peer_disconnected_msg_t;
+
 /* A snapshot of the peer table. The actor builds the copy; the caller
  * frees the array (not the nodes — the table keeps those). */
 typedef struct meridian_protocol_peers_snapshot_msg_t {

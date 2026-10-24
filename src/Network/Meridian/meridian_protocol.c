@@ -44,6 +44,8 @@ protocol_bidi_stream_callback(HQUIC Stream, void* Context,
 
 /* The actor-thread body of the send path. */
 static void meridian_protocol_handle_stop(meridian_protocol_t* protocol);
+static int meridian_protocol_connect_impl(meridian_protocol_t* protocol,
+                                          uint32_t addr, uint16_t port);
 static int meridian_protocol_send_packet_impl(meridian_protocol_t* protocol,
                                                const uint8_t* data, size_t len,
                                                uint32_t target_addr,
@@ -374,6 +376,47 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
             free(p->data);
             p->data = NULL;
             if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_PROTOCOL_PEER_DISCONNECTED: {
+            meridian_protocol_peer_disconnected_msg_t* p =
+                (meridian_protocol_peer_disconnected_msg_t*)msg->payload;
+            /* The connection died: the peer leaves the table. Upstream
+             * removes the peer in the handler that owns the connection
+             * ("connection_manager_remove + ConnectionClose also run on
+             * this actor", liboffs/src/Network/network.c:5638). The
+             * connection is already closed, so the peer is only dropped
+             * from the table and its node released. */
+            for (size_t i = 0; i < protocol->num_connected_peers; i++) {
+                if (protocol->connected_peers[i] == (HQUIC)p->connection) {
+                    meridian_node_t* node = protocol->peer_nodes[i];
+                    protocol->connected_peers[i] = NULL;
+                    protocol->peer_nodes[i] = NULL;
+                    if (node != NULL) {
+                        refcounter_dereference(&node->refcounter);
+                        if (refcounter_count(&node->refcounter) == 0) {
+                            free(node);
+                        }
+                    }
+                    break;
+                }
+            }
+            if (actor_reply_complete(&p->reply)) {
+                /* The caller handed the request over: the actor frees it. */
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_PROTOCOL_CONNECT: {
+            meridian_protocol_connect_msg_t* p =
+                (meridian_protocol_connect_msg_t*)msg->payload;
+            p->result = meridian_protocol_connect_impl(protocol, p->addr, p->port);
+            if (actor_reply_complete(&p->reply)) {
+                /* The caller handed the request over: the actor frees it. */
                 actor_reply_destroy(&p->reply);
                 free(p);
             }
@@ -1128,17 +1171,23 @@ int meridian_protocol_add_seed_node(meridian_protocol_t* protocol,
     return 0;
 }
 
-int meridian_protocol_connect(meridian_protocol_t* protocol,
-                               uint32_t addr, uint16_t port) {
-    if (protocol == NULL) return -1;
-    if (!ATOMIC_LOAD(&protocol->running)) return -1;
+/**
+ * The actor-thread body of MERIDIAN_PROTOCOL_CONNECT.
+ *
+ * The check, the connection and the table write all happen on the
+ * actor's thread: the peer table is the actor's, so a caller that
+ * checked it and then opened the connection would be racing the actor.
+ * Upstream's connect runs on the network actor for the same reason.
+ */
+static int meridian_protocol_connect_impl(meridian_protocol_t* protocol,
+                                          uint32_t addr, uint16_t port) {
     if (protocol->num_connected_peers >= 64) return -1;
 
-    // Check if already connected
+    /* Already connected? The table is the actor's, so the check belongs
+     * here. */
     for (size_t i = 0; i < protocol->num_connected_peers; i++) {
-        if (protocol->peer_nodes[i] &&
-            protocol->peer_nodes[i]->addr == addr &&
-            protocol->peer_nodes[i]->port == port) {
+        meridian_node_t* node = protocol->peer_nodes[i];
+        if (node != NULL && node->addr == addr && node->port == port) {
             return 0;
         }
     }
@@ -1189,49 +1238,57 @@ int meridian_protocol_connect(meridian_protocol_t* protocol,
         return -1;
     }
 
-    // The peer table belongs to the actor. The caller waits for the
-    // answer, so the peer is in the table when this returns.
-    meridian_protocol_peer_added_msg_t* request =
-        (meridian_protocol_peer_added_msg_t*)
-        get_clear_memory(sizeof(meridian_protocol_peer_added_msg_t));
-    if (request == NULL) {
-        protocol->msquic->ConnectionClose(Connection);
-        refcounter_dereference(&node->refcounter);
-        if (refcounter_count(&node->refcounter) == 0) {
-            free(node);
-        }
-        return -1;
+    // The peer table is the actor's: the peer goes in here.
+    if (protocol->num_connected_peers < 64) {
+        protocol->connected_peers[protocol->num_connected_peers] = Connection;
+        protocol->peer_nodes[protocol->num_connected_peers] = node;
+        protocol->num_connected_peers++;
+        return 0;
     }
-    request->connection = Connection;
-    request->node = node;
+
+    // The table filled up while the connection was opening: the peer
+    // does not go in, so the connection and the node are released.
+    protocol->msquic->ConnectionClose(Connection);
+    refcounter_dereference(&node->refcounter);
+    if (refcounter_count(&node->refcounter) == 0) {
+        free(node);
+    }
+    return -1;
+}
+
+int meridian_protocol_connect(meridian_protocol_t* protocol,
+                               uint32_t addr, uint16_t port) {
+    if (protocol == NULL) return -1;
+    if (!ATOMIC_LOAD(&protocol->running)) return -1;
+
+    /* The connect is the actor's work: it owns the peer table, and the
+     * check and the table write have to be on the same thread. */
+    meridian_protocol_connect_msg_t* request =
+        (meridian_protocol_connect_msg_t*)
+        get_clear_memory(sizeof(meridian_protocol_connect_msg_t));
+    if (request == NULL) return -1;
+    request->addr = addr;
+    request->port = port;
+    request->result = -1;
 
     if (actor_reply_init(&request->reply) != 0) {
         free(request);
-        protocol->msquic->ConnectionClose(Connection);
-        refcounter_dereference(&node->refcounter);
-        if (refcounter_count(&node->refcounter) == 0) {
-            free(node);
-        }
         return -1;
     }
 
-    int trip = actor_round_trip(&protocol->actor, MERIDIAN_PROTOCOL_PEER_ADDED,
+    int trip = actor_round_trip(&protocol->actor, MERIDIAN_PROTOCOL_CONNECT,
                                 &request->reply, MERIDIAN_PROTOCOL_TIMEOUT_MS);
     if (trip == 1) {
         actor_reply_destroy(&request->reply);
         free(request);
-        protocol->msquic->ConnectionClose(Connection);
-        refcounter_dereference(&node->refcounter);
-        if (refcounter_count(&node->refcounter) == 0) {
-            free(node);
-        }
         return -1;
     }
     if (trip != 0) return -1;  /* the actor owns the request now */
 
+    int result = request->result;
     actor_reply_destroy(&request->reply);
     free(request);
-    return 0;
+    return result;
 }
 
 int meridian_protocol_disconnect(meridian_protocol_t* protocol,
@@ -1844,9 +1901,25 @@ ConnectionCallback(HQUIC Connection, void* Context,
         // Connection shutting down
         return QUIC_STATUS_SUCCESS;
 
-    case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE:
-        // Ready for close
+    case QUIC_CONNECTION_EVENT_SHUTDOWN_COMPLETE: {
+        /* The connection died: the peer leaves the table. The table is
+         * the actor's, so the event is handed over and the callback moves
+         * on — the same shape as the listener's peer-added post. */
+        meridian_protocol_peer_disconnected_msg_t* event =
+            get_clear_memory(sizeof(meridian_protocol_peer_disconnected_msg_t));
+        if (event != NULL) {
+            event->connection = Connection;
+            if (actor_reply_init(&event->reply) == 0) {
+                actor_reply_detach(&event->reply);
+                /* No payload destructor: the dispatch frees the request
+                 * when the reply completes, the way the round trips do. */
+                protocol_post_event(protocol, MERIDIAN_PROTOCOL_PEER_DISCONNECTED, event, NULL);
+            } else {
+                free(event);
+            }
+        }
         return QUIC_STATUS_SUCCESS;
+    }
 
     case QUIC_CONNECTION_EVENT_PEER_STREAM_STARTED: {
         HQUIC Stream = Event->PEER_STREAM_STARTED.Stream;

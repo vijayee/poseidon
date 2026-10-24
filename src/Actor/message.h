@@ -432,6 +432,11 @@ typedef enum {
    * listener, the configuration and the registration: it owns the peer
    * table and the HQUIC lifecycle. */
   MERIDIAN_PROTOCOL_STOP,
+  /* Open a connection to a peer. The actor checks the peer table, opens
+   * the connection and adds the peer: the table is its own. */
+  MERIDIAN_PROTOCOL_CONNECT,
+  /* A connection died. The actor takes the peer out of the table. */
+  MERIDIAN_PROTOCOL_PEER_DISCONNECTED,
 
   /* ========================================================================
    * 2.19 Meridian rendezvous — actor messages
