@@ -1737,3 +1737,111 @@ test says so where the wait belongs, and the gap is recorded here.
 ### Build
 
 Green, 25/25 ctest.
+
+## Phase 2 (2.31) — the relay round trip, closed
+
+2.30 said the client's bidi stream never reaches the server. It did
+reach it: the request arrived, and five separate defects stood between
+the request and the answer. The test now waits for the address and
+gets it.
+
+### The receive contract
+
+Every Meridian stream callback ended its receive arm with
+
+```c
+Event->RECEIVE.TotalBufferLength = 0;
+```
+
+which says "I consumed **nothing**". msquic reads that number on the way
+out of the callback: the data is never acknowledged, the stream's base
+offset never reaches the FIN, and the peer never hears
+`PEER_SEND_SHUTDOWN` — so the message never completes and the relay
+server never answers. The rule is in msquic's own documentation
+(`deps/msquic/docs/Streams.md`): the value is what the app consumed, and
+**left unchanged it means "all of it"**. Upstream's callbacks never
+touch it. Ten sites now leave it alone, with the reason written next to
+them.
+
+### The send buffer outlives the call
+
+msquic keeps a pointer to the `QUIC_BUFFER` and reads it asynchronously
+on its worker thread. Poseidon passed a `QUIC_BUFFER` on the caller's
+stack, so the worker read a frame that no longer existed — the crash
+the test hit first, inside `QuicStreamSendBufferRequest`.
+
+Upstream solved it long ago (`liboffs/src/Network/quic_peer_send.c`):
+
+> The QUIC_BUFFER is included in the context struct so it remains
+> heap-allocated until SEND_COMPLETE fires — msquic stores a pointer to
+> the QUIC_BUFFER and reads from it asynchronously.
+
+Poseidon now has that shape: `meridian_stream_send()` copies the bytes
+into a `meridian_stream_send_context_t` that carries the buffer with
+them, and the stream's `SEND_COMPLETE` arm hands the context back
+(`meridian_stream_send_complete()`).
+
+### The entry and the stream are created together
+
+The relay client built its stream entry with **no stream handle**:
+
+```c
+meridian_stream_entry_t* entry = meridian_stream_entry_create(NULL, true, relay, relay->pool);
+```
+
+`meridian_stream_entry_create()` refuses a NULL handle — an entry
+without a stream has nowhere to put the bytes that arrive — so the
+request was never sent at all. The protocol's measure path had the same
+line and was dead for the same reason.
+
+`meridian_stream_open_bidi_entry()` replaces the old
+`meridian_stream_open_bidi()`: it opens the stream, creates the entry
+**with** the handle, points the stream's callback at the entry and
+starts the stream last. Upstream's relay server uses that order for a
+peer stream (`liboffs/src/Network/Relay/relay_server.c`): the entry
+first, then the callback, then the data.
+
+### The server decodes on the stream's actor
+
+The relay server's stream callbacks read `entry->recv_buf` — the
+**actor's** buffer — from the msquic thread, right after posting the
+bytes to the actor. The read raced the append, and the server usually
+saw an empty buffer ("bidi stream too short"). The server now does what
+the client does: the peer-send-shutdown hands the message to the
+entry's actor, and the decode runs there.
+
+### The fall-through
+
+The relay client's `PEER_SEND_SHUTDOWN` arm had no `break`, so it fell
+into the `SEND_COMPLETE` arm, which read `Event->SEND_COMPLETE.ClientContext`
+— a union member the event never wrote. msquic hands the callback a
+stack event with only the type filled in, so that read was whatever
+was on the stack, and the arm freed it.
+
+### `actor_send` is a scheduling hint, not a receipt
+
+`actor_send()` returns whether the mailbox was **empty** before the
+push — "did this send schedule the actor" — not whether the message was
+taken. `src/Actor/actor_reply.c` says so, and `tests/actor_test.cpp`
+documents it.
+
+Several posts read it as a receipt. A post that owns its payload (the
+relay's address response, the protocol's measure and gossip responses,
+the rendezvous's stream data, the session's deliver) freed the payload
+when the return was false — and the message was queued all the same, so
+the actor freed it too: a double free. The stream entry's close had the
+same shape with a worse consequence: it skipped the wait for the queue
+to drain, so the actor was destroyed with the "the peer finished
+sending" message still queued, and the message was dropped. The
+address response never reached the rendezvous.
+
+The posts now check the actor's `ACTOR_FLAG_DESTROY` — the only case
+where the message is really dropped — and the stream entry's close
+always waits for its close request to be answered, so the message
+before it is dispatched first.
+
+### Build
+
+Green, 25/25 ctest. The relay test now asserts the address: the
+relay's view of the client comes back to the rendezvous point, and the
+client keeps the endpoint id the server gave it.
