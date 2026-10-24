@@ -2113,3 +2113,44 @@ leaving a relay-only connection alone.
 ### Build
 
 Green, 25/25 ctest.
+
+## Phase 2 (2.35) — the stream entry has one owner
+
+The stream entry had **two**: the sweep that runs when the owner goes
+away (the relay client's destroy, the relay server's connection
+shutdown) destroyed every entry it had collected, and the stream's own
+`SHUTDOWN_COMPLETE` destroyed the entry again. Whichever ran second
+freed it twice.
+
+Nothing had gone wrong yet, because MsQuic indicates a stream's shutdown
+before the connection's, so the stream always won the race. That is an
+ordering guarantee, not an ownership rule, and it was the only thing
+between the tree and a double free.
+
+**Poseidon already had the right shape elsewhere**: the Meridian
+protocol's streams and the rendezvous's tunnel streams are destroyed by
+the stream's `SHUTDOWN_COMPLETE` and by nothing else. The relay client
+and the relay server now match them — the sweep takes the list out and
+frees the array, and the entries go with their streams.
+
+Upstream's relay server has the same division: the connection's
+shutdown closes the stream, and the stream's own shutdown completes
+frees what belongs to the stream
+(`liboffs/src/Network/Relay/relay_server.c`).
+
+The price is the trade the protocol and the rendezvous already make: an
+entry whose stream never gets a shutdown-complete is not freed. The
+relay's teardown closes the connection, which shuts the streams down,
+so their owners are released.
+
+### The stray semicolons
+
+The last of them are gone: `channel.c`, `meridian_ring.c`,
+`poseidon_client.c`, `memory_pool.c`, `bitset.c`,
+`elastic_bloom_filter.c` and `attenuated_bloom_filter.c`. The only
+`;;` left in the tree is inside a Windows SDDL string, where it means
+something.
+
+### Build
+
+Green, 25/25 ctest.
