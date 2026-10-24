@@ -26,7 +26,7 @@ static __thread int tls_initialized = 0;
 // Initialize a size class pool
 static void memory_pool_class_init(memory_pool_class_t* cls, uint8_t* pool,
                                    size_t block_size, size_t total_blocks) {
-    cls->lock = platform_mutex_create();;
+    cls->lock = platform_mutex_create();
     cls->pool_start = pool;
     cls->block_size = block_size;
     cls->total_blocks = total_blocks;
@@ -45,7 +45,7 @@ static void memory_pool_class_init(memory_pool_class_t* cls, uint8_t* pool,
 
 // Destroy a size class pool
 static void memory_pool_class_destroy(memory_pool_class_t* cls) {
-    platform_mutex_destroy(cls->lock);;
+    platform_mutex_destroy(cls->lock);
 }
 
 // Initialize thread-local caches

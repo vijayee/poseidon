@@ -15,7 +15,7 @@ attenuated_bloom_filter_t* attenuated_bloom_filter_create(uint32_t levels, size_
     for (uint32_t i = 0; i < levels; i++) {
         abf->levels[i] = elastic_bloom_filter_create(size, hash_count, omega, fp_bits);
     }
-    abf->lock = platform_mutex_create();;
+    abf->lock = platform_mutex_create();
     refcounter_init((refcounter_t*)abf);
     return abf;
 }
@@ -28,7 +28,7 @@ void attenuated_bloom_filter_destroy(attenuated_bloom_filter_t* abf) {
             elastic_bloom_filter_destroy(abf->levels[i]);
         }
         free(abf->levels);
-        platform_mutex_destroy(abf->lock);;
+        platform_mutex_destroy(abf->lock);
         free(abf);
     }
 }
@@ -173,7 +173,7 @@ attenuated_bloom_filter_t* attenuated_bloom_filter_decode(cbor_item_t* item) {
         }
     }
 
-    abf->lock = platform_mutex_create();;
+    abf->lock = platform_mutex_create();
     refcounter_init((refcounter_t*)abf);
 
     return abf;

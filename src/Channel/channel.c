@@ -175,7 +175,7 @@ poseidon_channel_t* poseidon_channel_create(poseidon_key_pair_t* key_pair,
         channel->name[POSEIDON_CHANNEL_MAX_NAME - 1] = '\0';
     }
 
-    channel->lock = platform_mutex_create();;
+    channel->lock = platform_mutex_create();
     refcounter_init((refcounter_t*)channel);
     return channel;
 }
@@ -201,7 +201,7 @@ void poseidon_channel_destroy(poseidon_channel_t* channel) {
         unlink(key_path);
         unlink(cert_path);
 
-        platform_mutex_destroy(channel->lock);;
+        platform_mutex_destroy(channel->lock);
         free(channel);
     }
 }

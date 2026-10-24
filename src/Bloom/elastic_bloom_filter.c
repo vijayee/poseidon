@@ -87,7 +87,7 @@ elastic_bloom_filter_t* elastic_bloom_filter_create(size_t size, uint32_t hash_c
     ebf->omega = omega;
     ebf->fp_bits = fp_bits;
     ebf->count = 0;
-    ebf->lock = platform_mutex_create();;
+    ebf->lock = platform_mutex_create();
     refcounter_init((refcounter_t*)ebf);
     return ebf;
 }
@@ -101,7 +101,7 @@ void elastic_bloom_filter_destroy(elastic_bloom_filter_t* ebf) {
             bucket_destroy(ebf->buckets[i]);
         }
         free(ebf->buckets);
-        platform_mutex_destroy(ebf->lock);;
+        platform_mutex_destroy(ebf->lock);
         free(ebf);
     }
 }

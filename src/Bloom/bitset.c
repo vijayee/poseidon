@@ -23,7 +23,7 @@ bitset_t* bitset_create(size_t byte_size) {
     bitset_t* set = get_clear_memory(sizeof(bitset_t));
     set->data = get_clear_memory(byte_size);
     set->size = byte_size;
-    set->lock = platform_mutex_create();;
+    set->lock = platform_mutex_create();
     refcounter_init((refcounter_t*)set);
     return set;
 }
@@ -33,7 +33,7 @@ void bitset_destroy(bitset_t* set) {
     refcounter_dereference((refcounter_t*)set);
     if (refcounter_count((refcounter_t*)set) == 0) {
         free(set->data);
-        platform_mutex_destroy(set->lock);;
+        platform_mutex_destroy(set->lock);
         free(set);
     }
 }
