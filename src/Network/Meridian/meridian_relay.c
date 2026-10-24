@@ -504,27 +504,19 @@ int meridian_relay_send_addr_request(meridian_relay_t* relay) {
     memcpy(msg_buf + 4, cbor_buf, cbor_len);
     free(cbor_buf);
 
-    // Create stream entry to track the response
-    meridian_stream_entry_t* entry = meridian_stream_entry_create(NULL, true, relay,
-                                                                   relay->pool);
-    if (entry != NULL) {
-        meridian_stream_entry_on_message(entry, relay_stream_message);
-    }
+    // Open the bidi stream with the entry that tracks it. The entry is
+    // the stream's context and the response is decoded on the entry's
+    // actor, so the stream and the entry are created together: an entry
+    // without a stream handle has nowhere to put the bytes that arrive.
+    meridian_stream_entry_t* entry = meridian_stream_open_bidi_entry(
+        relay->msquic, connection, relay_bidi_stream_callback,
+        relay_stream_message, relay, relay->pool);
     if (entry == NULL) {
         free(msg_buf);
         return -1;
     }
 
-    // Open bidi stream and send with FIN
-    HQUIC stream = meridian_stream_open_bidi(relay->msquic, connection,
-                                               relay_bidi_stream_callback, entry);
-    if (stream == NULL) {
-        meridian_stream_entry_destroy(entry);
-        free(msg_buf);
-        return -1;
-    }
-
-    entry->stream = stream;
+    HQUIC stream = entry->stream;
 
     platform_mutex_lock(relay->lock);
     relay_track_stream(relay, entry);

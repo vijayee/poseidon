@@ -153,12 +153,25 @@ int meridian_stream_send_uni(const struct QUIC_API_TABLE* msquic, HQUIC connecti
                               const uint8_t* data, size_t len, void* stream_context);
 
 /**
- * Opens a bidirectional stream on the given connection.
- * Returns the stream handle on success, NULL on failure.
- * The caller should send data on the stream separately.
+ * Opens a bidirectional stream and creates the entry that tracks it.
+ *
+ * The entry is created with the stream handle, and the stream's callback
+ * is pointed at the entry, so the bytes that arrive always find their
+ * entry. The stream is started last: until it is started the peer does
+ * not know the stream exists, so no byte can arrive before the callback
+ * is set.
+ *
+ * The entry is the stream's context: the callback reads the received
+ * bytes through it, and the owner's handler runs on the entry's actor.
+ *
+ * Returns the entry on success, NULL on failure. The caller owns the
+ * entry, and closes the stream when it is done with it.
  */
-HQUIC meridian_stream_open_bidi(const struct QUIC_API_TABLE* msquic, HQUIC connection,
-                                 QUIC_STREAM_CALLBACK_HANDLER callback, void* context);
+meridian_stream_entry_t* meridian_stream_open_bidi_entry(
+    const struct QUIC_API_TABLE* msquic, HQUIC connection,
+    QUIC_STREAM_CALLBACK_HANDLER callback,
+    meridian_stream_message_cb_t on_message, void* user_context,
+    scheduler_pool_t* pool);
 
 /**
  * Stream callback for one-way messages (gossip, QUASAR_GOSSIP, channel notices).

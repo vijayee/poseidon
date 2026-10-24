@@ -235,29 +235,24 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
                     cbor_decref(&encoded);
 
                     if (buf != NULL) {
+                        /* The stream is opened with the entry that
+                         * tracks it: the entry is the stream's context,
+                         * and an entry without a stream handle has
+                         * nowhere to put the bytes that arrive. */
                         meridian_stream_entry_t* entry =
-                            meridian_stream_entry_create(NULL, true, protocol,
-                                                        protocol->sched);
+                            meridian_stream_open_bidi_entry(
+                                protocol->msquic, connection,
+                                protocol_bidi_stream_callback, NULL,
+                                protocol, protocol->sched);
                         if (entry != NULL) {
-                            HQUIC stream = NULL;
-                            QUIC_STATUS status = protocol->msquic->StreamOpen(
-                                connection, QUIC_STREAM_OPEN_FLAG_NONE,
-                                protocol_bidi_stream_callback, entry, &stream);
-                            if (!QUIC_FAILED(status)) {
-                                entry->stream = stream;
-                                status = protocol->msquic->StreamStart(
-                                    stream, QUIC_STREAM_START_FLAG_NONE);
-                                if (!QUIC_FAILED(status)) {
-                                    if (meridian_stream_send(
-                                            protocol->msquic, stream, buf,
-                                            buf_len, QUIC_SEND_FLAG_FIN) == 0) {
-                                        free(buf);
-                                        protocol_add_stream(protocol, entry);
-                                        goto measure_done;
-                                    }
-                                }
-                                protocol->msquic->StreamClose(stream);
+                            if (meridian_stream_send(
+                                    protocol->msquic, entry->stream, buf,
+                                    buf_len, QUIC_SEND_FLAG_FIN) == 0) {
+                                free(buf);
+                                protocol_add_stream(protocol, entry);
+                                goto measure_done;
                             }
+                            protocol->msquic->StreamClose(entry->stream);
                             meridian_stream_entry_destroy(entry);
                         }
                         free(buf);

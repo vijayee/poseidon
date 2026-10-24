@@ -318,29 +318,57 @@ int meridian_stream_send_uni(const struct QUIC_API_TABLE* msquic, HQUIC connecti
 // BIDIRECTIONAL STREAM OPEN
 // ============================================================================
 
-HQUIC meridian_stream_open_bidi(const struct QUIC_API_TABLE* msquic, HQUIC connection,
-                                 QUIC_STREAM_CALLBACK_HANDLER callback, void* context) {
+/**
+ * Opens a bidirectional stream and creates the entry that tracks it.
+ *
+ * The order is the one the relay server uses for a peer stream: the
+ * entry is created with the stream handle, and the stream's callback is
+ * pointed at the entry, so the bytes that arrive always find their entry
+ * (liboffs/src/Network/Relay/relay_server.c). An entry created without a
+ * stream handle has nowhere to put the bytes that arrive.
+ *
+ * The stream is started last. Until it is started the peer does not know
+ * the stream exists, so no byte can arrive before the callback is set.
+ */
+meridian_stream_entry_t* meridian_stream_open_bidi_entry(
+    const struct QUIC_API_TABLE* msquic, HQUIC connection,
+    QUIC_STREAM_CALLBACK_HANDLER callback,
+    meridian_stream_message_cb_t on_message, void* user_context,
+    scheduler_pool_t* pool) {
     if (msquic == NULL || connection == NULL || callback == NULL) return NULL;
 
     HQUIC stream = NULL;
     QUIC_STATUS status = msquic->StreamOpen(connection,
                                               QUIC_STREAM_OPEN_FLAG_NONE,
                                               callback,
-                                              context,
+                                              NULL,
                                               &stream);
     if (QUIC_FAILED(status)) {
         log_error("meridian stream: StreamOpen (bidi) failed: 0x%x", status);
         return NULL;
     }
 
-    status = msquic->StreamStart(stream, QUIC_STREAM_START_FLAG_NONE);
-    if (QUIC_FAILED(status)) {
-        log_error("meridian stream: StreamStart (bidi) failed: 0x%x", status);
+    meridian_stream_entry_t* entry =
+        meridian_stream_entry_create(stream, true, user_context, pool);
+    if (entry == NULL) {
         msquic->StreamClose(stream);
         return NULL;
     }
 
-    return stream;
+    /* The entry is the stream's context: the callback reads the received
+     * bytes through it. */
+    msquic->SetCallbackHandler(stream, callback, entry);
+    meridian_stream_entry_on_message(entry, on_message);
+
+    status = msquic->StreamStart(stream, QUIC_STREAM_START_FLAG_NONE);
+    if (QUIC_FAILED(status)) {
+        log_error("meridian stream: StreamStart (bidi) failed: 0x%x", status);
+        msquic->StreamClose(stream);
+        meridian_stream_entry_destroy(entry);
+        return NULL;
+    }
+
+    return entry;
 }
 
 // ============================================================================
