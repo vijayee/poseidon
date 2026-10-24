@@ -2190,21 +2190,79 @@ caller is inside a dispatch, and waits only from a thread that may
 block. The messages still queued are dropped with the entry, which is
 what a teardown means.
 
-### Two findings left open
+### Two findings, and what was wrong about the first
 
-Both are in the protocol's peer table, and both are the same shape as
-the teardown that was just fixed:
+Both were in the protocol's peer table. The first was described here as
+"the public API still touches the table from the calling thread" — that
+was **too wide**: `meridian_protocol_send_packet()` and
+`meridian_protocol_broadcast()` already post to the actor, and the
+actor's arms do the lookup and the fan-out. Only
+`meridian_protocol_connect()` read the table from the caller's thread
+— the "is this peer already connected" check and the count — and it has
+been fixed (2.37).
 
-- **The public API still touches the table from the calling thread.**
-  `meridian_protocol_connect()` walks `peer_nodes[]` to see whether the
-  peer is already connected, and `meridian_protocol_send_packet()` and
-  `meridian_protocol_broadcast()` read it to find a connection — all on
-  the caller's thread, while the actor mutates it. The fix is upstream's:
-  the wrapper posts to the actor and the actor does the work.
-- **A peer whose connection dies stays in the table.** The protocol's
-  connection callback does nothing on `SHUTDOWN_COMPLETE`, so only an
-  explicit `meridian_protocol_disconnect()` removes a peer; upstream
-  removes it when the connection goes down.
+The second was real: a peer whose connection dies stayed in the table,
+because the protocol's connection callback did nothing on
+`SHUTDOWN_COMPLETE`. It is fixed too (2.37).
+
+### Build
+
+Green, 25/25 ctest.
+
+## Phase 2 (2.37) — the protocol's peer table, again
+
+The peer table is the protocol actor's. Three things still reached it
+from elsewhere.
+
+### The connect
+
+`meridian_protocol_connect()` walked `peer_nodes[]` on the caller's
+thread to see whether the peer was already connected, and read the
+count — while the actor was mutating the same table. The check, the
+connection and the table write now all happen on the actor
+(`MERIDIAN_PROTOCOL_CONNECT`), the way upstream's connect runs on the
+network actor.
+
+### A peer whose connection died
+
+The protocol's connection callback did nothing on `SHUTDOWN_COMPLETE`,
+so only an explicit `meridian_protocol_disconnect()` removed a peer: a
+connection that dropped left its peer in the table, with the node it
+held. The callback now hands the connection over
+(`MERIDIAN_PROTOCOL_PEER_DISCONNECTED`) and the actor takes the peer
+out and releases the node — upstream removes the peer in the handler
+that owns the connection ("connection_manager_remove + ConnectionClose
+also run on this actor", `liboffs/src/Network/network.c:5638`).
+
+### A post that owned its request twice
+
+The listener's peer-added post is a fire-and-forget post: nobody waits
+for the answer. It had two faults.
+
+Its **reply block was never initialised** — the dispatch reads it, and
+`actor_reply_complete()` locks the reply's mutex, which was NULL. The
+path was the listener's: an inbound connection. Nothing in the tree
+reaches it today (the tests connect to addresses nothing listens on),
+so it had never run.
+
+And the request had **two owners**: the post gave it a destructor
+(`free`), so `actor_run` freed it after the dispatch — and the dispatch
+freed it too, because the reply completed. The first fault (the NULL
+mutex) came before the second, which is why the crash hid the double
+free.
+
+Both fire-and-forget posts now follow the round-trip convention: the
+reply is initialised and **detached** (nobody waits, so the actor owns
+the request), and the request has **no** destructor (the dispatch frees
+it when the reply completes, the way every other request is freed).
+
+### Still open
+
+An **inbound** peer has no address: the listener's event carries the
+connection but no node, and the comment says the address is "filled in
+later, when the peer address is known" — it never is. The protocol
+cannot send to a peer that dialled it. The connection knows its remote
+address, so the fix is to read it and give the peer its node.
 
 ### Build
 
