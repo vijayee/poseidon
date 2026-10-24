@@ -85,8 +85,8 @@ static void meridian_stream_dispatch(void* state, message_t* msg) {
                 (meridian_stream_close_msg_t*)msg->payload;
             /* Everything that was queued before this ran first. */
             if (actor_reply_complete(&p->reply)) {
-                /* The caller gave up waiting: the actor owns the
-                 * request now, and frees it. */
+                /* The caller is not waiting: the actor owns the request
+                 * now, and frees it. */
                 actor_reply_destroy(&p->reply);
                 free(p);
             }
@@ -157,6 +157,10 @@ void meridian_stream_entry_destroy(meridian_stream_entry_t* entry) {
             message_t msg = {
                 .type = MERIDIAN_STREAM_CLOSE,
                 .payload = request,
+                /* No payload destructor: the dispatch frees the request
+                 * when the reply completes, and the caller frees it when
+                 * the wait succeeds. A destructor here would free it a
+                 * third time. */
                 .payload_destroy = NULL,
             };
             /* The wait is for the message, not for actor_send's return
@@ -166,9 +170,24 @@ void meridian_stream_entry_destroy(meridian_stream_entry_t* entry) {
              * the only one that drops it. */
             if (!(atomic_load(&entry->actor.flags) & ACTOR_FLAG_DESTROY)) {
                 actor_send(&entry->actor, &msg);
-                /* Wait for the actor to work through the queue. */
-                if (actor_reply_wait(&request->reply,
-                                     MERIDIAN_STREAM_TIMEOUT_MS) == 0) {
+                /* Wait for the actor to work through the queue — unless
+                 * this call is made from inside a dispatch. A worker
+                 * that waits is a worker that runs no actor, and the
+                 * teardown that reaches here (the protocol's actor
+                 * closing its connections) is exactly such a worker. The
+                 * messages still queued are dropped with the entry, which
+                 * is what a teardown means. */
+                if (actor_is_inside_dispatch()) {
+                    /* A worker that waits is a worker that runs no actor,
+                     * and the teardown that reaches here (the protocol's
+                     * actor closing its connections) is such a worker. The
+                     * actor owns the request and frees it when it gets
+                     * to the close message; the messages still queued are
+                     * dropped with the entry, which is what a teardown
+                     * means. */
+                    actor_reply_detach(&request->reply);
+                } else if (actor_reply_wait(&request->reply,
+                                            MERIDIAN_STREAM_TIMEOUT_MS) == 0) {
                     /* The actor answered: the request is ours. */
                     actor_reply_destroy(&request->reply);
                     free(request);

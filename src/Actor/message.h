@@ -428,6 +428,10 @@ typedef enum {
   MERIDIAN_PROTOCOL_GOSSIP_RESPONSE,
   /* Send a packet to every peer. The actor does the fan-out. */
   MERIDIAN_PROTOCOL_BROADCAST,
+  /* Tear the protocol down. The actor closes the connections, the
+   * listener, the configuration and the registration: it owns the peer
+   * table and the HQUIC lifecycle. */
+  MERIDIAN_PROTOCOL_STOP,
 
   /* ========================================================================
    * 2.19 Meridian rendezvous — actor messages
@@ -681,7 +685,7 @@ typedef struct message_t {
  * Meridian / msquic dependencies. The change is purely additive to the
  * enum.
  *
- * Phase 2 (commit 2.18) adds the MERIDIAN_PROTOCOL_* family (11 entries)
+ * Phase 2 (commit 2.18) adds the MERIDIAN_PROTOCOL_* family (12 entries)
  * above the local-modifications block. The enum is still the global
  * message_type_e; the payload structs live in the per-subsystem header
  * Network/Meridian/meridian_protocol_messages.h, keeping message.h free

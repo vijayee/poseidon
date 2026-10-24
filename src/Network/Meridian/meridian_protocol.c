@@ -43,6 +43,7 @@ protocol_bidi_stream_callback(HQUIC Stream, void* Context,
 // ============================================================================
 
 /* The actor-thread body of the send path. */
+static void meridian_protocol_handle_stop(meridian_protocol_t* protocol);
 static int meridian_protocol_send_packet_impl(meridian_protocol_t* protocol,
                                                const uint8_t* data, size_t len,
                                                uint32_t target_addr,
@@ -373,6 +374,20 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
             free(p->data);
             p->data = NULL;
             if (actor_reply_complete(&p->reply)) {
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
+            break;
+        }
+        case MERIDIAN_PROTOCOL_STOP: {
+            meridian_protocol_stop_msg_t* p =
+                (meridian_protocol_stop_msg_t*)msg->payload;
+            /* The teardown is the actor's: it owns the peer table and the
+             * HQUIC lifecycle, and the close answers with callbacks that
+             * read those tables. */
+            meridian_protocol_handle_stop(protocol);
+            if (actor_reply_complete(&p->reply)) {
+                /* The caller handed the request over: the actor frees it. */
                 actor_reply_destroy(&p->reply);
                 free(p);
             }
@@ -747,13 +762,16 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol) {
 
     refcounter_dereference(&protocol->refcounter);
     if (refcounter_count(&protocol->refcounter) == 0) {
-        /* The actor must be gone before the tables are read: its destroy
-         * waits for a dispatch in flight. */
-        actor_destroy(&protocol->actor);
-
+        /* The teardown runs on the protocol's actor, so it happens while
+         * the actor is alive: the actor owns the peer table and the HQUIC
+         * lifecycle. */
         if (ATOMIC_LOAD(&protocol->running)) {
             meridian_protocol_stop(protocol);
         }
+
+        /* The actor must be gone before the tables are read: its destroy
+         * waits for a dispatch in flight. */
+        actor_destroy(&protocol->actor);
 
         // Safety: close any remaining connections not cleaned up by stop
         if (protocol->msquic) {
@@ -1005,15 +1023,22 @@ int meridian_protocol_start(meridian_protocol_t* protocol) {
     return 0;
 }
 
-int meridian_protocol_stop(meridian_protocol_t* protocol) {
-    if (protocol == NULL) return -1;
-
-    platform_mutex_lock(protocol->lock);
-
-    if (!ATOMIC_LOAD(&protocol->running)) {
-        platform_mutex_unlock(protocol->lock);
-        return 0;
-    }
+/**
+ * The teardown, on the protocol's actor.
+ *
+ * The actor is the sole owner of the peer table and the HQUIC
+ * lifecycle: the connections, the listener, the configuration and the
+ * registration are closed here, on the thread that owns them, and the
+ * msquic callbacks that answer the close find the tables in a state
+ * they can read. Upstream keeps the connection shutdown on the network
+ * actor for the same reason — "the sole owner of conn_mgr + the HQUIC
+ * lifecycle" (liboffs/src/Network/network.c:5637).
+ *
+ * The peer nodes are not released here: the destroy does that, after
+ * the actor is gone.
+ */
+static void meridian_protocol_handle_stop(meridian_protocol_t* protocol) {
+    if (protocol == NULL) return;
 
     ATOMIC_STORE(&protocol->running, 0);
     protocol->state = MERIDIAN_PROTOCOL_STATE_SHUTTING_DOWN;
@@ -1032,15 +1057,7 @@ int meridian_protocol_stop(meridian_protocol_t* protocol) {
             protocol->msquic->ConnectionClose(protocol->connected_peers[i]);
             protocol->connected_peers[i] = NULL;
         }
-        if (protocol->peer_nodes[i]) {
-            refcounter_dereference(&protocol->peer_nodes[i]->refcounter);
-            if (refcounter_count(&protocol->peer_nodes[i]->refcounter) == 0) {
-                free(protocol->peer_nodes[i]);
-            }
-            protocol->peer_nodes[i] = NULL;
-        }
     }
-    protocol->num_connected_peers = 0;
 
     // Stop and close listener
     if (protocol->listener) {
@@ -1060,8 +1077,38 @@ int meridian_protocol_stop(meridian_protocol_t* protocol) {
         poseidon_msquic_close_registration("meridian");
         protocol->registration = NULL;
     }
+}
 
-    platform_mutex_unlock(protocol->lock);
+int meridian_protocol_stop(meridian_protocol_t* protocol) {
+    if (protocol == NULL) return -1;
+
+    if (!ATOMIC_LOAD(&protocol->running)) return 0;
+
+    /* The teardown runs on the protocol's actor: it owns the peer table
+     * and the HQUIC lifecycle, and the close answers with callbacks that
+     * read those tables. */
+    meridian_protocol_stop_msg_t* request =
+        (meridian_protocol_stop_msg_t*)
+        get_clear_memory(sizeof(meridian_protocol_stop_msg_t));
+    if (request == NULL) return -1;
+
+    if (actor_reply_init(&request->reply) != 0) {
+        free(request);
+        return -1;
+    }
+
+    int trip = actor_round_trip(&protocol->actor, MERIDIAN_PROTOCOL_STOP,
+                                &request->reply, MERIDIAN_PROTOCOL_TIMEOUT_MS);
+    if (trip == 1) {
+        /* The actor is gone: nobody will answer. */
+        actor_reply_destroy(&request->reply);
+        free(request);
+        return -1;
+    }
+    if (trip != 0) return -1;  /* the actor owns the request now */
+
+    actor_reply_destroy(&request->reply);
+    free(request);
     return 0;
 }
 

@@ -51,6 +51,13 @@ typedef struct meridian_protocol_peer_removed_msg_t {
     uint16_t port;         /**< The peer's port. */
 } meridian_protocol_peer_removed_msg_t;
 
+/* The teardown. The actor closes the connections, the listener, the
+ * configuration and the registration — it owns the peer table and the
+ * HQUIC lifecycle — and answers when it is done. */
+typedef struct meridian_protocol_stop_msg_t {
+    actor_reply_t reply;   /**< Must stay first. */
+} meridian_protocol_stop_msg_t;
+
 /* A snapshot of the peer table. The actor builds the copy; the caller
  * frees the array (not the nodes — the table keeps those). */
 typedef struct meridian_protocol_peers_snapshot_msg_t {
