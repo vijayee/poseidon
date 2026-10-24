@@ -669,9 +669,18 @@ static void rendv_stream_message(void* ctx, meridian_stream_entry_t* entry,
         .payload = request,
         .payload_destroy = NULL,
     };
-    if (!actor_send(&handle->actor, &msg)) {
+    /* The handle's actor owns the request and its bytes: it frees them
+     * when it has handed the data on. A destroyed actor is the only one
+     * that drops the message — actor_send's return value says whether
+     * the mailbox was empty, not whether the message was taken
+     * (src/Actor/actor_reply.c). */
+    if (atomic_load(&handle->actor.flags) & ACTOR_FLAG_DESTROY) {
         actor_reply_destroy(&request->reply);
+        free(request->data);
+        free(request);
+        return;
     }
+    actor_send(&handle->actor, &msg);
 }
 
 /**

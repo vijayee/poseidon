@@ -410,10 +410,16 @@ static bool protocol_post_event(meridian_protocol_t* protocol, uint32_t type,
         .payload = payload,
         .payload_destroy = payload_destroy,
     };
-    if (!actor_send(&protocol->actor, &msg)) {
-        /* The actor is gone: actor_send has already released the payload. */
+    /* A destroyed actor is the only one that drops the message:
+     * actor_send's return value says whether the mailbox was empty, not
+     * whether the message was taken (src/Actor/actor_reply.c). */
+    if (atomic_load(&protocol->actor.flags) & ACTOR_FLAG_DESTROY) {
+        if (payload_destroy != NULL && payload != NULL) {
+            payload_destroy(payload);
+        }
         return false;
     }
+    actor_send(&protocol->actor, &msg);
     return true;
 }
 
@@ -1502,8 +1508,17 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
                         .payload = request,
                         .payload_destroy = NULL,
                     };
-                    if (!actor_send(&protocol->actor, &msg)) {
+                    /* The actor owns the request: it frees it when it
+                     * has matched the answer. A destroyed actor is the
+                     * only one that drops the message — actor_send's
+                     * return value says whether the mailbox was empty,
+                     * not whether the message was taken
+                     * (src/Actor/actor_reply.c). */
+                    if (atomic_load(&protocol->actor.flags) & ACTOR_FLAG_DESTROY) {
                         actor_reply_destroy(&request->reply);
+                        free(request);
+                    } else {
+                        actor_send(&protocol->actor, &msg);
                     }
                 } else {
                     free(request);
@@ -1550,8 +1565,18 @@ int meridian_protocol_on_packet(meridian_protocol_t* protocol,
                             .payload = request,
                             .payload_destroy = NULL,
                         };
-                        if (!actor_send(&protocol->actor, &msg)) {
+                        /* The actor owns the request and its bytes: it
+                         * frees them when it has handed the gossip on. A
+                         * destroyed actor is the only one that drops the
+                         * message — actor_send's return value says whether
+                         * the mailbox was empty, not whether the message
+                         * was taken (src/Actor/actor_reply.c). */
+                        if (atomic_load(&protocol->actor.flags) & ACTOR_FLAG_DESTROY) {
                             actor_reply_destroy(&request->reply);
+                            free(request->data);
+                            free(request);
+                        } else {
+                            actor_send(&protocol->actor, &msg);
                         }
                     } else {
                         free(request->data);

@@ -1130,11 +1130,15 @@ static void session_dispatch_message(void* ctx, const uint8_t* topic, size_t top
             .payload = request,
             .payload_destroy = client_session_msg_deliver_destroy,
         };
-        if (!actor_send(&s->actor, &m)) {
-            /* The actor is gone: actor_send has already released the
-             * request and its buffers. */
+        // A destroyed actor is the only one that drops the message:
+        // actor_send's return value says whether the mailbox was empty,
+        // not whether the message was taken (src/Actor/actor_reply.c).
+        if (atomic_load(&s->actor.flags) & ACTOR_FLAG_DESTROY) {
+            // The actor is gone: the request and its buffers are ours.
+            client_session_msg_deliver_destroy(request);
             continue;
         }
+        actor_send(&s->actor, &m);
     }
     vec_deinit(&snap);
     free(buf);

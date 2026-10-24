@@ -615,9 +615,15 @@ static void relay_post_addr_response(meridian_relay_t* relay,
         .payload = request,
         .payload_destroy = NULL,
     };
-    if (!actor_send(&relay->handle->actor, &msg)) {
+    /* The handle's actor owns the request from here on: it frees it when
+     * it has recorded the address. actor_send's return value says whether
+     * the mailbox was empty, not whether the message was taken, so a
+     * destroyed actor is the only case where the request is still ours. */
+    if (atomic_load(&relay->handle->actor.flags) & ACTOR_FLAG_DESTROY) {
         free(request);
+        return;
     }
+    actor_send(&relay->handle->actor, &msg);
 }
 
 // ============================================================================
