@@ -1081,9 +1081,14 @@ int meridian_rendv_handle_close_tunnel(meridian_rendv_handle_t* handle, HQUIC co
 
 /**
  * Detects NAT type for the local rendezvous.
- * Detects NAT type by comparing reflexive addresses from relay servers.
- * Sends ADDR_REQUEST to each relay, compares observed public addresses,
- * and classifies NAT type accordingly.
+ *
+ * Sends an ADDR_REQUEST to each relay and classifies from what the two
+ * of them report — the rule is upstream's
+ * (liboffs/src/Network/nat_detect.c). The call waits for the reports:
+ * the request stays in the handle's actor until every configured relay
+ * has answered, so the answer is the relays' answer and not the state
+ * the node happened to have. The wait is a network round trip, so the
+ * call must not be made from inside a dispatch.
  *
  * @param handle    Handle to detect NAT for
  * @param relay_a   First relay client (may be NULL)
