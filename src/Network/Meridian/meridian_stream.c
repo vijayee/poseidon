@@ -83,7 +83,12 @@ static void meridian_stream_dispatch(void* state, message_t* msg) {
             meridian_stream_close_msg_t* p =
                 (meridian_stream_close_msg_t*)msg->payload;
             /* Everything that was queued before this ran first. */
-            actor_reply_complete(&p->reply);
+            if (actor_reply_complete(&p->reply)) {
+                /* The caller gave up waiting: the actor owns the
+                 * request now, and frees it. */
+                actor_reply_destroy(&p->reply);
+                free(p);
+            }
             break;
         }
         default:
@@ -146,24 +151,38 @@ void meridian_stream_entry_destroy(meridian_stream_entry_t* entry) {
     meridian_stream_close_msg_t* request =
         (meridian_stream_close_msg_t*)
         get_clear_memory(sizeof(meridian_stream_close_msg_t));
-    if (request != NULL && actor_reply_init(&request->reply) == 0) {
-        message_t msg = {
-            .type = MERIDIAN_STREAM_CLOSE,
-            .payload = request,
-            .payload_destroy = NULL,
-        };
-        /* The wait is for the message, not for actor_send's return
-         * value: that one says whether the mailbox was empty before the
-         * push, not whether the message was taken
-         * (src/Actor/actor_reply.c says the same). A destroyed actor is
-         * the only one that drops it. */
-        if (!(atomic_load(&entry->actor.flags) & ACTOR_FLAG_DESTROY)) {
-            actor_send(&entry->actor, &msg);
-            /* Wait for the actor to work through the queue. */
-            actor_reply_wait(&request->reply, MERIDIAN_STREAM_TIMEOUT_MS);
+    if (request != NULL) {
+        if (actor_reply_init(&request->reply) == 0) {
+            message_t msg = {
+                .type = MERIDIAN_STREAM_CLOSE,
+                .payload = request,
+                .payload_destroy = NULL,
+            };
+            /* The wait is for the message, not for actor_send's return
+             * value: that one says whether the mailbox was empty before the
+             * push, not whether the message was taken
+             * (src/Actor/actor_reply.c says the same). A destroyed actor is
+             * the only one that drops it. */
+            if (!(atomic_load(&entry->actor.flags) & ACTOR_FLAG_DESTROY)) {
+                actor_send(&entry->actor, &msg);
+                /* Wait for the actor to work through the queue. */
+                if (actor_reply_wait(&request->reply,
+                                     MERIDIAN_STREAM_TIMEOUT_MS) == 0) {
+                    /* The actor answered: the request is ours. */
+                    actor_reply_destroy(&request->reply);
+                    free(request);
+                }
+                /* On a timeout the actor owns the request: it frees it
+                 * when it gets to the close message, and the caller must
+                 * not touch it. */
+            } else {
+                /* The actor is gone: nobody will ever answer. */
+                actor_reply_destroy(&request->reply);
+                free(request);
+            }
+        } else {
+            free(request);
         }
-        actor_reply_destroy(&request->reply);
-        free(request);
     }
 
     actor_destroy(&entry->actor);
@@ -208,6 +227,9 @@ int meridian_stream_entry_append(meridian_stream_entry_t* entry,
      * whether the mailbox was empty, not whether the message was taken,
      * so a destroyed actor is the only case that fails. */
     if (atomic_load(&entry->actor.flags) & ACTOR_FLAG_DESTROY) {
+        /* The actor is gone: nobody will append the bytes, so they are
+         * freed here. */
+        meridian_stream_receive_destroy(request);
         return -1;
     }
     actor_send(&entry->actor, &msg);
