@@ -530,29 +530,16 @@ int meridian_relay_send_addr_request(meridian_relay_t* relay) {
     relay_track_stream(relay, entry);
     platform_mutex_unlock(relay->lock);
 
-    // Copy data into send buffer for SEND_COMPLETE callback
-    uint8_t* send_buf = (uint8_t*)get_memory(msg_len);
-    if (send_buf == NULL) {
+    // The request goes out with the send helper: the bytes and the
+    // buffer that points at them live until the SEND_COMPLETE event.
+    if (meridian_stream_send(relay->msquic, stream, msg_buf, msg_len,
+                             QUIC_SEND_FLAG_FIN) != 0) {
         // Stream is already started; let shutdown_complete clean up the entry
         relay->msquic->StreamShutdown(stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
         free(msg_buf);
         return -1;
     }
-    memcpy(send_buf, msg_buf, msg_len);
     free(msg_buf);
-
-    QUIC_BUFFER buf;
-    buf.Buffer = send_buf;
-    buf.Length = (uint32_t)msg_len;
-
-    QUIC_STATUS status = relay->msquic->StreamSend(stream, &buf, 1,
-                                                     QUIC_SEND_FLAG_FIN, send_buf);
-    if (QUIC_FAILED(status)) {
-        log_error("meridian relay: ADDR_REQUEST StreamSend failed: 0x%x", status);
-        free(send_buf);
-        relay->msquic->StreamShutdown(stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
-        return -1;
-    }
 
     return 0;
 }
@@ -852,9 +839,9 @@ relay_uni_stream_callback(HQUIC Stream, void* Context,
     }
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
-        if (Event->SEND_COMPLETE.ClientContext != NULL) {
-            free(Event->SEND_COMPLETE.ClientContext);
-        }
+        // The send context holds the bytes and the buffer that pointed
+        // at them; both go back here.
+        meridian_stream_send_complete(Event->SEND_COMPLETE.ClientContext);
         break;
 
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
@@ -929,9 +916,9 @@ relay_bidi_stream_callback(HQUIC Stream, void* Context,
     }
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
-        if (Event->SEND_COMPLETE.ClientContext != NULL) {
-            free(Event->SEND_COMPLETE.ClientContext);
-        }
+        // The send context holds the bytes and the buffer that pointed
+        // at them; both go back here.
+        meridian_stream_send_complete(Event->SEND_COMPLETE.ClientContext);
         break;
 
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {

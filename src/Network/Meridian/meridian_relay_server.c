@@ -539,9 +539,9 @@ RelayServerUniStreamCallback(HQUIC Stream, void* Context,
     }
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
-        if (Event->SEND_COMPLETE.ClientContext != NULL) {
-            free(Event->SEND_COMPLETE.ClientContext);
-        }
+        // The send context holds the bytes and the buffer that pointed
+        // at them; both go back here.
+        meridian_stream_send_complete(Event->SEND_COMPLETE.ClientContext);
         break;
 
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
@@ -726,17 +726,15 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
             memcpy(send_buf + 4, cbor_buf, cbor_len);
             free(cbor_buf);
 
-            QUIC_BUFFER send_buffer;
-            send_buffer.Buffer = send_buf;
-            send_buffer.Length = (uint32_t)response_len;
+            /* The send context keeps the bytes and the buffer that points at
+             * them alive until the SEND_COMPLETE event. */
+            bool sent = (meridian_stream_send(server->msquic, entry->stream,
+                                               send_buf, response_len,
+                                               QUIC_SEND_FLAG_FIN) == 0);
+            free(send_buf);
 
-            QUIC_STATUS send_status = server->msquic->StreamSend(
-                entry->stream, &send_buffer, 1,
-                QUIC_SEND_FLAG_FIN, send_buf);
-
-            if (QUIC_FAILED(send_status)) {
+            if (!sent) {
                 log_warn("Relay: failed to send ADDR_RESPONSE");
-                free(send_buf);
                 server->stats.datagrams_dropped++;
             } else {
                 server->stats.addr_requests_served++;
@@ -801,9 +799,9 @@ RelayServerBidiStreamCallback(HQUIC Stream, void* Context,
     }
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
-        if (Event->SEND_COMPLETE.ClientContext != NULL) {
-            free(Event->SEND_COMPLETE.ClientContext);
-        }
+        // The send context holds the bytes and the buffer that pointed
+        // at them; both go back here.
+        meridian_stream_send_complete(Event->SEND_COMPLETE.ClientContext);
         break;
 
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {

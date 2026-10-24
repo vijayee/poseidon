@@ -111,10 +111,43 @@ void meridian_stream_entry_complete(meridian_stream_entry_t* entry);
 void meridian_stream_entry_reset(meridian_stream_entry_t* entry);
 
 /**
+ * The context of one send.
+ *
+ * The QUIC_BUFFER travels with the bytes it points at: msquic stores a
+ * pointer to the buffer and reads from it asynchronously, so both have
+ * to stay alive until the SEND_COMPLETE event. Upstream packs them into
+ * one context for the same reason
+ * (liboffs/src/Network/quic_peer_send.c).
+ */
+typedef struct meridian_stream_send_context_t {
+    uint8_t* data;      /**< The bytes being sent */
+    QUIC_BUFFER buffer; /**< The buffer that points at them */
+} meridian_stream_send_context_t;
+
+/**
+ * Sends data on a stream.
+ *
+ * The data is copied into a heap buffer that travels with the
+ * QUIC_BUFFER until the SEND_COMPLETE event, so nothing the caller
+ * passes in has to outlive the call.
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+int meridian_stream_send(const struct QUIC_API_TABLE* msquic, HQUIC stream,
+                         const uint8_t* data, size_t len, QUIC_SEND_FLAGS flags);
+
+/**
+ * Releases the context of a completed send.
+ *
+ * The stream's SEND_COMPLETE event hands the context back; this is what
+ * frees the bytes and the buffer.
+ */
+void meridian_stream_send_complete(void* client_context);
+
+/**
  * Opens a unidirectional stream on the given connection and sends data.
  * Sends the data with QUIC_SEND_FLAG_FIN to signal end-of-message.
  * Returns 0 on success, -1 on failure.
- * The send_buf is freed in the SEND_COMPLETE callback.
  */
 int meridian_stream_send_uni(const struct QUIC_API_TABLE* msquic, HQUIC connection,
                               const uint8_t* data, size_t len, void* stream_context);

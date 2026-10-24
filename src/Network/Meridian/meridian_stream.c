@@ -223,6 +223,63 @@ void meridian_stream_entry_reset(meridian_stream_entry_t* entry) {
 }
 
 // ============================================================================
+// STREAM SEND
+// ============================================================================
+
+/**
+ * Sends data on a stream.
+ *
+ * The QUIC_BUFFER and the bytes it points at live in one heap
+ * allocation: msquic stores a pointer to the buffer and reads from it
+ * asynchronously, so a buffer on the caller's stack would be read after
+ * the call returned. Upstream packs the two into one context for the
+ * same reason (liboffs/src/Network/quic_peer_send.c).
+ */
+int meridian_stream_send(const struct QUIC_API_TABLE* msquic, HQUIC stream,
+                         const uint8_t* data, size_t len, QUIC_SEND_FLAGS flags) {
+    if (msquic == NULL || stream == NULL || data == NULL || len == 0) return -1;
+
+    meridian_stream_send_context_t* ctx =
+        (meridian_stream_send_context_t*)
+        get_clear_memory(sizeof(meridian_stream_send_context_t));
+    if (ctx == NULL) {
+        log_error("meridian stream: failed to allocate the send context");
+        return -1;
+    }
+
+    ctx->data = (uint8_t*)get_memory(len);
+    if (ctx->data == NULL) {
+        log_error("meridian stream: failed to allocate send buffer (%zu bytes)", len);
+        free(ctx);
+        return -1;
+    }
+    memcpy(ctx->data, data, len);
+    ctx->buffer.Buffer = ctx->data;
+    ctx->buffer.Length = (uint32_t)len;
+
+    QUIC_STATUS status = msquic->StreamSend(stream, &ctx->buffer, 1, flags, ctx);
+    if (QUIC_FAILED(status)) {
+        log_error("meridian stream: StreamSend failed: 0x%x", status);
+        meridian_stream_send_complete(ctx);
+        return -1;
+    }
+
+    return 0;
+}
+
+/**
+ * Releases the context of a completed send: the bytes and the buffer
+ * that pointed at them.
+ */
+void meridian_stream_send_complete(void* client_context) {
+    meridian_stream_send_context_t* ctx =
+        (meridian_stream_send_context_t*)client_context;
+    if (ctx == NULL) return;
+    free(ctx->data);
+    free(ctx);
+}
+
+// ============================================================================
 // UNIDIRECTIONAL STREAM SEND
 // ============================================================================
 
@@ -248,23 +305,8 @@ int meridian_stream_send_uni(const struct QUIC_API_TABLE* msquic, HQUIC connecti
         return -1;
     }
 
-    // Copy data into a send buffer that we free in SEND_COMPLETE
-    uint8_t* send_buf = (uint8_t*)get_memory(len);
-    if (send_buf == NULL) {
-        log_error("meridian stream: failed to allocate send buffer (%zu bytes)", len);
-        msquic->StreamShutdown(stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
-        return -1;
-    }
-    memcpy(send_buf, data, len);
-
-    QUIC_BUFFER buf;
-    buf.Buffer = send_buf;
-    buf.Length = (uint32_t)len;
-
-    status = msquic->StreamSend(stream, &buf, 1, QUIC_SEND_FLAG_FIN, send_buf);
-    if (QUIC_FAILED(status)) {
-        log_error("meridian stream: StreamSend (uni) failed: 0x%x", status);
-        free(send_buf);
+    // The send buffer is freed in the SEND_COMPLETE callback.
+    if (meridian_stream_send(msquic, stream, data, len, QUIC_SEND_FLAG_FIN) != 0) {
         msquic->StreamShutdown(stream, QUIC_STREAM_SHUTDOWN_FLAG_GRACEFUL, 0);
         return -1;
     }
@@ -347,10 +389,9 @@ QUIC_STATUS QUIC_API meridian_uni_stream_callback(HQUIC stream, void* context,
         break;
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
-        // Free the send buffer that was passed as ClientContext to StreamSend
-        if (event->SEND_COMPLETE.ClientContext != NULL) {
-            free(event->SEND_COMPLETE.ClientContext);
-        }
+        // The send context holds the bytes and the buffer that pointed
+        // at them; both go back here.
+        meridian_stream_send_complete(event->SEND_COMPLETE.ClientContext);
         break;
 
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
@@ -413,9 +454,9 @@ QUIC_STATUS QUIC_API meridian_bidi_stream_callback(HQUIC stream, void* context,
         break;
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
-        if (event->SEND_COMPLETE.ClientContext != NULL) {
-            free(event->SEND_COMPLETE.ClientContext);
-        }
+        // The send context holds the bytes and the buffer that pointed
+        // at them; both go back here.
+        meridian_stream_send_complete(event->SEND_COMPLETE.ClientContext);
         break;
 
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:

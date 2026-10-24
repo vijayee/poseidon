@@ -248,22 +248,12 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
                                 status = protocol->msquic->StreamStart(
                                     stream, QUIC_STREAM_START_FLAG_NONE);
                                 if (!QUIC_FAILED(status)) {
-                                    uint8_t* send_buf =
-                                        (uint8_t*)get_memory(buf_len);
-                                    if (send_buf != NULL) {
-                                        memcpy(send_buf, buf, buf_len);
-                                        QUIC_BUFFER send_buffer;
-                                        send_buffer.Buffer = send_buf;
-                                        send_buffer.Length = (uint32_t)buf_len;
-                                        status = protocol->msquic->StreamSend(
-                                            stream, &send_buffer, 1,
-                                            QUIC_SEND_FLAG_FIN, send_buf);
-                                        if (!QUIC_FAILED(status)) {
-                                            free(buf);
-                                            protocol_add_stream(protocol, entry);
-                                            goto measure_done;
-                                        }
-                                        free(send_buf);
+                                    if (meridian_stream_send(
+                                            protocol->msquic, stream, buf,
+                                            buf_len, QUIC_SEND_FLAG_FIN) == 0) {
+                                        free(buf);
+                                        protocol_add_stream(protocol, entry);
+                                        goto measure_done;
                                     }
                                 }
                                 protocol->msquic->StreamClose(stream);
@@ -548,9 +538,9 @@ protocol_uni_stream_callback(HQUIC Stream, void* Context,
     }
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
-        if (Event->SEND_COMPLETE.ClientContext != NULL) {
-            free(Event->SEND_COMPLETE.ClientContext);
-        }
+        // The send context holds the bytes and the buffer that pointed
+        // at them; both go back here.
+        meridian_stream_send_complete(Event->SEND_COMPLETE.ClientContext);
         break;
 
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
@@ -620,9 +610,9 @@ protocol_bidi_stream_callback(HQUIC Stream, void* Context,
     }
 
     case QUIC_STREAM_EVENT_SEND_COMPLETE:
-        if (Event->SEND_COMPLETE.ClientContext != NULL) {
-            free(Event->SEND_COMPLETE.ClientContext);
-        }
+        // The send context holds the bytes and the buffer that pointed
+        // at them; both go back here.
+        meridian_stream_send_complete(Event->SEND_COMPLETE.ClientContext);
         break;
 
     case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE: {
