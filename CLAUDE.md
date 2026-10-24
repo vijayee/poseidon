@@ -1974,14 +1974,36 @@ Poseidon now matches that, rule for rule:
   answered, so the answer is the relays' answer and not the state the
   node happened to have. The dispatch does not wait; the caller does.
 
-### The OPEN case
+### The OPEN case, and where the node's own address comes from
 
 Upstream's `nat_detect_classify` takes the node's own address for the
-OPEN case, and upstream's detector never sets it — the same gap is here,
-so the detection passes 0 and the OPEN case is not reached in
-production. The rule is exposed as `meridian_rendv_classify_nat()` so it
-can be tested, the way upstream exposes `nat_detect_classify()` "for
-unit testing".
+OPEN case — and upstream's detector **never sets it**
+(`liboffs/src/Network/nat_detect.h:37` declares the field, nothing
+assigns it), so upstream's OPEN case is not reached either.
+
+Here it is filled. The address that answers it is the **relay
+connection's local address** — the source of the packets the relay
+received, which MsQuic hands over as
+`QUIC_PARAM_CONN_LOCAL_ADDRESS`. It is read in the relay client's
+`CONNECTED` callback, while the connection is live, and kept: the
+detector asks for it later, and a connection closed by then cannot be
+asked. The comparison is the **address** only — the local port is the
+socket's ephemeral one and the reported port is the NAT's mapping, so
+the ports are never equal.
+
+When the relay reports the node's own address, no NAT rewrote it: that
+is the OPEN case, and the loopback test is exactly it (the relay sees
+127.0.0.1, the node's own address is 127.0.0.1).
+
+What it changes is the **label**, not a path: in both layers only
+"symmetric or not" gates the direct attempt — upstream
+(`network->local_nat_type != NAT_TYPE_SYMMETRIC`) and poseidon
+(`meridian_conn_handle_upgrade_to_direct`) both let every cone type
+through.
+
+The rule is exposed as `meridian_rendv_classify_nat()` so it can be
+tested, the way upstream exposes `nat_detect_classify()` "for unit
+testing".
 
 ### Tests
 
