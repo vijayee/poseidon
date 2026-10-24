@@ -317,5 +317,8 @@ TEST_F(RelayTest, ClientConnectsToTheRelayServer) {
     EXPECT_TRUE(nat.called) << "the detection never answered";
     EXPECT_EQ(loopback, nat.addr);
     EXPECT_NE(0, nat.port);
-    EXPECT_EQ(MERIDIAN_NAT_TYPE_PORT_RESTRICTED_CONE, nat.type);
+    // The relay saw the client at the client's own address, so no NAT
+    // rewrote it: the OPEN case. The address the relay reports and the
+    // node's own address are the same one.
+    EXPECT_EQ(MERIDIAN_NAT_TYPE_OPEN, nat.type);
 }
