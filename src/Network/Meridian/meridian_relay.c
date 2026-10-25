@@ -366,11 +366,26 @@ int meridian_relay_connect(meridian_relay_t* relay) {
         return -1;
     }
 
+    /* MsQuic keeps the server name: it stores it on the connection and
+     * frees it with the connection, on the failure path too. So the name
+     * has to be on the heap — a name on this frame would be freed after
+     * the frame is gone. */
+    size_t name_len = strlen(host) + 1;
+    char* server_name = (char*)malloc(name_len);
+    if (server_name == NULL) {
+        platform_mutex_lock(relay->lock);
+        relay->connection = NULL;
+        platform_mutex_unlock(relay->lock);
+        relay->msquic->ConnectionClose(connection);
+        return -1;
+    }
+    memcpy(server_name, host, name_len);
+
     Status = relay->msquic->ConnectionStart(
         connection,
         relay->configuration,
         QUIC_ADDRESS_FAMILY_UNSPEC,
-        host,
+        server_name,
         relay->server->port);
 
     if (QUIC_FAILED(Status)) {

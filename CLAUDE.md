@@ -2267,3 +2267,96 @@ address, so the fix is to read it and give the peer its node.
 ### Build
 
 Green, 25/25 ctest.
+
+## Phase 2 (2.38) — the peer table carries the peer's address
+
+The open item from 2.37 is closed: an **inbound** peer has an address.
+
+### The inbound peer's address
+
+The listener handed the actor a connection and no node, and the comment
+said the address was "filled in later, when the peer address is known" —
+it never was. A peer without an address is a peer the protocol cannot
+send to: the send path finds the peer by `node->addr` and `node->port`,
+and a NULL node never matches.
+
+The address is where the connection came from. MsQuic has it while the
+connection is live, so the listener reads it and hands it over — upstream
+reads it the same way ("Extract peer address from the connection",
+`liboffs/src/Network/quic_listener.c:545-552`) — and the **actor** builds
+the node from it, the way upstream's network actor builds the ring node
+("Use the peer's address from the QUIC connection",
+`liboffs/src/Network/network.c:1110-1138`).
+
+The address is in the Meridian's convention: the IPv4 address in network
+byte order, the port in host byte order — the way the relay reports a
+peer and the way the wire carries it.
+
+### The dial names the peer
+
+The dial is the reason nothing ever reached the listener: MsQuic v2
+resolves a server **name**, and the connect passed NULL for the name and
+built a socket address it never used. Upstream dials the same way
+(`liboffs/src/Network/quic_listener.c:1159-1164` passes the host string
+and `QUIC_ADDRESS_FAMILY_UNSPEC`), and the relay client was fixed the
+same way in 2.30. The protocol's dial had the same defect and nobody
+saw it: the tests connect to addresses nothing listens on.
+
+The name is on the heap: MsQuic keeps it and frees it with the
+connection, on the failure path too (`deps/msquic/src/core/connection.c`
+— `Connection->RemoteServerName = ServerName`). A name on the caller's
+frame would be freed after the frame is gone. Three sites had it on the
+stack: the protocol, the relay client and the client library.
+
+### The teardown does not wait for itself
+
+Three defects, all found by the de-wonk gate once the dial worked and
+the teardown had a live connection to tear down:
+
+- **The registration close waited for the actor that was doing the
+  waiting.** The registration close waits for the connections to drain,
+  and the connections drain when their handles are released — by the
+  actor. The teardown ran on the actor, so it sat in the registration
+  close while the handles it waited for waited for the actor. The
+  registration close moved to the destroy, on the caller's thread, the
+  way upstream closes it (`liboffs/src/Network/quic_listener.c:859-881`).
+- **A stream the peer never acknowledged kept its handle open.** MsQuic
+  wants the handle closed for every stream the app opened, "or the
+  handle stays open inside the registration" (upstream's words,
+  `liboffs/src/Network/quic_listener.c:369-375`). A send stream waits for
+  the peer's acknowledgement, and a peer that never answers — it is being
+  torn down too — leaves the handle open, and with it the connection and
+  the registration. The protocol keeps the streams it opens and closes
+  them: the peer cleanup closes the peer's, the teardown closes the rest.
+- **The channel destroyed the network before the overlay.** The overlay's
+  actor *is* the network's actor, so a network that is gone leaves the
+  overlay pointing at freed memory. The overlay goes first.
+
+The handles are closed exactly once: the removal path closes the
+connection it removes, the shutdown-complete path closes the one that was
+still in the table, and the teardown closes what is left.
+
+### The test
+
+`InboundPeerJoinsTheTableWithItsAddress` stands two protocols up, dials
+one from the other, and reads the listening side's peer table: the peer
+is there, with the address it dialled from, and the protocol can send to
+it. Without the fix the dial returns -1 and the table is empty.
+
+### Still open
+
+- **The rendezvous tunnel has the dial defect this phase fixed in the
+  protocol**: `meridian_rendv_handle_create_tunnel` passes NULL for the
+  server name (`src/Network/Meridian/meridian_rendv.c:1068`), so the
+  hole-punch connection never starts. Recorded, not fixed here: the
+  rendezvous's own path is a separate piece of work.
+- **The relay client and the relay server close their stream handles at
+  the shutdown-complete event only** (`meridian_relay.c`,
+  `meridian_relay_server.c`). A peer that never acknowledges leaves those
+  handles open, the way the protocol's did. The relay's tables already
+  track the streams, so the close is a sweep away.
+
+### Build
+
+Green, 25/25 ctest. The integration test ran 40 times and the notice
+test 20 times without a failure.

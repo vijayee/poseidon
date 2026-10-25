@@ -184,11 +184,15 @@ void poseidon_channel_destroy(poseidon_channel_t* channel) {
     if (channel == NULL) return;
     refcounter_dereference((refcounter_t*)channel);
     if (refcounter_count((refcounter_t*)channel) == 0) {
-        /* The network first: the overlay's state lives in the network
-         * actor, so once the network is gone nobody can be walking that
-         * state and the overlay can release it itself. */
-        if (channel->protocol != NULL) meridian_protocol_destroy(channel->protocol);
+        /* The overlay first: its state lives in the network actor, and
+         * its destroy asks that actor to release the state. The network
+         * has to be alive for that request to be answered — the actor
+         * sits inside the network, so a network that is gone leaves the
+         * overlay pointing at freed memory. The overlay's request goes
+         * out detached, so this order does not wait on the network's
+         * teardown. */
         if (channel->quasar != NULL) quasar_destroy(channel->quasar);
+        if (channel->protocol != NULL) meridian_protocol_destroy(channel->protocol);
         if (channel->key_pair != NULL) poseidon_key_pair_destroy(channel->key_pair);
         if (channel->subtopic_subs != NULL) subtopic_table_destroy(channel->subtopic_subs);
         if (channel->aliases != NULL) topic_alias_registry_destroy(channel->aliases);

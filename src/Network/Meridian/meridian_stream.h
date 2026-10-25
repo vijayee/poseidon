@@ -27,6 +27,11 @@
 #define MERIDIAN_STREAM_MAX_CAP 65536
 #define MERIDIAN_MAX_CONCURRENT_STREAMS 100
 
+/* The streams one protocol may have open for sending at the same time.
+ * Every one of them has a handle that MsQuic wants closed, so the
+ * protocol keeps them in a table and closes them. */
+#define MERIDIAN_MAX_SEND_STREAMS 128
+
 struct meridian_stream_entry_t;
 
 /**

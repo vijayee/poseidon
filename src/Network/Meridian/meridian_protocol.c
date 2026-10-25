@@ -9,13 +9,16 @@
 #include "../Quasar/quasar_route.h"
 #include "../Quasar/quasar.h"
 #include "../../Channel/channel_manager.h"
+#include "../../Platform/platform_socket.h"
 #include "../../Util/allocator.h"
+#include "../../Util/log.h"
 #include "../../Util/vec.h"
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
 #include <sys/time.h>
+#include <netinet/in.h>
 #include <cbor.h>
 
 // ============================================================================
@@ -56,6 +59,10 @@ static int protocol_add_stream(meridian_protocol_t* protocol,
                                 meridian_stream_entry_t* entry);
 static void protocol_remove_stream(meridian_protocol_t* protocol,
                                    meridian_stream_entry_t* entry);
+static int protocol_send_uni(meridian_protocol_t* protocol, HQUIC connection,
+                             const uint8_t* data, size_t len);
+static void protocol_close_send_streams(meridian_protocol_t* protocol,
+                                         HQUIC connection);
 
 /**
  * The peer table, read on the actor's own thread.
@@ -96,9 +103,179 @@ int meridian_protocol_broadcast_on_actor(meridian_protocol_t* protocol,
     for (size_t i = 0; i < protocol->num_connected_peers; i++) {
         HQUIC connection = protocol->connected_peers[i];
         if (connection != NULL) {
-            meridian_stream_send_uni(protocol->msquic, connection, data, len, NULL);
+            protocol_send_uni(protocol, connection, data, len);
         }
     }
+    return 0;
+}
+
+/**
+ * Removes a send stream from the protocol's table.
+ *
+ * The table is touched by the actor (which opens the streams) and by
+ * msquic's callback (which sees them finish), so the lock is the
+ * protocol's. The caller that took the stream out owns its close: the
+ * handle is closed exactly once, by whoever got the stream out of the
+ * table first.
+ *
+ * @return  true when the stream was in the table — the caller closes it
+ */
+static bool protocol_forget_send_stream(meridian_protocol_t* protocol,
+                                        HQUIC stream) {
+    bool found = false;
+    platform_mutex_lock(protocol->lock);
+    for (size_t i = 0; i < protocol->num_send_streams; i++) {
+        if (protocol->send_streams[i].stream == (void*)stream) {
+            protocol->send_streams[i] =
+                protocol->send_streams[protocol->num_send_streams - 1];
+            protocol->num_send_streams--;
+            found = true;
+            break;
+        }
+    }
+    platform_mutex_unlock(protocol->lock);
+    return found;
+}
+
+/**
+ * Closes the send streams of a connection — of every connection when the
+ * connection is NULL.
+ *
+ * The handles go here: a stream the peer never acknowledged is never shut
+ * down, so waiting for the shutdown-complete event would keep the handle
+ * — and the connection, and the registration — open forever. Upstream hit
+ * exactly this: "msquic requires StreamClose after the SHUTDOWN_COMPLETE
+ * callback for every opened/accepted stream, or the handle stays open
+ * inside the registration" (liboffs/src/Network/quic_listener.c:369-375).
+ */
+static void protocol_close_send_streams(meridian_protocol_t* protocol,
+                                         HQUIC connection) {
+    if (protocol == NULL) return;
+
+    for (;;) {
+        void* stream = NULL;
+
+        platform_mutex_lock(protocol->lock);
+        for (size_t i = 0; i < protocol->num_send_streams; i++) {
+            if (connection == NULL ||
+                protocol->send_streams[i].connection == (void*)connection) {
+                stream = protocol->send_streams[i].stream;
+                protocol->send_streams[i] =
+                    protocol->send_streams[protocol->num_send_streams - 1];
+                protocol->num_send_streams--;
+                break;
+            }
+        }
+        platform_mutex_unlock(protocol->lock);
+
+        if (stream == NULL) break;
+
+        /* The stream is out of the table, so this is its one close. */
+        if (protocol->msquic != NULL) {
+            protocol->msquic->StreamClose((HQUIC)stream);
+        }
+    }
+}
+
+/**
+ * The callback for a stream the protocol opened to send on.
+ *
+ * The send is one message on a stream of its own, the way the protocol's
+ * wire format wants it. The handle is closed when the stream is done —
+ * the peer acknowledged the message and the stream is shut down — and
+ * the peer cleanup and the teardown close the ones that never get
+ * there.
+ */
+static QUIC_STATUS QUIC_API
+protocol_send_stream_callback(HQUIC Stream, void* Context,
+                              QUIC_STREAM_EVENT* Event) {
+    meridian_protocol_t* protocol = (meridian_protocol_t*)Context;
+
+    switch (Event->Type) {
+    case QUIC_STREAM_EVENT_SEND_COMPLETE:
+        /* The send context holds the bytes and the buffer that pointed
+         * at them; both go back here. */
+        meridian_stream_send_complete(Event->SEND_COMPLETE.ClientContext);
+        break;
+
+    case QUIC_STREAM_EVENT_SHUTDOWN_COMPLETE:
+        /* The stream is done: it leaves the table and its handle goes.
+         * The one that takes it out of the table owns the close, so the
+         * handle is closed exactly once. */
+        if (protocol != NULL && protocol_forget_send_stream(protocol, Stream)) {
+            if (protocol->msquic != NULL) {
+                protocol->msquic->StreamClose(Stream);
+            }
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    return QUIC_STATUS_SUCCESS;
+}
+
+/**
+ * Sends a message on a stream of its own.
+ *
+ * The stream is opened here and the protocol keeps it: MsQuic wants the
+ * handle closed for every stream the app opened, and the close cannot
+ * wait for the peer to acknowledge the message — a peer that never does
+ * would hold the handle, and the registration, open forever.
+ */
+static int protocol_send_uni(meridian_protocol_t* protocol, HQUIC connection,
+                             const uint8_t* data, size_t len) {
+    if (protocol == NULL || protocol->msquic == NULL || connection == NULL ||
+        data == NULL || len == 0) {
+        return -1;
+    }
+
+    HQUIC stream = NULL;
+    QUIC_STATUS status = protocol->msquic->StreamOpen(
+        connection,
+        QUIC_STREAM_OPEN_FLAG_UNIDIRECTIONAL,
+        protocol_send_stream_callback,
+        protocol,
+        &stream);
+    if (QUIC_FAILED(status)) {
+        log_error("Meridian: StreamOpen (uni) failed: 0x%x", status);
+        return -1;
+    }
+
+    /* The stream goes in the table before it is started: a stream that
+     * is not started cannot finish, and the teardown has to find every
+     * stream the protocol opened. */
+    platform_mutex_lock(protocol->lock);
+    if (protocol->num_send_streams >= MERIDIAN_MAX_SEND_STREAMS) {
+        platform_mutex_unlock(protocol->lock);
+        log_error("Meridian: too many send streams open");
+        protocol->msquic->StreamClose(stream);
+        return -1;
+    }
+    protocol->send_streams[protocol->num_send_streams].stream = (void*)stream;
+    protocol->send_streams[protocol->num_send_streams].connection =
+        (void*)connection;
+    protocol->num_send_streams++;
+    platform_mutex_unlock(protocol->lock);
+
+    status = protocol->msquic->StreamStart(stream, QUIC_STREAM_START_FLAG_NONE);
+    if (QUIC_FAILED(status)) {
+        log_error("Meridian: StreamStart (uni) failed: 0x%x", status);
+        if (protocol_forget_send_stream(protocol, stream)) {
+            protocol->msquic->StreamClose(stream);
+        }
+        return -1;
+    }
+
+    if (meridian_stream_send(protocol->msquic, stream, data, len,
+                              QUIC_SEND_FLAG_FIN) != 0) {
+        if (protocol_forget_send_stream(protocol, stream)) {
+            protocol->msquic->StreamClose(stream);
+        }
+        return -1;
+    }
+
     return 0;
 }
 
@@ -138,12 +315,47 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
         case MERIDIAN_PROTOCOL_PEER_ADDED: {
             meridian_protocol_peer_added_msg_t* p =
                 (meridian_protocol_peer_added_msg_t*)msg->payload;
-            if (protocol->num_connected_peers < 64) {
+            /* The peer is the actor's: the node is built here, from the
+             * address the connection reported, and the table keeps it.
+             * Upstream builds the node on the network actor the same way
+             * ("Use the peer's address from the QUIC connection",
+             * liboffs/src/Network/network.c:1110-1138) — a peer without
+             * an address is a peer the protocol cannot send to. */
+            meridian_node_t* node = NULL;
+            if (p->addr != 0 || p->port != 0) {
+                node = meridian_node_create(p->addr, p->port, NULL);
+            }
+            if (node != NULL && protocol->num_connected_peers < 64) {
                 protocol->connected_peers[protocol->num_connected_peers] =
                     (HQUIC)p->connection;
-                protocol->peer_nodes[protocol->num_connected_peers] =
-                    (meridian_node_t*)p->node;
+                protocol->peer_nodes[protocol->num_connected_peers] = node;
                 protocol->num_connected_peers++;
+            } else {
+                /* The table is full, or the connection had no address to
+                 * read: the peer does not go in, so the node is released
+                 * and the connection is shut down. The handle is released
+                 * by the shutdown-complete path: a connection is closed by
+                 * the callback that says it is done, the way upstream
+                 * closes it (liboffs/src/Network/quic_listener.c:253-255,
+                 * "Connections are closed by their SHUTDOWN_COMPLETE
+                 * callbacks"). */
+                if (node != NULL) {
+                    refcounter_dereference(&node->refcounter);
+                    if (refcounter_count(&node->refcounter) == 0) {
+                        free(node);
+                    }
+                }
+                log_warn("Meridian: inbound peer dropped — the table is full "
+                         "or its address could not be read");
+                HQUIC connection = (HQUIC)p->connection;
+                if (connection != NULL && protocol->msquic != NULL) {
+                    /* The peer is not in the table, so nobody else
+                     * closes this connection: the shutdown, and then the
+                     * handle. */
+                    protocol->msquic->ConnectionShutdown(
+                        connection, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, 0);
+                    protocol->msquic->ConnectionClose(connection);
+                }
             }
             if (actor_reply_complete(&p->reply)) {
                 /* The caller handed the request over: the actor frees it. */
@@ -161,10 +373,17 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
                     node->port == p->port) {
                     HQUIC connection = protocol->connected_peers[i];
                     if (connection != NULL && protocol->msquic != NULL) {
+                        /* The peer goes, so its connection goes: the
+                         * shutdown, and then the handle. The peer is out
+                         * of the table, so nobody else closes it — the
+                         * shutdown-complete path finds no peer and leaves
+                         * the handle alone. */
                         protocol->msquic->ConnectionShutdown(
-                            connection, QUIC_CONNECTION_SHUTDOWN_FLAG_NONE, 0);
+                            connection, QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT, 0);
                         protocol->msquic->ConnectionClose(connection);
                     }
+                    /* The peer's send streams go with the peer. */
+                    protocol_close_send_streams(protocol, connection);
                     protocol->connected_peers[i] = NULL;
                     protocol->peer_nodes[i] = NULL;
                     if (node != NULL) {
@@ -384,12 +603,18 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
         case MERIDIAN_PROTOCOL_PEER_DISCONNECTED: {
             meridian_protocol_peer_disconnected_msg_t* p =
                 (meridian_protocol_peer_disconnected_msg_t*)msg->payload;
-            /* The connection died: the peer leaves the table. Upstream
-             * removes the peer in the handler that owns the connection
-             * ("connection_manager_remove + ConnectionClose also run on
-             * this actor", liboffs/src/Network/network.c:5638). The
-             * connection is already closed, so the peer is only dropped
-             * from the table and its node released. */
+            /* The connection died: the peer leaves the table, and the
+             * handle is released. Upstream does both here — the peer is
+             * removed in the handler that owns the connection, and the
+             * close runs on the same actor ("connection_manager_remove +
+             * ConnectionClose also run on this actor",
+             * liboffs/src/Network/network.c:5638).
+             *
+             * The handle goes here, and only here: the removal path
+             * closes its own, and the teardown closes what is left in
+             * the table. A connection that is not in the table was
+             * already removed — the removal path took it out and closed
+             * it — so its handle is left alone. */
             for (size_t i = 0; i < protocol->num_connected_peers; i++) {
                 if (protocol->connected_peers[i] == (HQUIC)p->connection) {
                     meridian_node_t* node = protocol->peer_nodes[i];
@@ -400,6 +625,13 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
                         if (refcounter_count(&node->refcounter) == 0) {
                             free(node);
                         }
+                    }
+                    /* The peer's send streams go with the peer: their
+                     * handles would otherwise stay open inside the
+                     * registration. */
+                    protocol_close_send_streams(protocol, (HQUIC)p->connection);
+                    if (protocol->msquic != NULL) {
+                        protocol->msquic->ConnectionClose((HQUIC)p->connection);
                     }
                     break;
                 }
@@ -442,8 +674,7 @@ static void meridian_protocol_dispatch(void* state, message_t* msg) {
             for (size_t i = 0; i < protocol->num_connected_peers; i++) {
                 HQUIC connection = protocol->connected_peers[i];
                 if (connection != NULL) {
-                    meridian_stream_send_uni(protocol->msquic, connection,
-                                            p->data, p->len, NULL);
+                    protocol_send_uni(protocol, connection, p->data, p->len);
                 }
             }
             free(p->data);
@@ -841,6 +1072,27 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol) {
             protocol->configuration = NULL;
         }
 
+        /* The rendezvous handle goes before the registration: it holds
+         * connections on that registration, and the registration close
+         * waits for every connection on it to drain. */
+        if (protocol->rendv_handle) {
+            meridian_rendv_handle_destroy(protocol->rendv_handle);
+            protocol->rendv_handle = NULL;
+        }
+
+        /* The send streams the protocol opened: their handles go here.
+         * A stream the peer never acknowledged is never shut down, and
+         * its handle would keep the registration's drain from
+         * finishing. */
+        protocol_close_send_streams(protocol, NULL);
+
+        /* The registration close waits for the connections to drain. It
+         * runs here, on the thread that tears the protocol down, and not
+         * on the actor: the actor's teardown would be waiting for the
+         * connections whose handles the actor itself releases. Upstream
+         * closes the registration in the listener's destroy, on the
+         * caller's thread, after the shutdowns are initiated
+         * (liboffs/src/Network/quic_listener.c:859-881). */
         if (protocol->registration) {
             poseidon_msquic_close_registration("meridian");
             protocol->registration = NULL;
@@ -865,10 +1117,6 @@ void meridian_protocol_destroy(meridian_protocol_t* protocol) {
 
         if (protocol->ring_set) {
             meridian_ring_set_destroy(protocol->ring_set);
-        }
-
-        if (protocol->rendv_handle) {
-            meridian_rendv_handle_destroy(protocol->rendv_handle);
         }
 
         if (protocol->latency_cache) {
@@ -1090,15 +1338,17 @@ static void meridian_protocol_handle_stop(meridian_protocol_t* protocol) {
         meridian_gossip_handle_stop(protocol->gossip_handle);
     }
 
-    // Shutdown and close all peer connections
+    // Initiate the shutdown of every peer connection. The handle is
+    // released by the shutdown-complete path — a connection is closed by
+    // the callback that says it is done (upstream closes it there:
+    // liboffs/src/Network/quic_listener.c:253-255). Closing it here
+    // would release a handle the callback still has to look up.
     for (size_t i = 0; i < protocol->num_connected_peers; i++) {
         if (protocol->connected_peers[i]) {
             protocol->msquic->ConnectionShutdown(
                 protocol->connected_peers[i],
                 QUIC_CONNECTION_SHUTDOWN_FLAG_SILENT,
                 0);
-            protocol->msquic->ConnectionClose(protocol->connected_peers[i]);
-            protocol->connected_peers[i] = NULL;
         }
     }
 
@@ -1109,16 +1359,21 @@ static void meridian_protocol_handle_stop(meridian_protocol_t* protocol) {
         protocol->listener = NULL;
     }
 
-    // Close configuration and registration so msquic stops
-    // delivering callbacks for this protocol's handles
+    // Close the configuration so msquic stops delivering callbacks for
+    // this protocol's handles.
+    //
+    // The registration is NOT closed here. Closing it waits for the
+    // connections to drain, and the connections drain when their handles
+    // are released — by this actor, in the shutdown-complete path. A
+    // close that waits for the actor that is doing the waiting is a
+    // deadlock: the teardown would sit in the registration close while
+    // the handles it waits for wait for this actor. Upstream closes the
+    // registration on the thread that tears the listener down, after the
+    // shutdowns are initiated (liboffs/src/Network/quic_listener.c:859-881),
+    // and the destroy here does the same.
     if (protocol->configuration) {
         protocol->msquic->ConfigurationClose(protocol->configuration);
         protocol->configuration = NULL;
-    }
-
-    if (protocol->registration) {
-        poseidon_msquic_close_registration("meridian");
-        protocol->registration = NULL;
     }
 }
 
@@ -1215,21 +1470,60 @@ static int meridian_protocol_connect_impl(meridian_protocol_t* protocol,
     // Set connection callback
     protocol->msquic->SetCallbackHandler(Connection, ConnectionCallback, protocol);
 
-    // Build remote address
-    QUIC_ADDR RemoteAddr = {0};
-    RemoteAddr.Ipv4.sin_family = AF_INET;
-    RemoteAddr.Ipv4.sin_addr.s_addr = addr;
-    RemoteAddr.Ipv4.sin_port = port;
+    /* MsQuic v2 resolves the server NAME, so the peer has to be named
+     * and not handed a socket address. The address that was built here
+     * and never used was the reason the connection never started —
+     * upstream dials the same way (liboffs/src/Network/quic_listener.c
+     * passes the host string and QUIC_ADDRESS_FAMILY_UNSPEC), and the
+     * relay client was fixed the same way.
+     *
+     * The port MsQuic wants is in host byte order, which is what the
+     * peer table holds. */
+    platform_address_t peer_address;
+    memset(&peer_address, 0, sizeof(peer_address));
+    peer_address.family = PLATFORM_AF_INET;
+    peer_address.inet.addr = addr;  /* network byte order */
+    peer_address.inet.port = port;  /* host byte order */
+    char host[64];
+    if (platform_address_to_string(&peer_address, host, sizeof(host)) != 0) {
+        protocol->msquic->ConnectionClose(Connection);
+        refcounter_dereference(&node->refcounter);
+        if (refcounter_count(&node->refcounter) == 0) {
+            free(node);
+        }
+        return -1;
+    }
+
+    /* MsQuic keeps the server name: it stores it on the connection and
+     * frees it with the connection, on the failure path too. So the name
+     * has to be on the heap — a name on this frame would be freed after
+     * the frame is gone. Upstream hands MsQuic a name it does not own
+     * either (liboffs/src/Network/quic_listener.c:1159-1164); the
+     * memory rule here is the project's own: what a call keeps may not
+     * live on the caller's stack. */
+    size_t name_len = strlen(host) + 1;
+    char* server_name = (char*)malloc(name_len);
+    if (server_name == NULL) {
+        protocol->msquic->ConnectionClose(Connection);
+        refcounter_dereference(&node->refcounter);
+        if (refcounter_count(&node->refcounter) == 0) {
+            free(node);
+        }
+        return -1;
+    }
+    memcpy(server_name, host, name_len);
 
     // Start connection
     Status = protocol->msquic->ConnectionStart(
         Connection,
         protocol->configuration,
-        AF_INET,
-        NULL,  // Let QUIC resolve
+        QUIC_ADDRESS_FAMILY_UNSPEC,
+        server_name,
         port);
 
     if (QUIC_FAILED(Status)) {
+        /* MsQuic took the name: it frees it on this path too, so it is
+         * not freed here. */
         protocol->msquic->ConnectionClose(Connection);
         refcounter_dereference(&node->refcounter);
         if (refcounter_count(&node->refcounter) == 0) {
@@ -1347,8 +1641,7 @@ static int meridian_protocol_send_packet_impl(meridian_protocol_t* protocol,
             node->port == target_port) {
             HQUIC connection = protocol->connected_peers[i];
             if (connection != NULL) {
-                sent = meridian_stream_send_uni(protocol->msquic, connection,
-                                                data, len, NULL);
+                sent = protocol_send_uni(protocol, connection, data, len);
             }
             break;
         }
@@ -1854,13 +2147,47 @@ ListenerCallback(HQUIC Listener, void* Context,
             return Status;
         }
 
+        /* The peer's address: the connection knows where it came from.
+         * MsQuic has it while the connection is live, so it is read here
+         * and carried to the actor — upstream reads it the same way and
+         * hands it over ("Extract peer address from the connection",
+         * liboffs/src/Network/quic_listener.c:545-552). Without it the
+         * peer sits in the table with no address, and the protocol
+         * cannot send to a peer that dialled it.
+         *
+         * The address is read in the Meridian's convention: the IPv4
+         * address in network byte order, the port in host byte order —
+         * the way the relay reports a peer and the way the wire carries
+         * it. */
+        uint32_t peer_addr = 0;
+        uint16_t peer_port = 0;
+        QUIC_ADDR remote_addr;
+        uint32_t remote_addr_len = sizeof(remote_addr);
+        memset(&remote_addr, 0, sizeof(remote_addr));
+        if (QUIC_SUCCEEDED(protocol->msquic->GetParam(
+                Connection, QUIC_PARAM_CONN_REMOTE_ADDRESS,
+                &remote_addr_len, &remote_addr))) {
+            if (remote_addr.Ipv4.sin_family == QUIC_ADDRESS_FAMILY_INET) {
+                peer_addr = remote_addr.Ipv4.sin_addr.s_addr;
+                peer_port = ntohs(remote_addr.Ipv4.sin_port);
+            } else {
+                /* The listener is IPv4, so this cannot happen with the
+                 * address the listener bound. A peer that is not IPv4
+                 * has no address this table can hold, so it is dropped. */
+                log_warn("Meridian: inbound peer is not IPv4 — it is dropped");
+            }
+        } else {
+            log_warn("Meridian: cannot read the inbound peer's address");
+        }
+
         /* The peer table belongs to the protocol's actor: the event is
-         * handed over and the callback moves on. The address is filled in
-         * later, when the peer address is known. */
+         * handed over and the callback moves on. */
         meridian_protocol_peer_added_msg_t* event =
             get_clear_memory(sizeof(meridian_protocol_peer_added_msg_t));
         if (event != NULL) {
             event->connection = Connection;
+            event->addr = peer_addr;
+            event->port = peer_port;
             /* A fire-and-forget post: nobody waits for the answer, so the
              * actor owns the request and frees it. The reply block still
              * has to be initialised and detached — the dispatch reads it,

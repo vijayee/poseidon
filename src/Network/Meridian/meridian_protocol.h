@@ -188,6 +188,21 @@ typedef struct meridian_protocol_t {
     size_t num_active_streams;                  /**< Count of active streams */
     size_t active_streams_cap;                  /**< Allocated capacity for stream entries */
 
+    /* The streams this protocol opened to send on.
+     *
+     * MsQuic wants the handle closed for every stream the app opened, or
+     * it stays open inside the registration and the registration's drain
+     * never finishes — upstream says the same
+     * (liboffs/src/Network/quic_listener.c:369-375). A stream the peer
+     * never acknowledges is never shut down, so the close cannot wait for
+     * the shutdown-complete event: the peer cleanup and the teardown
+     * close what is left. */
+    struct meridian_send_stream_t {
+        void* stream;      /**< The msquic stream handle. */
+        void* connection;  /**< The connection it was opened on. */
+    } send_streams[MERIDIAN_MAX_SEND_STREAMS];
+    size_t num_send_streams;                   /**< Count of open send streams */
+
     platform_mutex_t* lock;                    /**< Thread-safe state access */
     scheduler_pool_t* sched;                  /**< Scheduler pool that runs the actor */
     /* The TLS paths the config named, copied. The caller usually passes

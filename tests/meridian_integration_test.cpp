@@ -244,6 +244,54 @@ TEST_F(MeridianIntegrationTest, FindClosestNode) {
     (void)closest;
 }
 
+TEST_F(MeridianIntegrationTest, InboundPeerJoinsTheTableWithItsAddress) {
+    // Node 0 listens. Node 1 dials it.
+    for (int i = 0; i < 2; i++) {
+        uint16_t port = base_port + i;
+        nodes[i].mutex = platform_mutex_create();
+        nodes[i].port = port;
+
+        ASSERT_EQ(0, setup_node_tls(&nodes[i], i));
+
+        meridian_protocol_config_t config = make_config(port, nodes[i].key_path, nodes[i].cert_path, sched);
+        nodes[i].protocol = meridian_protocol_create(&config);
+        ASSERT_NE(nullptr, nodes[i].protocol);
+        if (!quic_available(nodes[i].protocol)) {
+            GTEST_SKIP() << "QUIC stack unavailable";
+        }
+    }
+
+    platform_sleep_ms(100);
+
+    // Node 1 dials node 0. MsQuic resolves a server NAME, so the dial
+    // has to name the peer — the same way upstream dials
+    // (liboffs/src/Network/quic_listener.c:1159-1164).
+    uint32_t addr = htobe32(0x7F000001);
+    EXPECT_EQ(0, meridian_protocol_connect(nodes[1].protocol, addr, base_port + 0));
+
+    platform_sleep_ms(500);  // the handshake and the listener's post
+
+    // The listening node's peer table carries the peer — with the address
+    // it dialled from. A peer without an address is a peer the protocol
+    // cannot send to, and that is what the listener used to hand over:
+    // the connection and no node at all.
+    size_t num_peers = 0;
+    meridian_node_t** peers = meridian_protocol_get_connected_peers(nodes[0].protocol, &num_peers);
+    ASSERT_NE(nullptr, peers);
+    ASSERT_EQ(1u, num_peers);
+    ASSERT_NE(nullptr, peers[0]);
+
+    EXPECT_EQ(addr, peers[0]->addr);
+    EXPECT_NE(0, peers[0]->port);
+
+    // And the protocol can send to it: the peer is found by its address.
+    uint8_t test_data[4] = {0xde, 0xad, 0xbe, 0xef};
+    EXPECT_EQ(0, meridian_protocol_send_packet(nodes[0].protocol, test_data,
+                                               sizeof(test_data), peers[0]));
+
+    free(peers);
+}
+
 TEST_F(MeridianIntegrationTest, SendPacketBetweenNodes) {
     // Create two connected nodes
     for (int i = 0; i < 2; i++) {

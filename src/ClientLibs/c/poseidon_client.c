@@ -495,10 +495,32 @@ poseidon_client_t* poseidon_client_connect(const char* transport_url) {
         }
         client->quic_connection = connection;
 
-        // Start connection
+        // Start connection. MsQuic keeps the server name: it stores it on
+        // the connection and frees it with the connection, on the failure
+        // path too. So the name has to be on the heap — the name parsed
+        // out of the URL is on this frame, and a frame that is gone is
+        // freed memory.
+        size_t name_len = strlen(host) + 1;
+        char* server_name = (char*)malloc(name_len);
+        if (server_name == NULL) {
+            log_error("quic client: out of memory for the server name");
+            api->ConnectionClose(connection);
+            api->ConfigurationClose(configuration);
+            api->RegistrationClose(registration);
+            platform_condvar_destroy(client->quic_handshake_done);
+            platform_mutex_destroy(client->quic_lock);
+            platform_mutex_destroy(client->lock);
+            free(client);
+            poseidon_msquic_close();
+            return NULL;
+        }
+        memcpy(server_name, host, name_len);
+
         status = api->ConnectionStart(connection, configuration,
-                                       QUIC_ADDRESS_FAMILY_INET, host, port);
+                                       QUIC_ADDRESS_FAMILY_INET, server_name, port);
         if (QUIC_FAILED(status)) {
+            /* MsQuic took the name: it frees it on this path too, so it
+             * is not freed here. */
             log_error("quic client: ConnectionStart failed: 0x%x", status);
             api->ConnectionClose(connection);
             api->ConfigurationClose(configuration);

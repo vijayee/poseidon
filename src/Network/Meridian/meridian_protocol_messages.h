@@ -35,12 +35,24 @@ extern "C" {
  * The listener callback hands this over and moves on: it marks the
  * request orphaned up front, which is the actor's signal that the
  * request is its to free. The connect path waits for the answer
- * instead, so the peer is in the table when connect returns. */
+ * instead, so the peer is in the table when connect returns.
+ *
+ * The address is the one the connection came from. The callback reads
+ * it while the connection is live — MsQuic knows it, and a connection
+ * that is closed cannot be asked — and hands it over; upstream reads
+ * it the same way ("Extract peer address from the connection",
+ * liboffs/src/Network/quic_listener.c:545-552). The actor builds the
+ * node from it, because the peer table is the actor's.
+ *
+ * The address is in the Meridian's convention: the IPv4 address in
+ * network byte order, the port in host byte order — the way the relay
+ * reports a peer (meridian_relay_server.c) and the way the wire
+ * carries it. */
 typedef struct meridian_protocol_peer_added_msg_t {
     actor_reply_t reply;   /**< Must stay first. */
     void* connection;      /**< The msquic connection handle. */
-    void* node;            /**< The peer node (borrowed, its refcount is
-                                held by the table), or NULL. */
+    uint32_t addr;         /**< The peer's address (network byte order). */
+    uint16_t port;         /**< The peer's port (host byte order). */
 } meridian_protocol_peer_added_msg_t;
 
 /* Drop the peer with this address: the actor closes its connection,
